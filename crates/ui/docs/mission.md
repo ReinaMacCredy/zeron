@@ -16,7 +16,7 @@ The agent hands work out with `delegate_task` and plans with `plan`; see [Delega
 
 ## Mission in the composer
 
-Press **⇧⇥** (Shift+Tab) while you type in the composer, or click the **⇧⇥ Mission** key beside the microphone, to turn Mission on. In a narrow window the key folds to a target button. While Mission is on, a **Mission ×** label sits on the composer's top edge; click it, or press **⇧⇥** again, to turn Mission off. With **Mission** on, every message you type starts a mission turn: the agent writes a plan before it does anything else, and the steps run on threads. The composer takes the accent ring, and until the chat has a plan the send button reads **Start mission**.
+Press **⇧⇥** (Shift+Tab) while you type in the composer, or click the **⇧⇥ Mission** key beside the microphone, to turn Mission on. In a narrow window, and while Mission is on, the key folds to a target button. While Mission is on, a **Mission ×** label sits on the composer's top edge; click it, or press **⇧⇥** again, to turn Mission off. With **Mission** on, every message you type starts a mission turn: the agent writes a plan before it does anything else, and the steps run on threads. The composer takes the accent ring, and until the chat has a plan the send button reads **Start mission**.
 
 A row of options opens above the composer's controls while Mission is on:
 

@@ -3136,7 +3136,9 @@ return ui.component(function(props: Props): Node
 			end, ui.row {
 				items = "center",
 				gap = "$space.2",
-				if mission then ui.show(mission_offered, ui.show(narrow, mission_chip(true), mission_chip(false))) else nil,
+				if mission then ui.show(mission_offered, ui.show(function(): boolean
+					return narrow() or mission_on()
+				end, mission_chip(true), mission_chip(false))) else nil,
 				if spoken then spoken.mic() else ui.show(function(): boolean
 					return dictating() or (props.on_dictate ~= nil and voice_on:get() ~= false)
 				end, mic),
