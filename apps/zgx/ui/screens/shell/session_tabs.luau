@@ -717,6 +717,7 @@ local function tree_badge(id: string): Node
 		return ui.row {
 			id = `session-tab-{id}-tree`,
 			shrink = 0,
+			relative = true,
 			h = 16,
 			ml = ui.raw(8, "Zeron's tab's gaps"),
 			px = "$space.1",
