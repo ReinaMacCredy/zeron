@@ -92,7 +92,7 @@ test("scrolled up, the view holds while a reply streams", function()
 	end
 	settle(app)
 	expect(math.abs(app:state("chat.transcript.offset") - at) < 1).to_be(true)
-	expect(app:wait('role:button "Jump to latest"', { text = "New reply", timeout_ms = 2000 })).to_be(true)
+	expect(app:wait('role:button "New reply"', { timeout_ms = 2000 })).to_be(true)
 end)
 
 test("each chat keeps its own draft; the composer stays one node with the keys", function()

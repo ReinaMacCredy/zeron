@@ -65,8 +65,10 @@ local function glyph_in(app: any, scope: string, name: string, button: Box): Box
 	error(`no glyph in {name}`)
 end
 
--- The two sides mirrored, with `expand` (its name as it stands now) in `scope`.
-local function expect_mirrored(app: any, scope: string, expand: string)
+-- The two sides mirrored, with `expand` its name as it stands now.
+local function expect_mirrored(app: any, expand: string)
+	-- (Its own tree: the shell's stops at a budget of nodes, which the page can spend first.)
+	local scope = "#panel-expand"
 	local toggle = must(app, "#titlebar", '"Toggle sidebar"')
 	local panel = must(app, "#titlebar", '"Panel"')
 	local arrows = must(app, scope, expand)
@@ -122,9 +124,9 @@ end
 
 test("Expand stands off the panel toggle as Back does off the sidebar toggle, level with them", function()
 	local app = open_panel()
-	expect_mirrored(app, "#shell", '"Expand panel"')
+	expect_mirrored(app, '"Expand panel"')
 	open_files(app)
-	expect_mirrored(app, "#shell", '"Expand panel"')
+	expect_mirrored(app, '"Expand panel"')
 	expect(app:error()).to_be_nil()
 end)
 
@@ -133,13 +135,13 @@ test("the corner holds with the panel expanded and with the sidebar collapsed", 
 	open_files(app)
 	app:click("#panel-expand")
 	settled(app)
-	expect_mirrored(app, "#shell", '"Collapse panel"')
+	expect_mirrored(app, '"Collapse panel"')
 	app:click('#titlebar >> role:button "Toggle sidebar"')
 	settled(app)
-	expect_mirrored(app, "#shell", '"Collapse panel"')
+	expect_mirrored(app, '"Collapse panel"')
 	app:click("#panel-expand")
 	settled(app)
-	expect_mirrored(app, "#shell", '"Expand panel"')
+	expect_mirrored(app, '"Expand panel"')
 	expect(app:error()).to_be_nil()
 end)
 
