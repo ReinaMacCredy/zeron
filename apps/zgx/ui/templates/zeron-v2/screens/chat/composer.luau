@@ -131,6 +131,7 @@ local FIELDS = { "model", "effort", "fast", "options", "access", "plan" }
 -- Past ds/dialog's leaving and its modal's going (which gives the keys back
 -- to what had them), the draft takes them.
 local DIALOG_OUT = 350
+local STARTING_AFTER = 400
 -- Where a new chat is made, kept with them.
 local WHERE = { "checkout", "device", "project", "branch" }
 -- Whether two choices are the same: the options' picks (tables) by their
@@ -1191,7 +1192,13 @@ local function Composer(): Node
 				end)
 			return
 		end
-		own_notice:set { key = "chat.composer.starting", spinner = true }
+		-- (Only once making it takes a while: said at once, its line pushed a new chat's composer down as it sent.)
+		local making = true
+		ui.after(STARTING_AFTER, function()
+			if making then
+				own_notice:set { key = "chat.composer.starting", spinner = true }
+			end
+		end)
 		-- Made where the project is (or on the device chosen), then its first
 		-- message run there, as the shipping app starts one (the send sets
 		-- its config: the model, effort, access and plan chosen here): in
@@ -1210,6 +1217,7 @@ local function Composer(): Node
 				cloud = plan.cloud,
 			})
 			:after(function(made: any)
+				making = false
 				local id = if plan.cloud and type(made) == "table" then made.id else made
 				if type(id) ~= "string" then
 					failed()
@@ -1239,6 +1247,7 @@ local function Composer(): Node
 				route.open_session(id)
 				store.send(req):after(function() end, function(_e: any) end)
 			end, function(e: any)
+				making = false
 				-- (A Cloud chat's reason is said in words; an outcome word isn't.)
 				local why = if plan.cloud and type(e) == "table" and type(e.message) == "string" and string.find(e.message, " ", 1, true)
 					then e.message

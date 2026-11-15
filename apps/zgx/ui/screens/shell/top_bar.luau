@@ -58,7 +58,8 @@ end
 
 function M.tabs_start(): number
 	local nav = M.nav_left(ds.TitleBar.nav_base())
-	return nav + CONTROL + GAP + CONTROL + (GAP + CONTROL) * M.new_tab() + PAST_NAV
+	-- (New tab's room whether it shows or not: the tabs hold still as it comes in on a new chat sent.)
+	return nav + CONTROL + GAP + CONTROL + (GAP + CONTROL) * (1 - reveal:get()) + PAST_NAV
 end
 
 return M

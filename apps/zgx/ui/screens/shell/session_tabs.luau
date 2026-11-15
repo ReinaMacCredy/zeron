@@ -1315,6 +1315,8 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		return shown:get()
 	end, function(id: string): string
 		return id
+	end, function(id: string): boolean
+		return id == route.from_new
 	end)
 	local function over_band(_: any, e: any)
 		local d = drag:peek()

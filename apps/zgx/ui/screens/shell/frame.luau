@@ -170,6 +170,8 @@ local function blurred(path: string, radius: number): string?
 	return nil
 end
 
+local HERO_OUT = 260
+
 local function key_of(kind: string?, radius: number): string?
 	local image = appearance.image:get()
 	if not image or not kind then
@@ -182,14 +184,15 @@ local function key_of(kind: string?, radius: number): string?
 	if not src then
 		return nil
 	end
+	-- (The picture and where it's cut alone: a chat's that stands as a new chat's did is never made again.)
 	if kind == "chat" then
-		return `chat:0.5:0.5:1:{src}`
+		return `0.5:0.5:1:{src}`
 	end
-	return `hero:{image.x}:{image.y}:{image.zoom}:{src}`
+	return `{image.x}:{image.y}:{image.zoom}:{src}`
 end
 
 local function content_of(key: string): Node
-	local x, y, zoom, path = string.match(key, "^%a+:([^:]*):([^:]*):([^:]*):(.*)$")
+	local x, y, zoom, path = string.match(key, "^([^:]*):([^:]*):([^:]*):(.*)$")
 	local image = appearance.image:peek()
 	return ds.wallpaper.Picture { src = path or "", w = if image then image.w else 1, h = if image then image.h else 1, x = tonumber(x), y = tonumber(y), zoom = tonumber(zoom) }
 end
@@ -481,23 +484,34 @@ local function card_picture(): Node
 		h = function(): number
 			return art.window:get().h
 		end,
-		ui.show(function(): boolean
-			return M.page_art:get() == "hero"
-		end, M.Layer {
-			id = "page-art",
-			kind = function(): string?
-				return if M.page_art:get() == "hero" then "hero" else nil
-			end,
-			cutout = function(): any
-				local _ = composer_surface.moved:get()
-				local el = composer_surface.element
-				local w, h = el and el.width, el and el.height
-				if not el or not el.x or not w or not h then
-					return nil
-				end
-				local hero = M.hero_height(art.window:get().h)
-				return { x = el.x, y = el.y, w = w, h = math.max(el.y + h, hero) - el.y, radius = COMPOSER_RADIUS, feather = math.clamp(hero * 0.52, 120, 280), clearance = 8 }
-			end,
+		-- (Leaving, it fades as the chat's picture comes in over it: gone at once, the card stood bare between them.)
+		ui.presence(function(): string?
+			return if M.page_art:get() == "hero" then "hero" else nil
+		end, function(): Node
+			return M.Layer {
+				id = "page-art",
+				kind = function(): string?
+					return "hero"
+				end,
+				cutout = function(): any
+					local _ = composer_surface.moved:get()
+					local el = composer_surface.element
+					local w, h = el and el.width, el and el.height
+					if not el or not el.x or not w or not h then
+						return nil
+					end
+					local hero = M.hero_height(art.window:get().h)
+					return { x = el.x, y = el.y, w = w, h = math.max(el.y + h, hero) - el.y, radius = COMPOSER_RADIUS, feather = math.clamp(hero * 0.52, 120, 280), clearance = 8 }
+				end,
+			}
+		end, {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			pointer_events = "none",
+			exit = motion.transition({ opacity = 0, duration = HERO_OUT, ease = "in(2)" }),
 		}),
 		M.Layer {
 			id = "page-chat-art",

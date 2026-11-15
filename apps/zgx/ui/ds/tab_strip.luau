@@ -580,7 +580,7 @@ export type Motion = {
 	apply: (props: { [any]: any }, key: string, natural: (() -> number)?) -> { [any]: any },
 }
 
-function M.motion(items: () -> { any }, key: (item: any) -> string): Motion
+function M.motion(items: () -> { any }, key: (item: any) -> string, at_once: ((k: string) -> boolean)?): Motion
 	local clock = ui.use_state(0)
 	local version = ui.use_state(0)
 	local measured = ui.use_state({} :: { [string]: number })
@@ -672,7 +672,7 @@ function M.motion(items: () -> { any }, key: (item: any) -> string): Motion
 				if gone[k] then
 					gone[k] = nil
 					move(k, 1)
-				elseif not had[k] then
+				elseif not had[k] and not (at_once and at_once(k)) then
 					-- (From about where Chrome's first frame has it: a quarter of the way, there to click.)
 					move(k, 1, 0.25)
 				end

@@ -463,11 +463,15 @@ M.projects = steady(function(): { Choice }
 	return out
 end)
 
+-- The session last opened from a new chat's page: its tab takes the draft's place.
+M.from_new = nil :: string?
+
 function M.open_session(id: string)
 	local r = at()
 	if r.name == "session" and r.params.id == id then
 		return
 	end
+	M.from_new = if r.name == "home" then id else nil
 	go("session", { id = id })
 end
 

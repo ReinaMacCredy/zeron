@@ -2201,6 +2201,14 @@ return function(props: Props): Node
 			art.page_left:set(left - gap)
 		end
 	end)
+	-- (The bar's controls at their widest so far: the tabs hold still as Review and the branch's lines come and go.)
+	local actions_room = ui.state("shell_titlebar_actions_room", 0)
+	ui.effect(function()
+		local w = art.actions_w:get()
+		if w > actions_room:peek() then
+			actions_room:set(w)
+		end
+	end)
 	-- Two cards, the page and its panel, set in from the window's edges and
 	-- the sidebar by the gap, the title bar's line inside them. The window
 	-- round them, along the title bar's strip (over them, beside them and
@@ -2270,7 +2278,7 @@ return function(props: Props): Node
 			end,
 			-- (Clear of the panel toggle, and of Expand while the panel's open.)
 			right = function(): number
-				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right() + math.max(art.actions_w:get() - 24, 0)
+				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right() + math.max(actions_room:get() - 24, 0)
 				-- (The tabs are the page card's: none over the panel beside it.)
 				local room = tabs_room:get()
 				return math.max(toggle + (if shown:get() then EXPAND + 8 else 0), if room > 0 then room + INSET + WINDOW_EDGE else 0)
