@@ -292,7 +292,7 @@ local function service(id: string): any
 	-- ── Agents: usage, accounts, models, and their events ─────────────────
 	-- Each asks the engine, which checks this device's grants for this
 	-- plugin ("usage.read", "accounts.read", "accounts.switch",
-	-- "models.read", "models.set"). Each is a promise; a refusal fails it
+	-- "models.read", "models.set", "messages.send", "projects.create"). Each is a promise; a refusal fails it
 	-- with "<reason>: <words>" (paced, loop, not_allowed, …).
 
 	-- `fn(data, event)` for each `event` on this device (usage.threshold,
@@ -388,8 +388,16 @@ local function service(id: string): any
 
 	-- A new chat, sent its first message ("messages.send"): a promise of
 	-- { status, chat, id }, `chat` the new chat's id.
-	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string? }): any
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string?, sandbox: string? }): any
 		return agents("new_chat", s)
+	end
+
+	function M.projects(): any
+		return agents("projects", {})
+	end
+
+	function M.new_project(s: { path: string, name: string? }): any
+		return agents("new_project", s)
 	end
 
 	-- The question (or approval) a chat waits on, answered ("messages.send"):

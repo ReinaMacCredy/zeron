@@ -1191,7 +1191,7 @@ return function(id: string): any
 	-- ── Agents: usage, accounts, models, and their events ─────────────────
 	-- Each asks the engine, which checks what this device (or `device`,
 	-- another of yours) allowed this plugin: "usage.read", "accounts.read",
-	-- "accounts.switch", "accounts.pin", "models.read", "models.set". Each is a promise; a
+	-- "accounts.switch", "accounts.pin", "models.read", "models.set", "messages.send", "projects.create". Each is a promise; a
 	-- refusal fails it with "<reason>: <words>" (`zeron.reason(err)`:
 	-- not_allowed, paced, already, loop, not_found, offline, …).
 	local function agents(op: string, args: any?, device: string?): any
@@ -1276,7 +1276,7 @@ return function(id: string): any
 	-- A new chat, sent its first message ("messages.send"): `device`,
 	-- `project` (a project's id), `harness`, `model`, `effort`, `cwd` as you'd
 	-- pick them. A promise of { status, chat, id }, `chat` the new chat's id.
-	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string? }): any
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string?, sandbox: string? }): any
 		return agents("new_chat", {
 			prompt = s.prompt,
 			device = s.device,
@@ -1285,7 +1285,12 @@ return function(id: string): any
 			model = s.model,
 			effort = s.effort,
 			cwd = s.cwd,
+			sandbox = s.sandbox,
 		})
+	end
+
+	function M.new_project(s: { path: string, name: string? }): any
+		return agents("new_project", s)
 	end
 
 	-- The question (or approval) a chat waits on, answered ("messages.send"):

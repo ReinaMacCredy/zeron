@@ -15,6 +15,7 @@
 //! | `models.read` | read a harness's models and a chat's model; model events |
 //! | `models.set` | set a chat's model, effort and options |
 //! | `messages.send` | send a chat a message, start a chat, answer a question, as the composer does |
+//! | `projects.create` | make an existing folder on this device a project |
 //!
 //! Turn and input events need `sessions.read`; a turn's reply rides its
 //! `turn.finished` with `messages.read`. A field a plugin wasn't allowed is
@@ -52,7 +53,7 @@ use futures::future::BoxFuture;
 use serde_json::{Map, Value as Json, json};
 use zeron_proto::{
     AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel,
-    Session, SessionStatus, UserInputAnswer, run_errors::ProviderProblem,
+    Session, SessionStatus, Space, UserInputAnswer, run_errors::ProviderProblem,
 };
 
 pub const USAGE_READ: &str = "usage.read";
@@ -62,6 +63,7 @@ pub const ACCOUNTS_PIN: &str = "accounts.pin";
 pub const MODELS_READ: &str = "models.read";
 pub const MODELS_SET: &str = "models.set";
 pub const MESSAGES_SEND: &str = "messages.send";
+pub const PROJECTS_CREATE: &str = "projects.create";
 const FILES_READ: &str = "files.read";
 const SESSIONS_READ: &str = "sessions.read";
 
@@ -190,6 +192,14 @@ pub trait AgentHost: Send + Sync + 'static {
     fn create_chat(&self, _new: &NewChat) -> Result<(), String> {
         Err("Starting chats isn't available on this device".into())
     }
+    /// This device's projects.
+    fn projects(&self) -> Result<Vec<Space>, String> {
+        Err("Listing projects isn't available on this device".into())
+    }
+    /// A local project, reusing the row for its device and path.
+    fn create_project(&self, _new: &NewProject) -> Result<ProjectCreated, String> {
+        Err("Creating projects isn't available on this device".into())
+    }
     /// The request a chat's question (or approval) waits on, latest first.
     fn pending_input(&self, _chat: &str) -> Result<Option<String>, String> {
         Ok(None)
@@ -260,6 +270,20 @@ pub struct NewChat {
     pub project: Option<String>,
     pub config: ChatConfig,
     pub cwd: Option<String>,
+}
+
+/// A folder a plugin makes a project (`zeron.new_project`).
+pub struct NewProject {
+    pub path: String,
+    pub name: Option<String>,
+}
+
+/// The project for a folder, whether newly created or already present.
+#[derive(Debug, serde::Serialize)]
+pub struct ProjectCreated {
+    pub id: String,
+    pub path: String,
+    pub existed: bool,
 }
 
 /// What a plugin was allowed on this device, while it's on.
@@ -740,6 +764,22 @@ impl Agents {
                 }
                 self.send_message(&by, &args)
             }
+            "projects" => {
+                need(SESSIONS_READ, "see your projects")?;
+                let projects = self
+                    .host()?
+                    .projects()
+                    .map_err(|why| Refused::new(reason::FAILED, why))?;
+                Ok(Json::Object(projects.into_iter().map(|p| {
+                    let name = p.name.unwrap_or_else(|| std::path::Path::new(&p.path)
+                        .file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.path.clone()));
+                    (p.id.clone(), json!({ "id": p.id, "name": name, "path": p.path, "device": p.device_id }))
+                }).collect()))
+            }
+            "new_project" => {
+                need(PROJECTS_CREATE, "create projects")?;
+                self.new_project(&by, &args)
+            }
             "new_chat" => {
                 need(MESSAGES_SEND, "start chats")?;
                 self.new_chat(&by, &args).await
@@ -1152,12 +1192,28 @@ impl Agents {
     }
 
     /// `zeron.new_chat { prompt, device?, project?, harness?, model?, effort?,
-    /// cwd? }`: a chat made as the composer makes one, and its first
+    /// cwd?, sandbox? }`: a chat made as the composer makes one, and its first
     /// message. Its id.
     async fn new_chat(&self, by: &By, args: &Json) -> Result<Json, Refused> {
         let prompt = args.get("prompt").and_then(Json::as_str).unwrap_or_default().trim().to_owned();
         if prompt.is_empty() {
             return Err(Refused::new(reason::BAD_CALL, "A new chat needs its first message (prompt)"));
+        }
+        let sandbox = match args.get("sandbox") {
+            None => zeron_proto::SandboxLevel::WorkspaceWrite,
+            Some(value) => serde_json::from_value::<zeron_proto::SandboxLevel>(value.clone())
+                .map_err(|_| {
+                    Refused::new(
+                        reason::BAD_CALL,
+                        "sandbox must be read-only or workspace-write",
+                    )
+                })?,
+        };
+        if sandbox == zeron_proto::SandboxLevel::DangerFullAccess {
+            return Err(Refused::new(
+                reason::BAD_CALL,
+                "Plugins cannot start chats with a sandbox wider than workspace-write",
+            ));
         }
         let host = self.host()?;
         let harness = match provider_arg(args, "harness")? {
@@ -1192,12 +1248,16 @@ impl Agents {
                 model,
                 reasoning,
                 model_options: Map::new(),
-                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                sandbox,
                 instructions: String::new(),
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
-                access: Default::default(),
+                access: if sandbox == zeron_proto::SandboxLevel::ReadOnly {
+                    zeron_proto::AccessMode::Supervised
+                } else {
+                    Default::default()
+                },
                 plan: false,
                 mission: None,
             },
@@ -1211,6 +1271,47 @@ impl Agents {
         self.attribute(by, &new.chat_id, &id, Delivery::Run);
         tracing::info!(plugin = %by.plugin, chat = %new.chat_id, "plugins: started a chat");
         Ok(json!({ "status": "sent", "chat": new.chat_id, "id": id }))
+    }
+
+    /// `zeron.new_project { path, name? }`: this device's project for a folder.
+    fn new_project(&self, by: &By, args: &Json) -> Result<Json, Refused> {
+        let path = args.get("path").and_then(Json::as_str).ok_or_else(|| {
+            Refused::new(
+                reason::BAD_CALL,
+                "A project needs an existing absolute directory (path)",
+            )
+        })?;
+        if !std::path::Path::new(path).is_absolute() || !std::path::Path::new(path).is_dir() {
+            return Err(Refused::new(
+                reason::BAD_CALL,
+                "The project's path must be an existing absolute directory",
+            ));
+        }
+        let path = std::fs::canonicalize(path)
+            .map_err(|why| Refused::new(reason::BAD_CALL, format!("Cannot resolve the project's directory: {why}")))?;
+        let path = path.to_str()
+            .ok_or_else(|| Refused::new(reason::BAD_CALL, "The project's path must be valid text"))?
+            .to_owned();
+        let name = match args.get("name") {
+            None => None,
+            Some(Json::String(name)) => Some(name.clone()),
+            Some(_) => {
+                return Err(Refused::new(
+                    reason::BAD_CALL,
+                    "The project's name must be words",
+                ));
+            }
+        };
+        self.loop_guard(by)?;
+        let project = self
+            .host()?
+            .create_project(&NewProject {
+                path,
+                name,
+            })
+            .map_err(|why| Refused::new(reason::FAILED, why))?;
+        self.record(by, json!({ "op": "new_project", "project": project.id, "path": project.path, "existed": project.existed }));
+        Ok(json!(project))
     }
 
     /// `zeron.answer { chat, answers, request? }`: a chat's question (or

@@ -4839,7 +4839,9 @@
         "title_name": "步骤 {n} 的标题",
         "title_placeholder": "步骤标题",
         "spec_name": "步骤 {n} 的说明",
-        "spec_placeholder": "这个步骤要做什么"
+        "spec_placeholder": "这个步骤要做什么",
+        "default_model": "默认模型",
+        "model": "{title} 的模型"
       }
     }
   },
@@ -5389,6 +5391,10 @@
           "title": "在此设备上后台运行",
           "title_on": "在 {device} 上后台运行",
           "detail": "让它的窗口和你的智能体可以从你的任何设备使用它。它只会做你另外允许的事。"
+        },
+        "projects_create": {
+          "title": "从此设备上的文件夹创建项目",
+          "detail": "它可以将已有文件夹添加为项目并为其命名。已添加的文件夹会保留原有项目。"
         }
       },
       "author": {

@@ -68,6 +68,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `models.read` | read each harness's models, efforts and options, and a chat's model |
 | `models.set` | set a chat's model, effort and options, and what new chats start with. Always asked, even for your own plugins |
 | `messages.send` | send a chat a message, start a chat, answer a chat's question, as you would from the composer. Always asked, even for your own plugins. See [Sending messages](#sending-messages) |
+| `projects.create` | make an existing folder on this device a project, or reuse the project for it. Always asked, even for your own plugins. |
 
 ## Reaching the network
 
@@ -491,10 +492,13 @@ With `messages.send`, a plugin talks to your agents as you do: it sends a chat a
 | call | what | needs |
 |---|---|---|
 | `zeron.send_message { chat, text, attachments?, mode? }` | a message into `chat`: a turn of its own when nothing runs; while a turn runs, queued for its end (`mode = "queue"`, the default) or steering it (`"steer"`). A promise of `{ status = "sent", chat, delivery = "run" \| "queue" \| "steer", id }` | `messages.send`; `attachments` (files' paths on the chat's device) also `files.read` |
-| `zeron.new_chat { prompt, device?, project?, harness?, model?, effort?, cwd? }` | a new chat, sent `prompt` as its first message: on `device` or in `project` (a project's id), with `harness` (else this device's default) and `model` and `effort` from its catalog. A promise of `{ status, chat, id }`: `chat` is the new chat's id | `messages.send` |
+| `zeron.new_chat { prompt, device?, project?, harness?, model?, effort?, cwd?, sandbox? }` | a new chat, sent `prompt` as its first message: on `device` or in `project` (a project's id), with `harness` (else this device's default) and `model` and `effort` from its catalog. `sandbox` is `"workspace-write"` by default, or `"read-only"`, which also chooses Supervised (ask before commands and file changes); `"danger-full-access"` is refused with `bad_call`. A promise of `{ status, chat, id }`: `chat` is the new chat's id | `messages.send` |
+| `zeron.new_project { path, name? }` | makes an existing absolute directory on this device a project. A promise of `{ id, path, existed }`: paths are resolved to their canonical directory; a folder already a project returns its id and `existed = true`, keeping its name and stored path | `projects.create` |
+| `zeron.projects()` (service) | this device's projects: a promise of `{ [id] = { id, name, path, device } }`, so a service can match one by name. In a window, the existing call reads the live projects by id directly | `sessions.read` |
 | `zeron.answer { chat, answers, request? }` | the question (or approval) `chat` waits on, answered as you would: `answers = { [question] = label }` (or `{ labels }`, or a list of `{ question, labels }`); `request` names one, else the latest. A promise of `{ status = "answered", chat, request }` | `messages.send` |
 
 - **What it sends is yours.** Your agents read it as your message, and do what it says, so `messages.send` is always asked, even for your own plugins, and the consent sheet says so plainly.
+- **Project creation says who asked.** Each `new_project` is recorded as the plugin's in `plugin_status` (`agents.actions`).
 - **Who sent it is kept.** Each message a plugin sends is recorded as its (`{ plugin, name }`) beside the chat's transcript, synced with the chat, and in `plugin_status` (`agents.actions`). The transcript shows it as any message.
 - **Its turns say so.** The turn your message sets off (or, queued, the next one) is told with your `by`: `turn.started`, `chat.awaiting_input`, `turn.finished`, `turn.errored`.
 - **A loop is stopped**, as with switches: sending on your own message's `turn.finished`, 16 times in a row, has the next send refused (`loop`), and your row in Settings → Plugins says so. A send on something else (your own turn ending, say) starts the count over. How often you send never counts.
@@ -614,7 +618,7 @@ A plugin travels as its folder, signed. The person installs it with Settings →
 Zeron checks the signature over every file before anything is written, so an unsigned or changed plugin is refused.
 
 When installing or updating fails, the error reads `"<reason>: <words>"`, for example `rate_limited: GitHub is turning away requests…`. The reason is a stable word (`git_missing`, `repo_unreadable`, `rate_limited`, `release_not_found`, `no_package`, `download_failed`, `tampered`, `other_signer`, `not_newer`, …); Zeron's window says each one in the person's language. `rate_limited` means GitHub answered 403 or 429: wait, or sign in with `gh auth login` (Zeron looks up releases as you when `gh` is signed in, or `GITHUB_TOKEN`/`GH_TOKEN` is set). `git_missing` means installing from a repository needs git on that device; a release or a `.zeron-plugin` file doesn't.
-- **Signed with this device's key, installed from Zeron's window:** what it does inside its sandbox is allowed at once. Anything outside it (`commands`, `native`, `service`, `devices`, `ui.replace`, `accounts.switch`, `models.set`, `messages.send`) waits for the person. Installed by an agent, it waits.
+- **Signed with this device's key, installed from Zeron's window:** what it does inside its sandbox is allowed at once. Anything outside it (`commands`, `native`, `service`, `devices`, `ui.replace`, `accounts.switch`, `models.set`, `messages.send`, `projects.create`) waits for the person. Installed by an agent, it waits.
 - **Signed by anyone else:** it waits until the person allows it in Zeron. The reply says `waiting`; you can't allow it for them.
 - **An update:** it must be signed by the same key as the installed version, or by another live key of the same account (the author on a new machine; an old key revoked still counts as theirs). One signed by a new key installs but waits for the person to allow it again. One that asks for a new permission still installs, but waits for the person to allow just that.
 - **Removing a plugin** (Settings) takes away its folder, what it stored, its pages and its placements.

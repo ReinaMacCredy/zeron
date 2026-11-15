@@ -1593,15 +1593,38 @@ impl WorkspaceHost {
         name: Option<String>,
         git_detected: bool,
     ) -> Result<(), EngineError> {
+        self.create_space_resolved(space_id, device_id, path, name, git_detected)
+            .map(drop)
+    }
+
+    /// The space for a device's folder, made when there is none: `true` when
+    /// it was there already (by id, by path, or here by the same directory
+    /// under another spelling).
+    pub(crate) fn create_space_resolved(
+        &self,
+        space_id: &str,
+        device_id: &str,
+        path: &str,
+        name: Option<String>,
+        git_detected: bool,
+    ) -> Result<(Space, bool), EngineError> {
+        let same = |s: &Space| s.id == space_id || (s.device_id == device_id && s.path == path);
         let spaces = self.read(|doc| doc.read_spaces())?;
-        if spaces
-            .iter()
-            .any(|s| s.id == space_id || (s.device_id == device_id && s.path == path))
-        {
-            return Ok(());
+        let canonical = (device_id == self.device_id())
+            .then(|| std::fs::canonicalize(path).ok())
+            .flatten();
+        let alias = |s: &Space| {
+            s.device_id == device_id
+                && canonical.as_ref().is_some_and(|c| std::fs::canonicalize(&s.path).ok().as_ref() == Some(c))
+        };
+        if let Some(space) = spaces.into_iter().find(|s| same(s) || alias(s)) {
+            return Ok((space, true));
         }
-        self.mutate(|doc| {
-            doc.upsert_space(&Space {
+        self.mutate(|doc| -> Result<_, EngineError> {
+            if let Some(space) = doc.read_spaces()?.into_iter().find(|s| same(s)) {
+                return Ok((space, true));
+            }
+            let space = Space {
                 id: space_id.to_string(),
                 device_id: device_id.to_string(),
                 path: path.to_string(),
@@ -1613,9 +1636,10 @@ impl WorkspaceHost {
                 github_repo: None,
                 icon: None,
                 created_at: Utc::now(),
-            })
-        })?;
-        Ok(())
+            };
+            doc.upsert_space(&space)?;
+            Ok((space, false))
+        })
     }
 
     /// A project that lives only on Cloud: owned by the logical Cloud device

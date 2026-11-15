@@ -4839,7 +4839,9 @@
         "title_name": "Title of step {n}",
         "title_placeholder": "Step title",
         "spec_name": "Spec of step {n}",
-        "spec_placeholder": "What this step should do"
+        "spec_placeholder": "What this step should do",
+        "default_model": "Default model",
+        "model": "Model of {title}"
       }
     }
   },
@@ -5389,6 +5391,10 @@
           "title": "Run in the background on this device",
           "title_on": "Run in the background on {device}",
           "detail": "So its windows and your agents can use it from any of your devices. It does only what else you allow it."
+        },
+        "projects_create": {
+          "title": "Create projects from folders on this device",
+          "detail": "It can add an existing folder as a project and choose its name. A folder already added keeps its project."
         }
       },
       "author": {

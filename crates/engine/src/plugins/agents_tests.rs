@@ -101,6 +101,7 @@ pub(crate) struct Host {
     /// Messages delivered: (chat, text, attachments, how).
     pub(crate) delivered: Mutex<Vec<(String, String, Vec<String>, Delivery)>>,
     pub(crate) created: Mutex<Vec<NewChat>>,
+    pub(crate) projects: Mutex<Vec<Space>>,
     /// The question each chat waits on.
     pub(crate) pending: Mutex<HashMap<String, String>>,
     pub(crate) answered: Mutex<Vec<(String, String, Vec<UserInputAnswer>)>>,
@@ -157,6 +158,33 @@ impl AgentHost for Host {
         let mut delivered = lock(&self.delivered);
         delivered.push((chat.into(), text.into(), attachments, how));
         Ok(format!("m{}", delivered.len()))
+    }
+
+    fn projects(&self) -> Result<Vec<Space>, String> {
+        Ok(lock(&self.projects).clone())
+    }
+
+    fn create_project(&self, new: &NewProject) -> Result<ProjectCreated, String> {
+        let mut projects = lock(&self.projects);
+        if let Some(project) = projects.iter().find(|p| p.path == new.path || std::fs::canonicalize(&p.path).ok().as_deref() == Some(std::path::Path::new(&new.path))) {
+            return Ok(ProjectCreated {
+                id: project.id.clone(),
+                path: new.path.clone(),
+                existed: true,
+            });
+        }
+        let project: Space = serde_json::from_value(json!({
+            "id": crate::new_id(), "deviceId": "dev-1", "path": new.path, "name": new.name,
+            "gitDetected": false, "createdAt": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        let result = ProjectCreated {
+            id: project.id.clone(),
+            path: project.path.clone(),
+            existed: false,
+        };
+        projects.push(project);
+        Ok(result)
     }
 
     fn create_chat(&self, new: &NewChat) -> Result<(), String> {
@@ -880,16 +908,96 @@ async fn messages_a_new_chat_is_made_and_sent_its_first_message() {
     assert_eq!(new.chat_id, id);
     assert_eq!((new.project.as_deref(), new.cwd.as_deref(), new.device.as_deref()), (Some("atlas"), Some("/work"), None));
     assert_eq!(new.config.harness, HarnessId::ClaudeCode, "the default harness");
+    assert_eq!(new.config.sandbox, SandboxLevel::WorkspaceWrite);
     assert_eq!((new.config.model.as_deref(), new.config.reasoning), (Some("sonnet"), Some(ReasoningLevel::High)));
     assert_eq!(f.delivered(), [(id.clone(), "Fix the build".to_string(), vec![], Delivery::Run)]);
     assert_eq!(lock(&f.host.sent_by)[0].0, id);
     for (args, why) in [
         (json!({ "op": "new_chat", "prompt": "" }), reason::BAD_CALL),
+        (json!({ "op": "new_chat", "prompt": "x", "sandbox": "danger-full-access" }), reason::BAD_CALL),
+        (json!({ "op": "new_chat", "prompt": "x", "sandbox": "unknown" }), reason::BAD_CALL),
         (json!({ "op": "new_chat", "prompt": "x", "model": "gpt" }), reason::NOT_FOUND),
         (json!({ "op": "new_chat", "prompt": "x", "harness": "nope" }), reason::NOT_FOUND),
         (json!({ "op": "new_chat", "prompt": "x", "effort": "max" }), reason::NOT_FOUND),
     ] {
         assert_eq!(f.op("p", args.clone()).await.unwrap_err().reason, why, "{args}");
+    }
+    assert_eq!(
+        lock(&f.host.created).len(),
+        1,
+        "refused calls never create a chat"
+    );
+    f.op(
+        "p",
+        json!({ "op": "new_chat", "prompt": "Inspect this repository", "sandbox": "read-only" }),
+    )
+    .await
+    .unwrap();
+    let created = lock(&f.host.created);
+    assert_eq!(created[1].config.sandbox, SandboxLevel::ReadOnly);
+    assert_eq!(created[1].config.access, AccessMode::Supervised);
+}
+
+#[tokio::test]
+async fn messages_a_new_project_reuses_the_folder_project() {
+    assert!(crate::plugins::manifest::KNOWN_PERMISSIONS.contains(&PROJECTS_CREATE));
+    assert!(crate::plugins::capability::OUTSIDE_SANDBOX.contains(&PROJECTS_CREATE));
+    let f = Fixture::new();
+    f.grant("p", &[MESSAGES_SEND, SESSIONS_READ]);
+    assert_eq!(f.op("p", json!({ "op": "new_project", "path": std::env::current_dir().unwrap() }))
+        .await.unwrap_err().reason, reason::NOT_ALLOWED);
+    f.grant("p", &[PROJECTS_CREATE, SESSIONS_READ]);
+    let path = std::fs::canonicalize(std::env::current_dir().unwrap())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let first = f
+        .op(
+            "p",
+            json!({ "op": "new_project", "path": path, "name": "Atlas" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first["path"], path);
+    assert_eq!(first["existed"], false);
+    lock(&f.host.projects)[0].path = format!("{path}/.");
+    let second = f
+        .op(
+            "p",
+            json!({ "op": "new_project", "path": format!("{path}/./"), "name": "Changed" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second["id"], first["id"]);
+    assert_eq!(second["path"], first["path"]);
+    assert_eq!(second["existed"], true);
+    assert_eq!(lock(&f.host.projects).len(), 1);
+    let status = f.agents.status("p");
+    assert_eq!(status["actions"][1]["op"], "new_project");
+    assert_eq!(status["actions"][1]["project"], first["id"]);
+    assert_eq!(status["actions"][1]["existed"], true);
+    let projects = f.op("p", json!({ "op": "projects" })).await.unwrap();
+    let project = &projects[first["id"].as_str().unwrap()];
+    assert_eq!(project["name"], "Atlas");
+    assert_eq!(project["path"], format!("{path}/."));
+    assert_eq!(lock(&f.host.projects)[0].path, format!("{path}/."));
+    f.grant("p", &[PROJECTS_CREATE]);
+    assert_eq!(
+        f.op("p", json!({ "op": "projects" }))
+            .await
+            .unwrap_err()
+            .reason,
+        reason::NOT_ALLOWED
+    );
+    for path in ["relative", "/no-such-zeron-plugin-project-directory"] {
+        assert_eq!(
+            f.op("p", json!({ "op": "new_project", "path": path }))
+                .await
+                .unwrap_err()
+                .reason,
+            reason::BAD_CALL
+        );
     }
 }
 

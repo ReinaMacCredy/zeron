@@ -18,10 +18,10 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use zeron_doc::SessionCommandPayload;
-use zeron_proto::{AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, HarnessId, Model, Session, SessionStatus, UserInputAnswer};
+use zeron_proto::{AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, HarnessId, Model, Session, SessionStatus, Space, UserInputAnswer};
 
 use crate::agent_accounts::AgentAccounts;
-use crate::plugins::agents::{AgentHost, Delivery, NewChat, Pin};
+use crate::plugins::agents::{AgentHost, Delivery, NewChat, NewProject, Pin, ProjectCreated};
 use crate::registry::HarnessRegistry;
 use crate::sessions::SessionsEngine;
 use crate::workspace_host::WorkspaceHost;
@@ -154,6 +154,36 @@ impl AgentHost for EngineAgentHost {
                 None,
             )
             .map_err(|e| e.to_string())
+    }
+
+    fn projects(&self) -> Result<Vec<Space>, String> {
+        self.workspace
+            .read_spaces()
+            .map(|spaces| {
+                spaces
+                    .into_iter()
+                    .filter(|s| s.device_id == self.workspace.device_id())
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    fn create_project(&self, new: &NewProject) -> Result<ProjectCreated, String> {
+        let (space, existed) = self
+            .workspace
+            .create_space_resolved(
+                &crate::new_id(),
+                self.workspace.device_id(),
+                &new.path,
+                new.name.clone(),
+                std::path::Path::new(&new.path).join(".git").exists(),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(ProjectCreated {
+            id: space.id,
+            path: new.path.clone(),
+            existed,
+        })
     }
 
     fn pending_input(&self, chat: &str) -> Result<Option<String>, String> {

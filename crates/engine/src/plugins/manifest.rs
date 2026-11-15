@@ -55,6 +55,7 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     // Sending messages in your chats, starting chats and answering their
     // questions, as you would from the composer (plugins/agents).
     "messages.send",
+    "projects.create",
 ];
 
 /// Ids the app keeps for itself.
