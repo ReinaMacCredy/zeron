@@ -27,6 +27,7 @@ local ReplyPicture = require("@self/reply_picture")
 local Markdown = require("@self/markdown")
 local FadeText = require("@self/fade_text")
 local locale = require("@self/locale")
+local motion = require("@self/motion")
 
 -- What came with it: an image (shown as a thumbnail) or a file (a chip with
 -- its name and what it is).
@@ -65,6 +66,8 @@ export type Props = {
 	session: (() -> string?)?,
 	editing: (() -> boolean)?,
 	editor: ((bubble: { w: number, h: number }) -> Node)?,
+	-- It lands in a transcript on its own (ds/transcript): what came with it rises after this long, its words a beat later.
+	rise: number?,
 }
 
 -- What a prompt carries, by the name its words give each (an `@`
@@ -295,6 +298,10 @@ end
 -- Five lines of the prose's line, and the fade over the last one and a half.
 local LINES = 5
 local FADE_LINES = 1.5
+
+local RISE_MS = 180
+local RISE_BY = 8
+local RISE_WORDS = 80
 
 return ui.component(function(props: Props): Node
 	-- Open: kept by id when it has one (else this bubble's own).
@@ -565,6 +572,21 @@ return ui.component(function(props: Props): Node
 			),
 		}
 	end
+	local function risen(node: Node?, beat: number): Node?
+		local after = props.rise
+		if not node or not after then
+			return node
+		end
+		return ui.column {
+			w_full = true,
+			items = "end",
+			opacity = 0,
+			on_mount = function(el)
+				anime.animate(el, motion.params({ opacity = { 0, 1 }, y = { RISE_BY, 0 }, duration = RISE_MS, delay = after + beat, ease = "outCubic" }))
+			end,
+			node,
+		}
+	end
 	return ui.column {
 		w_full = true,
 		items = "end",
@@ -573,14 +595,14 @@ return ui.component(function(props: Props): Node
 		label = locale.t("ds.user_message.you"),
 		-- What came with it rides above the words, at the right, as Zeron's do
 		-- (not part of a selection of the words: it isn't what was said).
-		if #attachments > 0
+		risen(if #attachments > 0
 			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = "$space.2", attachments }
-			else nil,
-		if #badges > 0
+			else nil, 0),
+		risen(if #badges > 0
 			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = ui.raw(6, "Zeron's message badges"), badges }
-			else nil,
-		if #chosen > 0 then HtmlPicks.Sent { chips = chosen } else nil,
-		if props.text ~= "" and props.editing and props.editor
+			else nil, RISE_WORDS),
+		risen(if #chosen > 0 then HtmlPicks.Sent { chips = chosen } else nil, RISE_WORDS),
+		risen(if props.text ~= "" and props.editing and props.editor
 			then ui.column {
 				w_full = true,
 				items = "end",
@@ -591,6 +613,6 @@ return ui.component(function(props: Props): Node
 				end),
 			}
 			elseif props.text == "" then nil
-			else words(),
+			else words(), RISE_WORDS),
 	}
 end)

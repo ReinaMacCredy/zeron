@@ -7,8 +7,9 @@
 -- With one of them there, the header reads as its title; with more, the
 -- header is tabs, as ⌘K's scopes, the open one on a thumb that springs from
 -- tab to tab. A tab opens its rows under the header, a click on the open one
--- (or the chevron) folds them. Nothing opens itself: folded, what waits is a
--- pill floating over the composer, a tap opening it.
+-- (or the chevron) folds them. Nothing opens itself but a message that waits
+-- out a compaction: folded, what waits is a pill floating over the composer,
+-- a tap opening it.
 --
 --   Dock { queue = queued, todos = plan, open = tab, … }
 --
@@ -1258,8 +1259,25 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 		end
 		settled_was = settled
 	end)
-	-- Nothing opens itself: what arrives shows in the folded pill, and the
-	-- person opens it if they want it.
+	-- Nothing else opens itself: what arrives shows in the folded pill, and the
+	-- person opens it if they want it. A message that waits out a compaction
+	-- shows as its row: in the pill alone it read as lost until the compaction ended.
+	local waits_was = false
+	ui.effect(function()
+		local waits = false
+		if props.queue then
+			for _, q in props.queue:get() do
+				if q.after_compaction then
+					waits = true
+					break
+				end
+			end
+		end
+		if waits and not waits_was and open:peek() == nil then
+			open:set("queue")
+		end
+		waits_was = waits
+	end)
 
 	local tabs: { Tab } = {}
 

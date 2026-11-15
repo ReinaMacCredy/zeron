@@ -311,6 +311,9 @@ local SEAM_GAP = 6
 local JUMP_H = 30
 local DIM, DIM_MS = 0.38, 160
 local FOLD_MS, FOLD_FADE_MS, FOLD_EASE = 240, 160, "cubicBezier(0.4, 0, 0.2, 1)"
+-- A prompt landing in place: its room opens as the queue's row goes (the deck folds then, and a later start read as a step down and back up), what came with it rises a beat in.
+local LAND_ROOM_MS, LAND_RISE_AT = 220, 80
+local LAND_EASE = "cubicBezier(0.2, 0.8, 0.2, 1)"
 ui.theme.tokens {
 	zeron = { transcript = { latest = { bg = "over({zeron.window}, {zeron.inset.bg})" } } },
 }
@@ -1314,6 +1317,27 @@ local function Transcript(props: Props): Node
 	end)
 	local count = ui.computed(function(): number
 		return messages:len()
+	end)
+	-- A prompt the host adds at the end on its own (a queued message, as a turn or a compaction ends) lands in place.
+	local landing: { id: string, at: number }? = nil
+	local tail: string? = nil
+	local tail_read = false
+	ui.effect(function()
+		local n = count:get()
+		local last = if n > 0 then messages:at(n) else nil
+		local id = if last then last.id else nil
+		if tail_read and id == tail then
+			return
+		end
+		local was, first = tail, not tail_read
+		tail, tail_read = id, true
+		if first or not last or not was or last.role ~= "user" or last.from_chat ~= nil or SENT:peek()[id] or not at_end:peek() or motion.reduced_now() then
+			return
+		end
+		local at = messages:index_of("id", was)
+		if at and at < n then
+			landing = { id = id :: string, at = ui.now() }
+		end
 	end)
 
 	-- How long the conversation is, for its scrollbar: the rail over the
@@ -2410,6 +2434,41 @@ local function Transcript(props: Props): Node
 		local function washed(): string?
 			return layer.wash(m.id)
 		end
+		local land = if mine and landing and landing.id == m.id and ui.now() - landing.at < 500 then landing else nil
+		local room: State<number>? = nil
+		local natural: State<number>? = nil
+		if land then
+			landing = nil
+			room = ui.use_state(0)
+			natural = ui.use_state(0)
+			anime.animate(room, { value = { 0, 1 }, duration = LAND_ROOM_MS, ease = LAND_EASE })
+		end
+		local function opened(): number
+			return if room then room:get() else 1
+		end
+		local function landed(body: Node): Node
+			if not room or not natural then
+				return body
+			end
+			local r, h = room, natural
+			return ui.column {
+				w_full = true,
+				overflow = function(): string
+					return if r:get() < 1 then "hidden" else "visible"
+				end,
+				max_h = function(): number
+					return if r:get() < 1 then r:get() * h:get() else 1e6
+				end,
+				ui.column {
+					w_full = true,
+					shrink = 0,
+					on_resize = function(size: { w: number, h: number })
+						h:set(size.h)
+					end,
+					body,
+				},
+			}
+		end
 		-- (`state`: the message as it is now; `m`, as the row was made.)
 		rows[m.id] = { outer = outer, inner = inner, index = index, m = m, state = state }
 		ui.on_cleanup(function()
@@ -2493,7 +2552,7 @@ local function Transcript(props: Props): Node
 			items = "start",
 			px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
 			pt = function(): number
-				return ui.raw(pt() * collapsed(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
+				return ui.raw(pt() * collapsed() * opened(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
 			end,
 			-- The air at the conversation's end, on its last row: on the list
 			-- itself it would clip every row short of the list's foot.
@@ -2628,7 +2687,7 @@ local function Transcript(props: Props): Node
 						},
 						strip(m, state, hovered),
 					}
-					elseif mine then ui.column {
+					elseif mine then landed(ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the
 						-- message it's in, for what lands in it).
@@ -2653,6 +2712,7 @@ local function Transcript(props: Props): Node
 							session = props.sent_from,
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 							wash = washed,
+							rise = if land then LAND_RISE_AT else nil,
 							editing = if branch then function(): boolean
 								return editing_this(m.id)
 							end else nil,
@@ -2673,7 +2733,7 @@ local function Transcript(props: Props): Node
 						},
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, props.compaction_wait, props.turn_state),
-					}
+					})
 					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.

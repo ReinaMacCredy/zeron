@@ -266,6 +266,18 @@ test("compaction: a compaction never moves the reading place or the composer", f
 	expect(app:error()).to_be(nil)
 end)
 
+test("compaction: a message that waits out a compaction shows as its row, not only in the folded pill", function()
+	local app = opened()
+	patch(app, { running = true, queue = { { id = "q1", text = "Queued in the turn" } } })
+	expect(app:has('role:button "Open Queue"')).to_be(true)
+	patch(app, { compacting = true, compaction_wait = { phase = "compacting" } })
+	expect(app:has('role:button "Open Queue"')).to_be(false)
+	expect(app:tree("#chat-composer-dock"):find("Sends after compaction", 1, true) ~= nil).to_be(true)
+	patch(app, { compacting = false, compaction_wait = false, queue = {} })
+	expect(app:has('role:listitem "1. Queued in the turn"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
 test("compaction: the composer's chip says Compacting while it compacts, none while queued", function()
 	local app = opened()
 	wait_for(app, { phase = "queued" })
