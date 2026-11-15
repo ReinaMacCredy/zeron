@@ -41,7 +41,6 @@ local Tile = require("@self/tile")
 local Dropdown = require("@self/dropdown")
 local ModelPicker = require("@self/model_picker")
 local Switch = require("@self/switch")
-local Segmented = require("@self/segmented")
 local Menu = require("@self/menu")
 local IconButton = require("@self/icon_button").IconButton
 local status = require("@self/status")
@@ -416,6 +415,7 @@ end
 local MISSION = { same_agents = false, approve = true }
 local OPTIONS, OPTION_H, SEND_LABEL_PAD = 32, 24, 7
 local MISSION_EASE = "cubicBezier(.2,.8,.2,1)"
+ui.theme.tokens { ["zeron.composer.mission.key"] = "mix({border}, {accent}, 0.5)" }
 -- A pill narrower than this is short of room: the trays' rows fold their
 -- thumbnails and actions.
 local NARROW = 480
@@ -1237,7 +1237,6 @@ return ui.component(function(props: Props): Node
 	local head_h_seen = kept("head_h", 0)
 	local trailing_seen = kept("trailing_w", 0)
 	local lead_seen = kept("lead_w", 0)
-	local switch_seen = kept("mission_w", 0)
 	local right_w = kept("right_w", 0)
 	local model_w = kept("model_w", 0)
 	local access_w = kept("access_w", 0)
@@ -1378,6 +1377,9 @@ return ui.component(function(props: Props): Node
 	local mission_lit = ui.computed(function(): number
 		return if mission_on() then 1 else 0
 	end)
+	local function mission_offered(): boolean
+		return mission ~= nil and mission.shown() and not asking() and not dictating()
+	end
 	local function options_room(): number
 		return if mission_on() and not asking() then OPTIONS else 0
 	end
@@ -1397,6 +1399,10 @@ return ui.component(function(props: Props): Node
 	end
 	local function fade(ms: number, ease: string): TweenOptions
 		return { duration = if motion.reduced_now() then motion.FADE else ms, ease = ease }
+	end
+	-- (Mission's label stands 9 over the pill's top edge: what keeps 6 clear of that edge stands 4 further up while it shows.)
+	local function risen(): any
+		return ui.tween(mission_lit, { from = 0, to = -4, duration = fade(220, MISSION_EASE).duration, ease = MISSION_EASE })
 	end
 
 	-- Mentions over the pill, its full width (Zeron's).
@@ -1475,13 +1481,6 @@ return ui.component(function(props: Props): Node
 	local function lead_w(): number
 		local w = lead_seen:get()
 		return if w > 0 then w else CONTROL
-	end
-	local function mission_switch_shown(): boolean
-		if mission == nil or not mission.shown() or asking() or dictating() then
-			return false
-		end
-		local w = pill_w:get()
-		return w <= 0 or w - HAIRLINES - INSET_OPEN * 2 - CONTROL - switch_seen:get() - 16 - trailing_w() >= 0
 	end
 	local function expanded(): boolean
 		return read(props.expanded) == true
@@ -2196,20 +2195,68 @@ return ui.component(function(props: Props): Node
 		}
 	end
 
-	local function mode_switch(): Node
-		return Segmented {
+	local MISSION_KEYS = "shift+tab"
+	local function mission_chip(folded: boolean): Node
+		return ui.button {
 			id = "composer-mission",
-			label = locale.t("ds.composer.mission.mode") :: any,
-			value = ui.computed(mission_on),
-			on_pick = function(v: any)
-				choose("mission", v == true)
+			role = "checkbox",
+			checked = mission_on,
+			focus_on_press = false,
+			label = locale.t("ds.composer.mission.mission"),
+			tooltip = locale.s("ds.composer.mission.tip", { keys = ui.shortcut_text(MISSION_KEYS) }),
+			shrink = 0,
+			h = 24,
+			w = if folded then 24 else nil,
+			px = if folded then 0 else ui.raw(7, "the mockup's key chip"),
+			py = 0,
+			gap = ui.raw(5, "the mockup's key chip"),
+			items = "center",
+			justify = "center",
+			rounded = ui.raw(7, "the mockup's key chip"),
+			border = 1,
+			border_color = ui.tween(mission_lit, {
+				from = if folded then "#00000000" else "$border",
+				to = "$zeron.composer.mission.key",
+				duration = fade(200, MISSION_EASE).duration,
+				ease = MISSION_EASE,
+			}),
+			bg = "#00000000",
+			color = function(): string
+				return if mission_on() then "$text.primary" else "$text.secondary"
 			end,
-			options = {
-				{ value = false, label = locale.t("ds.composer.mission.chat"), id = "composer-mission-chat" },
-				{ value = true, label = locale.t("ds.composer.mission.mission"), id = "composer-mission-on" },
-			},
-			thumb = ui.tween(mission_lit, { from = "$zeron.segmented.thumb", to = "$zeron.composer.mission.thumb", duration = fade(200, MISSION_EASE).duration, ease = MISSION_EASE }),
-			glide = { duration = 200, ease = MISSION_EASE },
+			hover = { bg = "$hover", color = "$text.primary" },
+			text_size = "$font.size.xs",
+			weight = "$font.weight.regular",
+			on_click = function()
+				choose("mission", not mission_on())
+			end,
+			if folded then Icon { name = "target", size = 12 } else Kbd { keys = MISSION_KEYS, look = "plain", tone = "quiet" },
+			if folded then nil else ui.text { locale.t("ds.composer.mission.mission"), shrink = 0 },
+		}
+	end
+	-- (On the thread's own colour, so it masks the pill's edge and the ring behind it.)
+	local function mission_label(): Node
+		return ui.button {
+			id = "composer-mission-off",
+			label = locale.t("ds.composer.mission.off"),
+			focus_on_press = false,
+			h = 18,
+			px = ui.raw(7, "the mockup's label"),
+			py = 0,
+			gap = ui.raw(4, "the mockup's label"),
+			items = "center",
+			rounded = ui.raw(10, "the mockup's label"),
+			bg = "$zeron.window",
+			color = "$accent",
+			hover = { bg = "$zeron.window", color = "$accent" },
+			text_size = "$font.size.xs",
+			weight = "$font.weight.semibold",
+			on_click = function()
+				choose("mission", false)
+			end,
+			Icon { name = "target", size = 11 },
+			ui.text { locale.t("ds.composer.mission.mission"), shrink = 0 },
+			ui.text { "×", literal = true, shrink = 0, opacity = 0.6, weight = "$font.weight.regular", ml = ui.raw(2, "the mockup's label") },
 		}
 	end
 	local function option(id: string, icon: Icon.Name, key: string, word: () -> string, flip: () -> ()): Node
@@ -2965,6 +3012,10 @@ return ui.component(function(props: Props): Node
 					if unit and unit.keys(e) then
 						return true
 					end
+					if e.key == "Tab" and e.shift and not e.cmd and not e.alt and not e.ctrl and mission_offered() then
+						choose("mission", not mission_on())
+						return true
+					end
 					if (e.key == "Tab" or e.key == "ArrowRight") and not e.shift and not e.cmd and not e.alt and not e.ctrl and accept_prediction() then
 						return true
 					end
@@ -3049,7 +3100,6 @@ return ui.component(function(props: Props): Node
 			ui.show(function()
 				return not asking()
 			end, attach),
-			if mission then ui.show(mission_switch_shown, ui.row { on_resize = measure(switch_seen, "w"), mode_switch() }) else nil,
 		},
 		if mission
 			then ui.div {
@@ -3086,6 +3136,7 @@ return ui.component(function(props: Props): Node
 			end, ui.row {
 				items = "center",
 				gap = "$space.2",
+				if mission then ui.show(mission_offered, ui.show(narrow, mission_chip(true), mission_chip(false))) else nil,
 				if spoken then spoken.mic() else ui.show(function(): boolean
 					return dictating() or (props.on_dictate ~= nil and voice_on:get() ~= false)
 				end, mic),
@@ -3594,7 +3645,7 @@ return ui.component(function(props: Props): Node
 	if props.on_lift then
 		local report = props.on_lift
 		ui.effect(function()
-			local own = if pills_reach() > 0 then ROW_ROOM else 0
+			local own = if pills_reach() > 0 then ROW_ROOM + (if mission_on() then 4 else 0) else 0
 			report(lift:get() + own + (if deck_crowded() then LIFT else 0))
 		end)
 	end
@@ -3700,6 +3751,7 @@ return ui.component(function(props: Props): Node
 			end,
 			mx = ui.raw(8, "gpui's caption"),
 			mb = ui.raw(6, "gpui's caption"),
+			y = risen(),
 			wrap = true,
 			text_size = ui.raw(11, "gpui's caption"),
 			line_height = 14,
@@ -3797,6 +3849,18 @@ return ui.component(function(props: Props): Node
 				else nil,
 			trays,
 			ui.popover(m.popover(surface)),
+			if mission
+				then ui.presence(function(): string?
+					return if mission_on() then "on" else nil
+				end, mission_label, {
+					absolute = true,
+					left = ui.raw(26, "the mockup's label"),
+					top = -9,
+					h = 18,
+					enter = motion.transition({ opacity = { 0, 1 }, y = { 3, 0 }, duration = 200, ease = MISSION_EASE }),
+					exit = motion.transition({ opacity = 0, y = 3, duration = 120, ease = motion.EASE_OUT }),
+				})
+				else nil,
 		},
 		footer,
 	}
@@ -3807,23 +3871,27 @@ return ui.component(function(props: Props): Node
 		w_full = true,
 		gap = 0,
 		relative = true,
-		if props.pills then ui.div { w_full = true, h = 0, shrink = 0, opacity = dimmed, pill_row() } else nil,
-		if props.notice
-			then notice_line(ui.computed(function(): Notice?
-				local n = (props.notice :: State<Notice?>):get()
-				return if n and n.alert then nil else n
-			end), props.on_notice_action, props.on_dismiss_notice, function(): boolean
-				return props.side_tab ~= nil and props.side_tab.shown()
-			end)
-			else nil,
-		if props.compaction then Compaction.Chip { label = props.compaction.label } else nil,
-		if props.compaction
-			then Compaction.Resume {
-				offer = props.compaction.resume,
-				on_compact = props.compaction.on_resume_compact,
-				on_keep = props.compaction.on_resume_keep,
-			}
-			else nil,
+		if props.pills then ui.div { w_full = true, h = 0, shrink = 0, opacity = dimmed, y = risen(), pill_row() } else nil,
+		ui.column {
+			w_full = true,
+			y = risen(),
+			if props.notice
+				then notice_line(ui.computed(function(): Notice?
+					local n = (props.notice :: State<Notice?>):get()
+					return if n and n.alert then nil else n
+				end), props.on_notice_action, props.on_dismiss_notice, function(): boolean
+					return props.side_tab ~= nil and props.side_tab.shown()
+				end)
+				else nil,
+			if props.compaction then Compaction.Chip { label = props.compaction.label } else nil,
+			if props.compaction
+				then Compaction.Resume {
+					offer = props.compaction.resume,
+					on_compact = props.compaction.on_resume_compact,
+					on_keep = props.compaction.on_resume_keep,
+				}
+				else nil,
+		},
 		body,
 		-- Folded, what waits on the agent: a pill floating just over the
 		-- composer's middle, out of the layout (the conversation shows under
@@ -3835,6 +3903,7 @@ return ui.component(function(props: Props): Node
 				right = 0,
 				justify = "center",
 				top = ui.raw(-(deck.PILL_H + deck.PILL_GAP), "the pill's height and its gap over everything above the composer"),
+				y = risen(),
 				h = deck.PILL_H,
 				pointer_events = "none",
 				opacity = dimmed,

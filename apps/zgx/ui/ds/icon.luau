@@ -95,6 +95,7 @@ export type Name =
 	| "lightbulb-minimalistic"
 	| "heart-angle"
 	| "flag"
+	| "target"
 	| "upload-minimalistic"
 	| "arrow-down"
 	| "download"

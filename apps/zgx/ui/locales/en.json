@@ -764,8 +764,6 @@
       "move_draft": "Move draft to new thread",
       "send_new": "Send in new thread",
       "mission": {
-        "mode": "Chat or mission",
-        "chat": "Chat",
         "mission": "Mission",
         "start": "Start mission",
         "agents": "Agents",
@@ -775,7 +773,9 @@
         "approve": "Approve",
         "approve_label": "Approve: {value}",
         "approve_before": "before it runs",
-        "approve_not_needed": "not needed"
+        "approve_not_needed": "not needed",
+        "tip": "Mission ({keys})",
+        "off": "Turn Mission off"
       }
     },
     "markdown": {

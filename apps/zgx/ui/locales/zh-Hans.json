@@ -764,8 +764,6 @@
       "move_draft": "将草稿移到新对话",
       "send_new": "在新对话中发送",
       "mission": {
-        "mode": "聊天或任务",
-        "chat": "聊天",
         "mission": "任务",
         "start": "开始任务",
         "agents": "智能体",
@@ -775,7 +773,9 @@
         "approve": "批准",
         "approve_label": "批准：{value}",
         "approve_before": "运行前",
-        "approve_not_needed": "不需要"
+        "approve_not_needed": "不需要",
+        "tip": "任务（{keys}）",
+        "off": "关闭任务"
       }
     },
     "markdown": {
