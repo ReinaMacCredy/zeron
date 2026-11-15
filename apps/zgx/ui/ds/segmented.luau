@@ -100,6 +100,7 @@ return function(props: Props): Node
 				px = if fixed or props.fill then nil else "$space.3",
 				shrink = if props.fill then 1 else 0,
 				h_full = true,
+				direction = "row",
 				items = "center",
 				justify = "center",
 				gap = if option.trail then "$space.1" else nil,
