@@ -29,10 +29,6 @@ local route = require("@app/screens/shell/route")
 
 export type Match = { key: string, block: number, k: number, row: number }
 
--- A message's texts as the transcript draws them, each with the key its
--- Markdown is found by: a prompt's (`<id>:u`, its line breaks breaks), a
--- reply's text blocks (`<id>:<block id>`), or a reply's whole text
--- (`<id>:r`).
 type Plan = { id: string, card: any, here: string, said: { [string]: Threads.Handback } }
 
 local function card_sources(out: { any }, plan: Plan)
@@ -45,6 +41,10 @@ local function card_sources(out: { any }, plan: Plan)
 	end
 end
 
+-- A message's texts as the transcript draws them, each with the key its
+-- Markdown is found by: a prompt's (`<id>:u`, its line breaks breaks), a
+-- reply's text blocks (`<id>:<block id>`), or a reply's whole text
+-- (`<id>:r`).
 local function sources(m: any, plan: Plan?): { { key: string, text: string, breaks: boolean?, plain: boolean? } }
 	if m.continued_on then
 		return {}

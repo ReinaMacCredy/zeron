@@ -310,6 +310,7 @@ local TURN_GAP = 16
 local SEAM_GAP = 6
 local JUMP_H = 30
 local LAND_GAP = 12
+local SETTLE_TRIES = 12
 local DIM, DIM_MS = 0.38, 160
 local WAIT_GRACE_MS = 500
 local FOLD_MS, FOLD_FADE_MS, FOLD_EASE = 240, 160, "cubicBezier(0.4, 0, 0.2, 1)"
@@ -1291,7 +1292,9 @@ local function Transcript(props: Props): Node
 			offset:set(math.max(0, offset:peek() + (y - top) - h / 3))
 		end
 		find_for = function(key: string): any
-			return { key = key, query = f.query, current = f.current, reveal = reveal }
+			-- (The plan card's own words land with the card's step, not by a reveal from before its row is laid out.)
+			local shown = if string.sub(key, 1, 10) == "plan-card:" then nil else reveal
+			return { key = key, query = f.query, current = f.current, reveal = shown }
 		end
 	end
 	local card = ui.computed(function(): any
@@ -2241,23 +2244,32 @@ local function Transcript(props: Props): Node
 			end
 			return top
 		end
+		-- (The part's place moves while the rows around it are first laid out: followed until it holds.)
+		local function settle(left: number)
+			local r = rows[id]
+			if r and r.outer:peek() and within and within() then
+				local to = goal()
+				if math.abs(to - offset:peek()) >= 0.5 then
+					offset:set(to)
+				end
+			end
+			if within and left > 0 then
+				ui.after(16, function()
+					settle(left - 1)
+				end)
+			end
+		end
 		glide_to(goal, function()
 			local r = rows[id]
 			if r and r.outer:peek() then
 				offset:set(math.max(0, goal()))
+				settle(SETTLE_TRIES)
 				return
 			end
 			local now, el = messages:index_of("id", id), list:peek()
 			if now and el then
 				el:scroll_to_row(now, { align = "start" })
-				if within then
-					ui.after(0, function()
-						local back = rows[id]
-						if back and back.outer:peek() then
-							offset:set(goal())
-						end
-					end)
-				end
+				settle(SETTLE_TRIES)
 			end
 		end)
 	end
