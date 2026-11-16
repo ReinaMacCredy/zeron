@@ -549,6 +549,15 @@ do
 			return nil
 		end)
 	end }
+	ui.command { id = "threads_new_turn", title = "Step 5's thread starts another turn", run = function()
+		patch_rows(function(r: any): any?
+			if r.step == "s5" then
+				r.turn_started_at = os.time() - 5
+				return r
+			end
+			return nil
+		end)
+	end }
 	ui.command { id = "threads_extras", title = "Rows carry attempts, turn facts and a quiet spell", run = function()
 		patch_rows(function(r: any): any?
 			if r.step == "s1" then
