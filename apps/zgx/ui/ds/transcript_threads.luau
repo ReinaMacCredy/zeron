@@ -1884,7 +1884,6 @@ local function first_lines(text: string, n: number): string
 	return table.concat(out, "\n")
 end
 
--- (`attempt`: set when the text is an earlier attempt's, the current one having none yet.)
 export type Handback = { id: string, text: string, thread: string, attempt: number? }
 
 function M.step_handbacks(messages: { any }, card: any): { [string]: Handback }

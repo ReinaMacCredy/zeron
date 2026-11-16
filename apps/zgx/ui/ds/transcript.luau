@@ -2220,7 +2220,6 @@ local function Transcript(props: Props): Node
 		})
 		going = this
 	end
-	-- (`within`: a part of the row to land on instead of its top, once both are laid out.)
 	local function go_to(id: string, within: (() -> any)?)
 		local index = messages:index_of("id", id)
 		if not index or not list:peek() then
