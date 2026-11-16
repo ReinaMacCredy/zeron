@@ -2036,6 +2036,7 @@ impl DocHost {
                     due = earliest(due, until);
                 }
                 if !task_queued && session.as_ref().is_some_and(turn_live) {
+                    lock(&self.inner.background_held).remove(&chat.id);
                     continue;
                 }
                 if !task_queued

@@ -2328,6 +2328,7 @@ impl Harness for BackgroundHarness {
             error: None,
             session_id: Some("hs-bg".into()),
         };
+        let prompts = self.prompts.clone();
         tokio::spawn(async move {
             let _ = tx.send(AgentEvent::SessionStarted {
                 harness: HarnessId::Mock,
@@ -2355,7 +2356,8 @@ impl Harness for BackgroundHarness {
                 tokio::select! {
                     () = interrupt.cancelled() => break,
                     message = steering.recv() => {
-                        let Some(_) = message else { break };
+                        let Some(message) = message else { break };
+                        prompts.lock().unwrap().push(message.prompt);
                         let _ = tx.send(AgentEvent::Steered {
                             assistant_message_id: None,
                             next_assistant_message_id: None,
