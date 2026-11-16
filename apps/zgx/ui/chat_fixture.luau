@@ -465,6 +465,10 @@ stub.send = function(req: any)
 				end,
 			}
 		end
+		-- (Steered into a turn that takes it: no queue row, as the host's.)
+		if req.steer_now and META[req.session].steers == true then
+			return settled(nil)
+		end
 		return queue_answer(function()
 			queued_n += 1
 			local id = `eq{queued_n}`

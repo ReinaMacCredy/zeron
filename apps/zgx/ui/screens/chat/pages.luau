@@ -16,6 +16,70 @@ local M = {}
 -- Queued messages whose picks are chips in the draft they are edited in, each with what followed its picks' block.
 M.editing = ui.shared("chat.picks.editing", {} :: { [string]: string })
 
+-- Messages steered into a running turn (no queue row, no prompt shown yet), by chat: their picks are sent from then, not from when the transcript has them.
+local STEERED = ui.shared("chat.picks.steered", {} :: { [string]: { any } })
+local steers = 0
+
+local function picks_in(text: string): { any }
+	local picks = {}
+	local _, cards = HtmlPicks.split(text)
+	for _, c in cards do
+		for _, p in c.picks do
+			table.insert(picks, { kind = "pick", card = c.card, group = p.group or "", code = p.code, label = p.label })
+		end
+	end
+	return picks
+end
+
+-- (`after`: the transcript's last message then; the steered one lands past it.)
+local function landed(messages: { any }, e: any): boolean
+	local past = e.after == nil
+	for _, m in messages do
+		if past and m.role == "user" then
+			for _, a in m.attachments or {} do
+				for _, p in e.picks do
+					if a.kind == "pick" and a.card == p.card and (a.group or "") == p.group and a.code == p.code then
+						return true
+					end
+				end
+			end
+		end
+		past = past or m.id == e.after
+	end
+	return false
+end
+
+-- What `M.unsteer` takes, should the message not go.
+function M.steer(chat: string, text: string): string?
+	local picks = picks_in(text)
+	if #picks == 0 then
+		return nil
+	end
+	local messages = store.messages:peek()
+	local list = {}
+	for _, e in STEERED:peek()[chat] or {} do
+		if not landed(messages, e) then
+			table.insert(list, e)
+		end
+	end
+	steers += 1
+	local id = `steered:{steers}`
+	local last = messages[#messages]
+	table.insert(list, { id = id, picks = picks, after = if last then last.id else nil })
+	STEERED:set_key({ chat }, list)
+	return id
+end
+
+function M.unsteer(chat: string, id: string?)
+	local list = {}
+	for _, e in STEERED:peek()[chat] or {} do
+		if e.id ~= id then
+			table.insert(list, e)
+		end
+	end
+	STEERED:set_key({ chat }, list)
+end
+
 -- A message waiting in the chat's queue has sent its picks, until they are chips again in an edit of it (`except`: the one being taken to edit) or it leaves the queue.
 function M.with_queue(chat: string?, messages: { any }, except: string?): { any }
 	local s = store.session:get()
@@ -33,13 +97,7 @@ function M.with_queue(chat: string?, messages: { any }, except: string?): { any 
 			return
 		end
 		seen[r.id] = true
-		local picks = {}
-		local _, cards = HtmlPicks.split(r.text or "")
-		for _, c in cards do
-			for _, p in c.picks do
-				table.insert(picks, { kind = "pick", card = c.card, group = p.group or "", code = p.code, label = p.label })
-			end
-		end
+		local picks = picks_in(r.text or "")
 		if #picks > 0 then
 			out = out or table.clone(messages)
 			table.insert(out :: { any }, { id = r.id, role = "user", attachments = picks })
@@ -51,6 +109,12 @@ function M.with_queue(chat: string?, messages: { any }, except: string?): { any 
 	for _, r in queued.rows(chat, engine) do
 		if r.sending then
 			add(r)
+		end
+	end
+	for _, e in STEERED:get()[chat] or {} do
+		if not landed(messages, e) then
+			out = out or table.clone(messages)
+			table.insert(out :: { any }, { id = e.id, role = "user", attachments = e.picks })
 		end
 	end
 	return out or messages

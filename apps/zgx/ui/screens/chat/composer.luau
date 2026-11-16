@@ -1134,6 +1134,7 @@ local function Composer(): Node
 				end
 			end
 			local queued_row: string? = nil
+			local steered: string? = nil
 			local function deliver(message_id: string?)
 				req.message_id = message_id
 				store.send(req :: any):after(function(got: any)
@@ -1144,6 +1145,7 @@ local function Composer(): Node
 					if queued_row then
 						asks.queue_failed(queued_row)
 					end
+					Pages.unsteer(id, steered)
 					-- (The session's line says why, when the engine did.)
 					local s = store.session:peek()
 					if not (s and s.notice) then
@@ -1162,6 +1164,8 @@ local function Composer(): Node
 				-- Steered as it goes into a turn that takes it: no row to show.
 				if not (req.steer_now and s and s.steers == true) then
 					queued_row = asks.queue_add(text_out, if #attachments > 0 then attachments else nil)
+				else
+					steered = Pages.steer(id, text_out)
 				end
 				deliver(nil)
 				return false
