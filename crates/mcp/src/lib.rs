@@ -800,7 +800,7 @@ impl ThreadTools {
             .mission_lead
             .get_or_init(|| async {
                 self.peers().await.is_ok_and(|(caller, peers)| {
-                    caller.mission().is_some()
+                    (caller.mission().is_some() && caller.delegation.is_none())
                         || caller.has_plan()
                         || peers
                             .iter()
@@ -5488,8 +5488,15 @@ mod tests {
     async fn a_mission_lead_loads_its_mission_tools_up_front_and_another_chat_defers_them() {
         let mut fake = fixture();
         fake.chats[0]["plan"] = json!({});
+        let mission = json!({ "harness": "codex", "sandbox": "workspace-write", "mission": {} });
+        fake.chats[2]["config"] = mission.clone();
+        fake.chats[4]["config"] = mission;
+        fake.chats[4]["delegation"] = json!({
+            "delegatedByChatId": "a", "depth": 1, "anchor": "m1", "wake": "always",
+            "status": "running", "startedAt": "2026-09-18T10:00:00Z",
+        });
         let fake = Arc::new(fake);
-        for (chat, lead) in [("a", true), ("c", false)] {
+        for (chat, lead) in [("a", true), ("c", true), ("e", false), ("b", false)] {
             let mut pipe = Pipe::open(ThreadTools::new(memory_client(fake.clone()), chat));
             let listed = pipe.list().await;
             let loaded: Vec<&str> = listed
