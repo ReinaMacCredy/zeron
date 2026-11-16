@@ -593,6 +593,58 @@ fn result_parts(entries: &[SessionMessageEntry], anchor: &str) -> (Option<String
     (text, error)
 }
 
+fn step_run_by<'a>(
+    steps: &'a [zeron_proto::TaskStep],
+    chat_id: &str,
+) -> Option<&'a zeron_proto::TaskStep> {
+    let runs = |step: &&zeron_proto::TaskStep| step.chat_id.as_deref() == Some(chat_id);
+    steps
+        .iter()
+        .filter(runs)
+        .find(|step| step.outcome.is_none())
+        .or_else(|| steps.iter().find(runs))
+}
+
+fn result_from(entries: Option<&[SessionMessageEntry]>, delegation: &Delegation) -> String {
+    entries
+        .map(|entries| {
+            let (text, error) = result_parts(entries, &delegation.anchor);
+            result_text(delegation.status, text, error)
+        })
+        .or(delegation.summary.clone())
+        .unwrap_or_default()
+}
+
+fn turn_facts(entries: &[SessionMessageEntry], anchor: &str) -> Option<zeron_proto::TurnFacts> {
+    let at = entries.iter().position(|entry| entry.id == anchor)?;
+    let replies: Vec<&SessionMessageEntry> = entries[at + 1..]
+        .iter()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .collect();
+    let last = replies.last()?;
+    let ended = replies
+        .iter()
+        .map(|entry| entry.created_at + entry.duration_ms.unwrap_or(0))
+        .max()?;
+    let (tools, failed) =
+        replies
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .fold((0, 0), |(tools, failed), part| match part {
+                MessagePart::Tool { is_error, .. } => (tools + 1, failed + u32::from(*is_error)),
+                _ => (tools, failed),
+            });
+    Some(zeron_proto::TurnFacts {
+        ms: (ended - entries[at].created_at).max(0) as u64,
+        tools,
+        failed,
+        no_text: !last
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty())),
+    })
+}
+
 fn result_text(status: DelegationStatus, text: Option<String>, error: Option<String>) -> String {
     match status {
         DelegationStatus::Failed => error
@@ -1113,16 +1165,14 @@ impl DocHost {
         }
     }
 
-    fn result_of(&self, child: &Chat, delegation: &Delegation) -> String {
-        self.open(&child.id)
+    fn child_entries(&self, chat_id: &str) -> Option<Vec<SessionMessageEntry>> {
+        self.open(chat_id)
             .ok()
             .and_then(|handle| handle.doc.read_entries().ok())
-            .map(|entries| {
-                let (text, error) = result_parts(&entries, &delegation.anchor);
-                result_text(delegation.status, text, error)
-            })
-            .or(delegation.summary.clone())
-            .unwrap_or_default()
+    }
+
+    fn result_of(&self, child: &Chat, delegation: &Delegation) -> String {
+        result_from(self.child_entries(&child.id).as_deref(), delegation)
     }
 
     fn task_wake_text(&self, task_ids: &[String]) -> String {
@@ -1140,6 +1190,11 @@ impl DocHost {
             .map(|id| {
                 let child = chats.iter().find(|chat| &chat.id == id);
                 let delegation = child.and_then(|chat| chat.delegation.as_ref());
+                let entries = child.and_then(|chat| self.child_entries(&chat.id));
+                let facts = delegation
+                    .filter(|d| !d.is_running())
+                    .zip(entries.as_deref())
+                    .and_then(|(d, entries)| turn_facts(entries, &d.anchor));
                 let held = delegation
                     .filter(|d| d.status == DelegationStatus::Completed)
                     .and_then(|d| d.completed_at)
@@ -1147,24 +1202,21 @@ impl DocHost {
                     .and_then(|(completed_at, session)| {
                         background_note(&session, completed_at, now, background_hold())
                     });
-                let runs = |step: &&zeron_proto::TaskStep| step.chat_id.as_ref() == Some(id);
                 TaskHandback {
-                    step: steps
-                        .iter()
-                        .filter(runs)
-                        .find(|step| step.outcome.is_none())
-                        .or_else(|| steps.iter().find(runs))
-                        .map(|step| (step.id.clone(), step.title.clone())),
+                    step: step_run_by(&steps, id).map(|step| (step.id.clone(), step.title.clone())),
                     id: id.clone(),
                     title: child
                         .and_then(|chat| chat.title.clone())
                         .unwrap_or_else(|| "Untitled".into()),
                     status: delegation.map(|d| d.status),
-                    result: child
-                        .zip(delegation)
-                        .map(|(child, d)| self.result_of(child, d))
+                    result: delegation
+                        .map(|d| result_from(entries.as_deref(), d))
                         .unwrap_or_default(),
-                    notes: held.into_iter().collect(),
+                    notes: facts
+                        .map(|facts| facts.line())
+                        .into_iter()
+                        .chain(held)
+                        .collect(),
                 }
             })
             .collect();
@@ -1969,6 +2021,7 @@ impl DocHost {
                         chat.clone(),
                         status,
                         result_text(status, text, error),
+                        turn_facts(&entries, &delegation.anchor),
                         observed,
                     ));
                 }
@@ -1976,9 +2029,10 @@ impl DocHost {
             if finished.is_empty() {
                 break;
             }
-            for (child, status, result, observed) in finished {
+            for (child, status, result, facts, observed) in finished {
                 self.finish_child(&sessions, &child, status, result, observed)
                     .await;
+                self.record_step_turn(&child.id, status, facts);
             }
         }
         if booted_at.is_some() {
@@ -2007,6 +2061,41 @@ impl DocHost {
         let drained = *held.get_mut(chat_id)?.get_or_insert(now);
         let grace = chrono::Duration::from_std(crate::sessions::wake_grace()).unwrap_or_default();
         Some(drained + grace).filter(|until| *until > now)
+    }
+
+    fn record_step_turn(
+        &self,
+        chat_id: &str,
+        status: DelegationStatus,
+        facts: Option<zeron_proto::TurnFacts>,
+    ) {
+        let Some(workspace) = self.workspace() else {
+            return;
+        };
+        let steps = workspace.read_task_steps().unwrap_or_default();
+        let Some(step) = step_run_by(&steps, chat_id) else {
+            return;
+        };
+        let ended = match status {
+            DelegationStatus::Failed => zeron_proto::StepTurnEnd::Failed,
+            DelegationStatus::Cancelled | DelegationStatus::Interrupted => {
+                zeron_proto::StepTurnEnd::Stopped
+            }
+            DelegationStatus::Completed | DelegationStatus::Running => {
+                zeron_proto::StepTurnEnd::Completed
+            }
+        };
+        let patch = zeron_proto::TaskStepPatch {
+            turn: Some(Some(zeron_proto::StepTurn {
+                ended,
+                turn: None,
+                facts,
+            })),
+            ..Default::default()
+        };
+        if let Err(err) = workspace.update_task_step(&step.id, &patch) {
+            tracing::warn!(step = %step.id, error = %err, "recording a step's turn failed");
+        }
     }
 
     async fn finish_child(
@@ -2404,6 +2493,72 @@ mod tests {
             "{text}"
         );
         assert_eq!(zeron_proto::transcript::step_handback_threads(&text), ["t"]);
+    }
+
+    #[test]
+    fn a_turns_facts_time_it_from_its_task_and_count_its_calls_and_failures() {
+        let tool = |id: &str, is_error: bool| -> MessagePart {
+            serde_json::from_value(serde_json::json!({
+                "kind": "tool", "id": id, "call": { "kind": "exec", "command": "ls" },
+                "isError": is_error, "resolved": true,
+            }))
+            .unwrap()
+        };
+        let text = |text: &str| MessagePart::Text {
+            id: "x".into(),
+            text: text.into(),
+        };
+        let entry = |id: &str, role, created_at, duration_ms, parts| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts,
+            created_at,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms,
+        };
+        let mut entries = vec![
+            entry(
+                "old",
+                MessageRole::Assistant,
+                0,
+                Some(1_000),
+                vec![tool("t0", true)],
+            ),
+            entry("task", MessageRole::User, 10_000, None, Vec::new()),
+            entry(
+                "a1",
+                MessageRole::Assistant,
+                10_500,
+                Some(400_000),
+                vec![text("Inspecting."), tool("t1", false), tool("t2", true)],
+            ),
+            entry(
+                "a2",
+                MessageRole::Assistant,
+                410_600,
+                Some(18_400),
+                vec![text("  ")],
+            ),
+        ];
+        assert_eq!(
+            turn_facts(&entries, "task"),
+            Some(zeron_proto::TurnFacts {
+                ms: 419_000,
+                tools: 2,
+                failed: 1,
+                no_text: true,
+            }),
+            "only the task's turn counts, and its last message said nothing"
+        );
+        entries[3].parts = vec![text("Done.")];
+        assert!(!turn_facts(&entries, "task").unwrap().no_text);
+        assert_eq!(turn_facts(&entries[..2], "task"), None, "no reply yet");
+        assert_eq!(turn_facts(&entries, "missing"), None);
     }
 
     #[test]

@@ -67,6 +67,7 @@ struct Row {
     background: Vec<String>,
     attempt: Option<usize>,
     earlier: Vec<(String, String)>,
+    turn: Option<zeron_proto::TurnFacts>,
 }
 
 struct Inputs<'a> {
@@ -110,6 +111,7 @@ fn thread_row(chat: &Chat, kind: &'static str, state: ThreadState, step: Option<
         background: Vec::new(),
         attempt: None,
         earlier: Vec::new(),
+        turn: None,
     }
 }
 
@@ -188,6 +190,7 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                     background: background(t, (i.live)(&t.id).as_ref(), i.now),
                     attempt: Some(s.earlier.len() + 1),
                     earlier: s.earlier.iter().filter_map(|id| chats.get(id.as_str())).map(|c| (c.id.clone(), c.display_title())).collect(),
+                    turn: s.turn.as_ref().and_then(|t| t.facts),
                     ..thread_row(t, "owned", states[ix], Some((s, ix + 1)))
                 }),
                 Some(_) => {}
@@ -217,6 +220,7 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                         background: Vec::new(),
                         attempt: None,
                         earlier: Vec::new(),
+                        turn: None,
                     });
                 }
             }
@@ -271,6 +275,13 @@ fn row_value(r: &Row) -> Value {
         ("updated", r.updated.map_or(Value::Nil, |at| Value::from(at as f64))),
         ("background", strings_value(&r.background)),
         ("attempt", r.attempt.map_or(Value::Nil, |n| Value::from(n as f64))),
+        ("turn", r.turn.map_or(Value::Nil, |t| {
+            let mut facts = vec![("ms", Value::from(t.ms as f64)), ("tools", Value::from(t.tools as f64)), ("failed", Value::from(t.failed as f64))];
+            if t.no_text {
+                facts.push(("no_text", Value::Bool(true)));
+            }
+            Value::record(facts)
+        })),
         ("earlier", if r.earlier.is_empty() { Value::Nil } else { Value::List(r.earlier.iter().map(|(id, title)| Value::record([("id", Value::from(id.as_str())), ("title", Value::from(title.as_str()))])).collect()) }),
     ])
 }
@@ -684,7 +695,9 @@ pub(crate) mod tests {
         chats.push(owned("try1", "lead", "completed"));
         chats.push(owned("try2", "lead", "running"));
         let mut steps = plan("lead", &[Some("try2")]);
-        steps.iter_mut().find(|s| s.id == "s1").unwrap().earlier = vec!["try1".into()];
+        let rerun = steps.iter_mut().find(|s| s.id == "s1").unwrap();
+        rerun.earlier = vec!["try1".into()];
+        rerun.turn = serde_json::from_value(json!({ "ended": "completed", "facts": { "ms": 419000, "tools": 2, "failed": 0 } })).unwrap();
         let idle_with_battery = |id: &str| {
             (id == "try2").then(|| {
                 serde_json::from_value(json!({
@@ -706,6 +719,9 @@ pub(crate) mod tests {
         assert_eq!(earlier[0].field("id").map(text).as_deref(), Some("try1"));
         assert_eq!(earlier[0].field("title").map(text).as_deref(), Some("try1"));
         assert_eq!(row.field("background").unwrap().list().iter().map(text).collect::<Vec<_>>(), ["Run the battery"]);
+        let turn = row.field("turn").unwrap();
+        assert_eq!([turn.field("ms"), turn.field("tools"), turn.field("failed")].map(|v| v.and_then(Value::as_f64)), [Some(419000.), Some(2.), Some(0.)]);
+        assert_eq!(turn.field("no_text"), None);
     }
 
     #[test]

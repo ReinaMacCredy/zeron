@@ -1139,6 +1139,36 @@ pub struct StepTurn {
     pub ended: StepTurnEnd,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<TurnFacts>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnFacts {
+    pub ms: u64,
+    pub tools: u32,
+    pub failed: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_text: bool,
+}
+
+impl TurnFacts {
+    /// Shell writes leave no file count to trust, so none is claimed.
+    pub fn line(&self) -> String {
+        let calls = if self.tools == 1 { "call" } else { "calls" };
+        let mut line = format!(
+            "Turn: {}, {} tool {calls}, {} failed",
+            crate::background::elapsed_label((self.ms / 1000) as i64),
+            self.tools,
+            self.failed
+        );
+        if self.no_text {
+            line.push_str(", and its last message had no text");
+        }
+        line.push('.');
+        line
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3648,6 +3678,7 @@ mod tests {
             bound.turn = Some(StepTurn {
                 ended: StepTurnEnd::Failed,
                 turn: Some("turn-1".into()),
+                facts: None,
             });
             assert_eq!(
                 step_state(&bound, indicator.map(|_| child(None)).as_ref(), indicator),
@@ -3822,7 +3853,8 @@ mod tests {
             patch.turn,
             Some(Some(StepTurn {
                 ended: StepTurnEnd::Completed,
-                turn: Some("m1".into())
+                turn: Some("m1".into()),
+                facts: None,
             }))
         );
         let patch: TaskStepPatch =

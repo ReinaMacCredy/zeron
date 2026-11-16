@@ -2112,14 +2112,26 @@ async fn a_finished_child_wakes_its_idle_owner_once_and_task_status_acknowledges
     let d = delegation(&rig.core, &child);
     assert_eq!(d.status, zeron_proto::DelegationStatus::Completed);
     assert_eq!(d.delivery, Some(zeron_proto::DelegationDelivery::Delivered));
-    let wakes = rig
+    assert_eq!(
+        prompts_equal(&rig, &wake),
+        1,
+        "one wake, carrying the child's reply"
+    );
+    let raw = rig
         .prompts
         .lock()
         .unwrap()
         .iter()
-        .filter(|p| **p == wake)
-        .count();
-    assert_eq!(wakes, 1, "one wake, carrying the child's reply");
+        .find(|p| p.starts_with(&format!("Delegated task {child} ")))
+        .cloned()
+        .unwrap();
+    let (status, rest) = raw.split_once('\n').unwrap();
+    assert!(status.ends_with(") completed."), "{raw}");
+    assert!(
+        rest.starts_with("Turn: ")
+            && rest.contains(", 0 tool calls, 0 failed.\n\n<agent-response>"),
+        "the facts line follows the status line: {raw}"
+    );
 
     let read = rig
         .core
@@ -2482,7 +2494,7 @@ fn prompts_equal(rig: &Rig, text: &str) -> usize {
         .lock()
         .unwrap()
         .iter()
-        .filter(|p| *p == text)
+        .filter(|p| facts_free(p) == text)
         .count()
 }
 
@@ -3322,7 +3334,7 @@ async fn a_child_that_finishes_mid_turn_steers_its_wake_into_the_owners_turn() {
                 .unwrap()
                 .iter()
                 .any(|steer| {
-                    steer.contains(&format!(
+                    facts_free(steer).contains(&format!(
                         "Delegated task {child} (\"probe the cache\") completed.\n\n<agent-response>\nok\n</agent-response>"
                     ))
                 })
@@ -3426,7 +3438,7 @@ async fn children_finishing_while_the_wake_waits_share_one_wake() {
     assert_eq!(wakes[0].delegated_tasks, children);
     for (child, task) in children.iter().zip(["first", "second"]) {
         assert!(
-            wakes[0].text.contains(&format!(
+            facts_free(&wakes[0].text).contains(&format!(
                 "Delegated task {child} (\"{task}\") completed.\n\n<agent-response>\nok\n</agent-response>"
             )),
             "{}",
@@ -4166,13 +4178,21 @@ fn pending_request(core: &EngineCore, chat_id: &str) -> Option<String> {
     })
 }
 
+/// A handback's `Turn:` line carries wall-clock time, so exact matches skip it.
+fn facts_free(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.starts_with("Turn: "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn prompts_with(rig: &Rig, needle: &str) -> Vec<String> {
     rig.prompts
         .lock()
         .unwrap()
         .iter()
+        .map(|prompt| facts_free(prompt))
         .filter(|prompt| prompt.contains(needle))
-        .cloned()
         .collect()
 }
 
@@ -4858,6 +4878,27 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         [handback.clone()],
         "one handback carrying the step's reply, without peer framing"
     );
+    assert!(
+        rig.prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with(&format!(
+                "Step \"Build the API\" (stepId {}) finished a turn on its thread {first}.\nTurn: ",
+                steps[0].id
+            ))),
+        "the facts line follows the parseable first line"
+    );
+    let turn = rig
+        .core
+        .workspace
+        .task_step(&steps[0].id)
+        .unwrap()
+        .turn
+        .expect("the step records its thread's finished turn");
+    assert_eq!(turn.ended, zeron_proto::StepTurnEnd::Completed);
+    let facts = turn.facts.expect("with its facts");
+    assert_eq!((facts.tools, facts.failed, facts.no_text), (0, 0, false));
     let second = started(run(&steps[1], "task-lead").await);
     let err = refused(run(&steps[1], "task-lead").await);
     assert!(err.contains("still running"), "{err}");

@@ -421,3 +421,38 @@ mod limit_tests {
         assert_eq!(limit_duration(-1), "0m");
     }
 }
+
+#[cfg(test)]
+mod handback_tests {
+    use super::{handback_quotes, step_handback_threads};
+    use crate::TurnFacts;
+
+    #[test]
+    fn a_handback_with_its_facts_line_still_names_its_thread_and_quotes_its_reply() {
+        let facts = TurnFacts {
+            ms: 419_000,
+            tools: 2,
+            failed: 0,
+            no_text: false,
+        };
+        assert_eq!(facts.line(), "Turn: 6m 59s, 2 tool calls, 0 failed.");
+        let quiet = TurnFacts {
+            ms: 3_000,
+            tools: 1,
+            failed: 1,
+            no_text: true,
+        };
+        assert_eq!(
+            quiet.line(),
+            "Turn: 3s, 1 tool call, 1 failed, and its last message had no text."
+        );
+        let text = format!(
+            "Step \"Build it\" (stepId st) finished a turn on its thread t1.\n{}\n\n<agent-response>\nOn it.\n</agent-response>\n\nRead it with read_thread.",
+            facts.line()
+        );
+        assert_eq!(step_handback_threads(&text), ["t1"]);
+        let quoted = handback_quotes(&text).expect("a handback");
+        assert!(quoted.contains("\n> On it.\n"), "{quoted}");
+        assert!(quoted.contains("Turn: 6m 59s"), "{quoted}");
+    }
+}
