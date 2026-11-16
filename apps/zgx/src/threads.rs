@@ -45,6 +45,21 @@ struct Lead {
     states: Vec<ThreadState>,
     rows: Vec<Row>,
     unstarted: Option<(String, Vec<&'static str>)>,
+    number: u32,
+    closed: Vec<Closed>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Closed {
+    number: u32,
+    overview: String,
+    written: i64,
+    closed: i64,
+    ran: Option<i64>,
+    until: Option<String>,
+    order: Vec<String>,
+    states: Vec<ThreadState>,
+    rows: Vec<Row>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +69,7 @@ struct Row {
     chat: Option<String>,
     step: Option<String>,
     number: Option<usize>,
+    plan: Option<u32>,
     title: String,
     step_title: Option<String>,
     state: ThreadState,
@@ -120,6 +136,7 @@ fn thread_row(chat: &Chat, kind: &'static str, state: ThreadState, step: Option<
         chat: Some(chat.id.clone()),
         step: step.map(|(s, _)| s.id.clone()),
         number: step.map(|(_, n)| n),
+        plan: step.map(|(s, _)| s.plan),
         title: title.or_else(|| step.map(|(s, _)| s.title.clone())).unwrap_or_else(|| chat.display_title()),
         step_title: step.map(|(s, _)| s.title.clone()),
         state,
@@ -189,16 +206,66 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
     let mut out = HashMap::new();
     for lead_id in leads {
         let Some(lead) = chats.get(lead_id) else { continue };
-        let plan: Vec<&TaskStep> = route_preview::plan_steps(lead_id, i.steps);
+        let all: Vec<&TaskStep> = route_preview::plan_steps(lead_id, i.steps);
+        let plan: Vec<&TaskStep> = all.iter().copied().filter(|s| lead.in_current_plan(s)).collect();
         let thread_of = |s: &TaskStep| s.chat_id.as_deref().and_then(|id| chats.get(id));
-        let states: Vec<ThreadState> = plan.iter().map(|s| zeron_proto::step_state(s, thread_of(s), thread_of(s).map(indicator))).collect();
-        let mut shows: HashMap<&str, usize> = HashMap::new();
-        for (ix, s) in plan.iter().enumerate() {
-            let Some(t) = thread_of(s) else { continue };
-            if shows.get(t.id.as_str()).is_none_or(|&at| plan[at].outcome.is_some()) {
-                shows.insert(&t.id, ix);
+        let states_of = |plan: &[&TaskStep]| -> Vec<ThreadState> { plan.iter().map(|s| zeron_proto::step_state(s, thread_of(s), thread_of(s).map(indicator))).collect() };
+        let rows_of = |plan: &[&TaskStep], states: &[ThreadState], targets: &mut dyn Iterator<Item = Option<RouteTarget>>| -> Vec<Row> {
+            let mut shows: HashMap<&str, usize> = HashMap::new();
+            for (ix, s) in plan.iter().enumerate() {
+                let Some(t) = thread_of(s) else { continue };
+                if shows.get(t.id.as_str()).is_none_or(|&at| plan[at].outcome.is_some()) {
+                    shows.insert(&t.id, ix);
+                }
             }
-        }
+            let mut rows = Vec::new();
+            for (ix, s) in plan.iter().enumerate() {
+                match thread_of(s) {
+                    Some(t) if shows.get(t.id.as_str()) == Some(&ix) => rows.push(Row {
+                        background: background(t, (i.live)(&t.id).as_ref(), i.now),
+                        attempt: Some(s.earlier.len() + 1),
+                        earlier: s.earlier.iter().filter_map(|id| chats.get(id.as_str())).map(|c| (c.id.clone(), c.display_title())).collect(),
+                        turn: s.turn.as_ref().and_then(|t| t.facts),
+                        ..thread_row(t, "owned", states[ix], Some((s, ix + 1)))
+                    }),
+                    Some(_) => {}
+                    None => {
+                        let routed = targets.next().flatten();
+                        let target = s.target.clone().or_else(|| routed.clone());
+                        let harness = target.as_ref().map(|t| t.harness.as_str().to_owned());
+                        let model = target.and_then(|t| t.model);
+                        rows.push(Row {
+                            key: format!("step:{}", s.id),
+                            kind: "step",
+                            chat: None,
+                            step: Some(s.id.clone()),
+                            number: Some(ix + 1),
+                            plan: Some(s.plan),
+                            title: s.title.clone(),
+                            step_title: None,
+                            state: states[ix],
+                            harness,
+                            model,
+                            line: first_line(Some(&s.notes)),
+                            role: s.role.clone(),
+                            target: s.target.clone(),
+                            routed,
+                            spec: Some(s.notes.clone()),
+                            locked: s.outcome.is_some(),
+                            updated: None,
+                            background: Vec::new(),
+                            attempt: None,
+                            earlier: Vec::new(),
+                            turn: None,
+                            activity: None,
+                            turn_started_at: None,
+                        });
+                    }
+                }
+            }
+            rows
+        };
+        let states = states_of(&plan);
         let unstarted: Vec<&TaskStep> = plan.iter().copied().filter(|s| thread_of(s).is_none()).collect();
         let key = route_preview::preview_key(&unstarted);
         let preview = i.previews.get(lead_id).filter(|(k, _)| *k == key).and_then(|(_, p)| p.as_ref());
@@ -209,52 +276,31 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
             false => route_preview::step_targets(&unstarted, lead_target.as_ref(), preview),
         }
         .into_iter();
-        let mut rows = Vec::new();
-        for (ix, s) in plan.iter().enumerate() {
-            match thread_of(s) {
-                Some(t) if shows.get(t.id.as_str()) == Some(&ix) => rows.push(Row {
-                    background: background(t, (i.live)(&t.id).as_ref(), i.now),
-                    attempt: Some(s.earlier.len() + 1),
-                    earlier: s.earlier.iter().filter_map(|id| chats.get(id.as_str())).map(|c| (c.id.clone(), c.display_title())).collect(),
-                    turn: s.turn.as_ref().and_then(|t| t.facts),
-                    ..thread_row(t, "owned", states[ix], Some((s, ix + 1)))
-                }),
-                Some(_) => {}
-                None => {
-                    let routed = targets.next().flatten();
-                    let target = s.target.clone().or_else(|| routed.clone());
-                    let harness = target.as_ref().map(|t| t.harness.as_str().to_owned());
-                    let model = target.and_then(|t| t.model);
-                    rows.push(Row {
-                        key: format!("step:{}", s.id),
-                        kind: "step",
-                        chat: None,
-                        step: Some(s.id.clone()),
-                        number: Some(ix + 1),
-                        title: s.title.clone(),
-                        step_title: None,
-                        state: states[ix],
-                        harness,
-                        model,
-                        line: first_line(Some(&s.notes)),
-                        role: s.role.clone(),
-                        target: s.target.clone(),
-                        routed,
-                        spec: Some(s.notes.clone()),
-                        locked: s.outcome.is_some(),
-                        updated: None,
-                        background: Vec::new(),
-                        attempt: None,
-                        earlier: Vec::new(),
-                        turn: None,
-                        activity: None,
-                        turn_started_at: None,
-                    });
+        let mut rows = rows_of(&plan, &states, &mut targets);
+        let closed: Vec<Closed> = lead
+            .plan
+            .iter()
+            .flat_map(|p| &p.closed)
+            .rev()
+            .map(|c| {
+                let steps: Vec<&TaskStep> = all.iter().copied().filter(|s| s.plan == c.number).collect();
+                let states = states_of(&steps);
+                let last = steps.iter().map(|s| s.updated_at).max().map(|at| at.min(c.closed_at));
+                Closed {
+                    number: c.number,
+                    overview: c.overview.clone(),
+                    written: c.written_at.timestamp(),
+                    closed: c.closed_at.timestamp(),
+                    ran: last.map(|at| (at - c.written_at).num_seconds()).filter(|secs| *secs > 0),
+                    until: c.until.clone(),
+                    order: steps.iter().map(|s| s.id.clone()).collect(),
+                    rows: rows_of(&steps, &states, &mut std::iter::empty()),
+                    states,
                 }
-            }
-        }
-        let attempts: HashSet<&str> = plan.iter().flat_map(|s| &s.earlier).map(String::as_str).collect();
-        let mut own: Vec<&Chat> = children.get(lead_id).into_iter().flatten().copied().filter(|c| !shows.contains_key(c.id.as_str()) && !attempts.contains(c.id.as_str())).collect();
+            })
+            .collect();
+        let stepped: HashSet<&str> = all.iter().flat_map(|s| s.chat_id.iter().chain(&s.earlier)).map(String::as_str).collect();
+        let mut own: Vec<&Chat> = children.get(lead_id).into_iter().flatten().copied().filter(|c| !stepped.contains(c.id.as_str())).collect();
         own.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
         rows.extend(own.into_iter().map(|c| thread_row(c, "owned", zeron_proto::chat_state(c, indicator(c)), None)));
         for peer in i.peers.get(lead_id).into_iter().flatten().filter_map(|id| chats.get(id.as_str())).filter(|c| !c.archived) {
@@ -276,6 +322,8 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                 states,
                 rows,
                 unstarted: (!roles.is_empty() && !same_agents).then_some((key, roles)),
+                number: lead.plan_number(),
+                closed,
             },
         );
     }
@@ -292,6 +340,7 @@ fn row_value(r: &Row) -> Value {
         ("chat", opt(&r.chat)),
         ("step", opt(&r.step)),
         ("number", r.number.map_or(Value::Nil, |n| Value::from(n as f64))),
+        ("plan", r.plan.map_or(Value::Nil, |n| Value::from(n as f64))),
         ("title", Value::from(r.title.as_str())),
         ("step_title", opt(&r.step_title)),
         ("state", Value::from(word(r.state).as_str())),
@@ -338,15 +387,41 @@ fn target_value(t: &RouteTarget) -> Value {
     ])
 }
 
+fn review_of(states: &[ThreadState]) -> usize {
+    states.iter().filter(|s| **s == ThreadState::ReadyForReview).count()
+}
+
+fn closed_value(c: &Closed) -> Value {
+    let progress = zeron_proto::plan_progress(&c.states);
+    let opt = |v: Option<String>| v.map_or(Value::Nil, |v| Value::from(v.as_str()));
+    Value::record([
+        ("number", Value::from(c.number as f64)),
+        ("done", Value::from(progress.done as f64)),
+        ("total", Value::from(progress.total as f64)),
+        ("review", Value::from(review_of(&c.states) as f64)),
+        ("overview", opt(Some(c.overview.clone()).filter(|o| !o.is_empty()))),
+        ("written", Value::from(c.written as f64)),
+        ("closed", Value::from(c.closed as f64)),
+        ("ran", c.ran.map_or(Value::Nil, |secs| Value::from(secs as f64))),
+        ("until", opt(c.until.clone())),
+        ("order", Value::List(c.order.iter().map(|id| Value::from(id.as_str())).collect())),
+        ("rows", Value::List(c.rows.iter().map(row_value).collect())),
+    ])
+}
+
 fn lead_value(lead: &Lead) -> Value {
     let plan = if lead.has_plan || !lead.steps.is_empty() {
         let progress = zeron_proto::plan_progress(&lead.states);
+        let review: usize = lead.closed.iter().map(|c| review_of(&c.states)).sum();
         Value::record([
             ("overview", Value::from(lead.overview.as_str())),
             ("pending", Value::Bool(lead.pending)),
             ("agent", lead.agent.as_ref().map_or(Value::Nil, target_value)),
             ("order", Value::List(lead.steps.iter().map(|(id, _)| Value::from(id.as_str())).collect())),
             ("progress", Value::record([("done", Value::from(progress.done as f64)), ("total", Value::from(progress.total as f64))])),
+            ("number", Value::from(lead.number as f64)),
+            ("review", Value::from(review as f64)),
+            ("closed", if lead.closed.is_empty() { Value::Nil } else { Value::List(lead.closed.iter().map(closed_value).collect()) }),
         ])
     } else {
         Value::Nil
@@ -790,6 +865,36 @@ pub(crate) mod tests {
         assert_eq!(review.field("state").map(text).as_deref(), Some("readyForReview"));
         assert_eq!(review.field("activity"), Some(&Value::Nil), "only a working row says what it does");
         assert_eq!(review.field("turn_started_at"), Some(&Value::Nil));
+    }
+
+    #[test]
+    fn a_closed_plan_leaves_the_groups_and_its_review_step_counts_only_in_its_history() {
+        let closed = json!({ "number": 1, "overview": "Grade them", "writtenAt": "2026-11-14T10:00:00Z", "closedAt": "2026-11-14T12:00:00Z", "until": "m2" });
+        let chats = json!([chat("lead", json!({ "plan": { "overview": "Then the bench", "closed": [closed] } })), owned("k1", "lead", "completed"), owned("k2", "lead", "completed")]);
+        let mut steps = plan("lead", &[Some("k1"), Some("k2")]);
+        for s in steps.iter_mut() {
+            s.plan = if s.id == "s1" || s.id == "s2" { 1 } else { 2 };
+            s.updated_at = "2026-11-14T11:30:00Z".parse().unwrap();
+        }
+        steps.iter_mut().find(|s| s.id == "s2").unwrap().outcome = Some(zeron_proto::StepOutcome::Done);
+        let leads = joined(chats, &steps, HashMap::new(), &|_| None);
+        let lead = &leads["lead"];
+        assert_eq!(summary(lead), (2..5).map(|i| ("step", Some(i - 1), TITLES[i].to_string(), ThreadState::Planned)).collect::<Vec<_>>(), "the current plan numbers from 1, and the closed plan's threads have no row in the groups");
+        let value = lead_value(lead);
+        let plan_of = value.field("plan").unwrap();
+        let num = |v: &Value, k: &str| v.field(k).and_then(Value::as_f64);
+        assert_eq!(num(plan_of, "number"), Some(2.));
+        assert_eq!([num(plan_of.field("progress").unwrap(), "done"), num(plan_of.field("progress").unwrap(), "total")], [Some(0.), Some(3.)], "the closed plan's review step is not in the current progress");
+        assert_eq!(num(plan_of, "review"), Some(1.));
+        assert_eq!(plan_of.field("order").unwrap().list().iter().map(text).collect::<Vec<_>>(), ["s3", "s4", "s5"]);
+        let closed = plan_of.field("closed").unwrap().list();
+        assert_eq!(closed.len(), 1);
+        let old = &closed[0];
+        assert_eq!([num(old, "number"), num(old, "done"), num(old, "total"), num(old, "review"), num(old, "ran")], [Some(1.), Some(1.), Some(2.), Some(1.), Some(5400.)]);
+        assert_eq!([old.field("overview").map(text), old.field("until").map(text)], [Some("Grade them".into()), Some("m2".into())]);
+        let rows = old.field("rows").unwrap().list();
+        let row = |r: &Value| (r.field("chat").map(text), num(r, "number"), num(r, "plan"), r.field("state").map(text));
+        assert_eq!(rows.iter().map(row).collect::<Vec<_>>(), [(Some("k1".into()), Some(1.), Some(1.), Some("readyForReview".into())), (Some("k2".into()), Some(2.), Some(1.), Some("done".into()))]);
     }
 
     #[test]
