@@ -7468,9 +7468,6 @@ fn push_block(blocks: Value, block: Value) -> Value {
 /// Read back from zeron_proto's `with_picks`, so a reload or another device sees the same picks.
 fn page_picks(words: &str) -> (String, Vec<Value>) {
     let (rest, cards) = zeron_proto::html_render::extract_picks(words);
-    if cards.is_empty() {
-        return (words.to_owned(), Vec::new());
-    }
     let chips = cards
         .iter()
         .flat_map(|(card, picks)| {
@@ -9319,6 +9316,8 @@ mod tests {
             whole,
             format!("1. A2\n\n2. plain\n\n3. B1\n\nĐã chọn trong \"Frame\":\nA = A2 (Top)\nChưa chọn: B (Tabs)\n\nĐã chọn trong \"Frame\":\nB = B1 (Edge)\n\n{open}")
         );
+        let open = format!("again\n\n{}\n\"Khung app\": A (Kiểu góc)", zeron_proto::html_render::OPEN_PAGES);
+        assert_eq!(page_picks(&open).0, "again");
         let chips: Vec<String> = page_picks(&whole).1.iter().map(|c| c.field("code").map(text).unwrap_or_default()).collect();
         assert_eq!(chips, ["A2", "B1"]);
     }
