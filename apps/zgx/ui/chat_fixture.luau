@@ -896,6 +896,36 @@ files_stub.search = function(target: any, query: string): any
 	return settled(found)
 end
 
+-- The /config panel's host (src/claude_panel.rs): a settings file read at once, each call noted.
+local ConfigPanel = require("@app/screens/chat/config_panel")
+local config_stub = ConfigPanel.host :: any
+config_stub.open = function(args: any)
+	note(`config_open:{args.chat or args.space or "?"}:{if args.claude then "claude" else "other"}`)
+	ConfigPanel.view:set({ open = true, generation = 1, values = "ready", status = "ready", footer = "Read from .claude/settings.json", stats = { state = "idle" } })
+end
+config_stub.close = function()
+	note("config_close")
+end
+config_stub.stats = function()
+	note("config_stats")
+end
+config_stub.rows = function(_args: any): any
+	return {
+		rows = {
+			{ id = "autoCompact", label = "Auto-compact", value = "true", options = { "true", "false" }, writable = true, kind = "bool" },
+			{ id = "theme", label = "Theme", value = "dark", options = { "auto", "dark", "light" }, writable = true, kind = "enum", tag = "Terminal" },
+		},
+		counts = { all = 2, zeron = 1, terminal = 1 },
+	}
+end
+config_stub.status = function(_args: any): any
+	return {}
+end
+config_stub.set = function(args: any): any
+	note(`config_set:{args.id}:{args.value}`)
+	return { change = "queued" }
+end
+
 -- The agent's `/` commands and `$` skills, as the host lists them
 -- (screens/chat/invocations), each read noted.
 local Invocations = require("@app/screens/chat/invocations")

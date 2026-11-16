@@ -229,6 +229,7 @@ export type Props = {
 	on_computer_enable: (() -> ())?,
 	-- A Claude Code command card's Retry.
 	on_claude_command: ((command: string) -> ())?,
+	on_config_reopen: (() -> ())?,
 	-- An error that signing in fixes: its Log in.
 	on_sign_in: (() -> ())?,
 	-- The chat's model, and a pick from Claude Code's `/model` card.
@@ -3068,6 +3069,7 @@ local function Transcript(props: Props): Node
 							return state:get()
 						end,
 						find = find_for,
+						on_reopen = props.on_config_reopen,
 					}
 					elseif m.role == "system" and m.line == "computer_notice" then Rows.ComputerNotice {
 						key = `{m.id}:row`,

@@ -7,6 +7,7 @@ local Shared = require("@app/screens/chat/shared")
 local Computer = require("@app/screens/settings/computer")
 local FilePaths = require("@app/screens/files/paths")
 local boundary = require("@app/screens/shell/boundary")
+local ConfigPanel = require("@app/screens/chat/config_panel")
 
 local M = {}
 
@@ -32,6 +33,12 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 	props.on_computer = function(request: string, question: string, answer: string): any
 		local id = chat()
 		return if id then store.answer_computer(id, request, question, answer) else nil
+	end
+	props.on_config_reopen = function()
+		local id = chat()
+		if id then
+			ConfigPanel.reopen(id)
+		end
 	end
 	props.computer_disclosure = Computer.shows_disclosure
 	props.on_computer_approved = Computer.mark_approved

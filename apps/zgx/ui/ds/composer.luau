@@ -128,7 +128,7 @@ export type Props = {
 	-- plan mode (explore and propose before changing anything).
 	access: State<string?>?,
 	plan: State<boolean>?,
-	mission: { value: State<any>, shown: () -> boolean, planned: () -> boolean }?,
+	mission: { value: State<any>, shown: () -> boolean, planned: () -> boolean, defaults: (() -> any)? }?,
 	-- The model (a ModelPicker: its agents' tabs, its models, its reasoning,
 	-- Fast mode and its other options' picks).
 	model: State<string?>,
@@ -317,6 +317,7 @@ export type Props = {
 	limit: (() -> any)?,
 	side_tab: any?,
 	pills: Node?,
+	panel: Node?,
 	-- How far the pill row's pills reach from its left, as laid out: it rises over the deck's folded pill only when they would meet it.
 	pills_reach: (() -> number)?,
 	-- How far the pill row stands raised, for the room the conversation keeps under it.
@@ -1388,7 +1389,7 @@ return ui.component(function(props: Props): Node
 			if mode == "plan" and props.plan and props.plan:peek() ~= on then
 				props.plan:set(on)
 			elseif mode == "mission" and mission and (type(mission.value:peek()) == "table") ~= on then
-				mission.value:set(if on then table.clone(MISSION) else false)
+				mission.value:set(if on then table.clone(if mission.defaults then mission.defaults() else MISSION) else false)
 			end
 			if on and mode == "plan" and mission and mission.value:peek() ~= false then
 				mission.value:set(false)
@@ -3878,6 +3879,7 @@ return ui.component(function(props: Props): Node
 		gap = 0,
 		relative = true,
 		if props.pills then ui.div { w_full = true, h = 0, shrink = 0, opacity = dimmed, y = risen(), pill_row() } else nil,
+		if props.panel then ui.div { w_full = true, h = 0, shrink = 0, relative = true, props.panel } else nil,
 		ui.column {
 			w_full = true,
 			y = risen(),

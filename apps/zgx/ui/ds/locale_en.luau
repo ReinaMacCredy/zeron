@@ -1378,6 +1378,8 @@ return {
 	["ds.transcript_rows.computer.failed"] = "Answer failed: {why}",
 	["ds.transcript_rows.computer.unsupported"] = "This window can't answer it.",
 	["ds.transcript_rows.computer.use_for_request"] = "Use for this request",
+	["ds.transcript_rows.config_reopen"] = "Reopen",
+	["ds.transcript_rows.config_reopen_label"] = "Reopen Claude Code settings",
 	["ds.tex_view.compiling"] = "Compiling…",
 	["ds.tex_view.errors"] = "{n, plural, one {# error} other {# errors}} in the last compile",
 	["ds.tex_view.more"] = "{n} more",

@@ -1666,7 +1666,9 @@
         "failed": "回答失败：{why}",
         "unsupported": "此窗口无法回答。",
         "use_for_request": "仅用于这次请求"
-      }
+      },
+      "config_reopen": "重新打开",
+      "config_reopen_label": "重新打开 Claude Code 设置"
     },
     "tex_view": {
       "compiling": "正在编译…",
@@ -4905,6 +4907,68 @@
         "card": "Plan {number}, {done} of {total} done",
         "carry": "添加到当前计划",
         "carry_label": "将 {title} 添加到当前计划"
+      }
+    },
+    "config_panel": {
+      "title": "设置",
+      "close": "关闭 (Esc)",
+      "tab": {
+        "status": "状态",
+        "config": "配置",
+        "stats": "统计",
+        "zeron": "Zeron"
+      },
+      "search": "搜索设置…",
+      "filter": {
+        "all": "全部 {n}",
+        "zeron": "影响 Zeron 聊天 {n}",
+        "terminal": "仅终端 {n}"
+      },
+      "shown": "显示 {n} 项",
+      "reading": "正在读取 Claude Code 的设置…",
+      "read_failed": "无法读取设置：{error}",
+      "no_match": "没有匹配“{query}”的设置",
+      "default": "默认",
+      "text_placeholder": "例如 Vietnamese",
+      "save": "保存",
+      "asking": "正在询问 Claude Code…",
+      "status": {
+        "version": "版本",
+        "session": "会话",
+        "folder": "文件夹",
+        "model": "模型",
+        "permission_mode": "权限模式",
+        "output_style": "输出风格",
+        "mcp_servers": "MCP 服务器",
+        "memory": "记忆",
+        "plugins": "插件"
+      },
+      "status_footnote": "来自 Claude Code 在此文件夹的 system/init；模型和权限模式是此聊天的。",
+      "counting": "正在统计 Claude Code 会话…",
+      "stats_empty": "此设备最近 36 周没有 Claude Code 活动。",
+      "activity": "活动 · 最近 36 周",
+      "no_data": "无数据",
+      "days": "{n, plural, other {# 天}}",
+      "tile": {
+        "favorite": "常用模型",
+        "sessions": "会话",
+        "active_days": "活跃天数",
+        "streak": "当前连续",
+        "longest": "最长会话",
+        "tokens": "Token"
+      },
+      "stats_footnote": "Claude Code 在无界面模式下不返回统计；Zeron 根据此设备上的用量数据计算。那里不记录最长会话。",
+      "zeron": {
+        "agents": "智能体",
+        "approve": "运行前批准",
+        "footnote": "新任务在所有智能体上的起始设置。输入框的任务选项只更改那一个任务。"
+      },
+      "hint": {
+        "select": "选择",
+        "change": "更改",
+        "search": "搜索",
+        "tab": "标签",
+        "close": "关闭"
       }
     }
   },

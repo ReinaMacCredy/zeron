@@ -44,6 +44,7 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local Lanes = require("@app/screens/chat/lanes")
 local Pills = require("@app/screens/chat/pills")
 local AppCommands = require("@app/screens/chat/app_commands")
+local ConfigPanel = require("@app/screens/chat/config_panel")
 local Outgoing = require("@app/screens/chat/outgoing")
 local Pages = require("@app/screens/chat/pages")
 local Branch = require("@app/screens/chat/branch")
@@ -965,6 +966,47 @@ local function Composer(): Node
 			own_notice:set { tone = "danger", text = why, dismissable = true }
 		end)
 	end
+	local function config_target(): any
+		local claude = agent() == "claude-code"
+		local id = session_id:peek()
+		if id then
+			local s = open()
+			return { chat = id, device = if s then s.device else nil, claude = claude }
+		end
+		local plan = where.plan()
+		return { space = if plan.project ~= Where.NO_PROJECT then plan.project else nil, device = plan.device, claude = claude }
+	end
+	local function open_config()
+		local link = sessions.connection:peek()
+		if link == "offline" or link == "reconnecting" then
+			own_notice:set { tone = "warning", key = "chat.composer.engine_not_connected", dismissable = true }
+			return
+		end
+		ConfigPanel.open(config_target())
+	end
+	ui.effect(function()
+		local asked = ConfigPanel.reopen_ask:get()
+		if asked then
+			ConfigPanel.reopen_ask:set(nil)
+			if asked.chat == session_id:peek() then
+				open_config()
+			end
+		end
+	end)
+	ui.effect(function()
+		local shown = ConfigPanel.shown:get()
+		local id = session_id:get()
+		local asking = asks.question:get() ~= nil or asks.approval:get() ~= nil
+		if shown and (id ~= ConfigPanel.chat or asking) then
+			ConfigPanel.close()
+		end
+	end)
+	ui.effect(function()
+		local claude = agent() == "claude-code"
+		if ConfigPanel.shown:get() and ConfigPanel.claude:peek() ~= claude then
+			ConfigPanel.retarget(config_target())
+		end
+	end)
 	-- Why a send failed, in words: the host's word for a file, else the
 	-- generic line.
 	local function failure_notice(e: any)
@@ -1019,6 +1061,11 @@ local function Composer(): Node
 		if focus and not resume then
 			shared.text:set("")
 			compact(focus)
+			return false
+		end
+		if AppCommands.argument(draft, "config") == "" and not resume then
+			shared.text:set("")
+			open_config()
 			return false
 		end
 		-- A draft that is only one of Zeron's own commands runs it (its
@@ -1594,6 +1641,48 @@ local function Composer(): Node
 	end, function(): boolean
 		return asks.question:get() ~= nil or asks.approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
 	end, "main")
+	local dock = ui.ref()
+	local function config_height(): number
+		local _ = dock.height
+		local ok, size = pcall(function(): any
+			return ui.window.size:get()
+		end)
+		local tall = if ok and type(size) == "table" and type(size.height) == "number" then size.height else 800
+		local top = tall
+		local el = dock:peek()
+		local placed, r = pcall(ui.window_rect, el)
+		if el and placed and r then
+			top = r.y
+		end
+		local hero = new_chat()
+		local room = if hero then top - 44 - 16 else top - 52 - 44
+		return math.max(if hero then 140 else 180, math.min(room, math.clamp(tall * 0.62, 300, 620)))
+	end
+	local function config_chips(): any
+		local models, efforts = {}, {}
+		for _, m in store.catalog:get().models do
+			if m.harness == "claude-code" then
+				table.insert(models, { value = m.value, label = m.label })
+				if m.value == model:get() then
+					for _, l in m.efforts or {} do
+						table.insert(efforts, l.value)
+					end
+				end
+			end
+		end
+		return { models = models, model = model:get(), efforts = efforts, effort = effort:get(), access = access:get() }
+	end
+	local function config_chip(chip: string, value: string)
+		if chip == "model" then
+			if not take_model(value) then
+				model:set(value)
+			end
+		elseif chip == "effort" then
+			effort:set(value)
+		elseif chip == "access" then
+			access:set(value)
+		end
+	end
 	local function composer(): Node
 		return ds.Composer {
 			dictation = dictation,
@@ -1657,6 +1746,9 @@ local function Composer(): Node
 			plan = plan,
 			mission = {
 				value = mission,
+				defaults = function(): any
+					return prefs.mission_defaults:peek()
+				end,
 				shown = mission_offered,
 				planned = function(): boolean
 					local s = open()
@@ -1694,6 +1786,16 @@ local function Composer(): Node
 			pills_reach = function(): number
 				return pills_reach:get()
 			end,
+			panel = ConfigPanel.Over {
+				chips = config_chips,
+				on_chip = config_chip,
+				height = function(): number
+					return config_height()
+				end,
+				on_closed = function()
+					shared.focus:add(1)
+				end,
+			},
 			on_lift = function(n: number)
 				if lifted:peek() ~= n then
 					lifted:set(n)
@@ -2000,7 +2102,14 @@ local function Composer(): Node
 			end,
 			focus = shared.focus,
 			mentions = completions.lists,
-			on_mention = completions.on_mention,
+			on_mention = function(item: any, trigger: string, token: string)
+				completions.on_mention(item, trigger, token)
+				local draft = string.match(shared.text:peek(), "^%s*(.-)%s*$") or ""
+				if trigger == "/" and type(item) == "table" and item.value == "config" and AppCommands.argument(draft, "config") == "" then
+					shared.text:set("")
+					open_config()
+				end
+			end,
 			mention_enabled = completions.enabled,
 			mention_empty = completions.empty,
 			mention_sections = completions.sections,
@@ -2035,7 +2144,6 @@ local function Composer(): Node
 			shared.composer_gone()
 		end
 	end)
-	local dock = ui.ref()
 	-- How tall a new chat's composer is with nothing in it (what it's placed
 	-- by, so what's written in it doesn't move its top).
 	local rest_tall = ui.state("chat_composer_rest_tall", nil :: number?)

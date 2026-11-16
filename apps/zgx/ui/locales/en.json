@@ -1666,7 +1666,9 @@
         "failed": "Answer failed: {why}",
         "unsupported": "This window can't answer it.",
         "use_for_request": "Use for this request"
-      }
+      },
+      "config_reopen": "Reopen",
+      "config_reopen_label": "Reopen Claude Code settings"
     },
     "tex_view": {
       "compiling": "Compiling…",
@@ -4905,6 +4907,68 @@
         "card": "Plan {number}, {done} of {total} done",
         "carry": "Add to current plan",
         "carry_label": "Add {title} to the current plan"
+      }
+    },
+    "config_panel": {
+      "title": "Settings",
+      "close": "Close (Esc)",
+      "tab": {
+        "status": "Status",
+        "config": "Config",
+        "stats": "Stats",
+        "zeron": "Zeron"
+      },
+      "search": "Search settings…",
+      "filter": {
+        "all": "All {n}",
+        "zeron": "Affects Zeron chats {n}",
+        "terminal": "Terminal only {n}"
+      },
+      "shown": "{n} shown",
+      "reading": "Reading Claude Code's settings…",
+      "read_failed": "Could not read settings: {error}",
+      "no_match": "No settings match “{query}”",
+      "default": "default",
+      "text_placeholder": "e.g. Vietnamese",
+      "save": "Save",
+      "asking": "Asking Claude Code…",
+      "status": {
+        "version": "Version",
+        "session": "Session",
+        "folder": "Folder",
+        "model": "Model",
+        "permission_mode": "Permission mode",
+        "output_style": "Output style",
+        "mcp_servers": "MCP servers",
+        "memory": "Memory",
+        "plugins": "Plugins"
+      },
+      "status_footnote": "From Claude Code's system/init for this folder; model and permission mode are this chat's.",
+      "counting": "Counting Claude Code sessions…",
+      "stats_empty": "No Claude Code activity on this device in the last 36 weeks.",
+      "activity": "Activity · last 36 weeks",
+      "no_data": "No data",
+      "days": "{n, plural, one {# day} other {# days}}",
+      "tile": {
+        "favorite": "Favorite model",
+        "sessions": "Sessions",
+        "active_days": "Active days",
+        "streak": "Current streak",
+        "longest": "Longest session",
+        "tokens": "Tokens"
+      },
+      "stats_footnote": "Claude Code returns no stats headless; Zeron counts them from its Usage data on this device. Longest session is not recorded there.",
+      "zeron": {
+        "agents": "Agents",
+        "approve": "Approve before it runs",
+        "footnote": "What a new mission starts with, on every agent. The composer's Mission options change them for that mission alone."
+      },
+      "hint": {
+        "select": "select",
+        "change": "change",
+        "search": "search",
+        "tab": "tab",
+        "close": "close"
       }
     }
   },
