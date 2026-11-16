@@ -625,7 +625,7 @@ test("a command of five lines is one line in its row, and opened shows them all"
 	settle(app)
 	local ran = box_of(app, "#transcript", "button \"Ran echo") :: any
 	local words = box_of(app, "#transcript", "text \"echo '--- extension-ish") :: any
-	local used = box_of(app, "#transcript", "button \"Used ToolSearch\"") :: any
+	local used = box_of(app, "#transcript", "button \"Used github.search_issues\"") :: any
 	expect(ran ~= nil and words ~= nil and used ~= nil).to_be(true)
 	expect(ran.h).to_be(28)
 	-- Its words: one line, inside the row.
@@ -669,7 +669,7 @@ test("a command of five lines is one line in its row, and opened shows them all"
 	for line in app:tree("#transcript"):gmatch("[^\n]+") do
 		if line:find(rows[2], 1, true) then
 			seen = true
-		elseif seen and line:find("button \"Used ToolSearch\"", 1, true) then
+		elseif seen and line:find("button \"Used github.search_issues\"", 1, true) then
 			local _, y = line:match(" (%-?%d+),(%-?%d+) ")
 			after = tonumber(y)
 			break

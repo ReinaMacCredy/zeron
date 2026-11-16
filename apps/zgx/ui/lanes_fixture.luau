@@ -671,6 +671,7 @@ ui.command { id = "plan_retry", title = "The lead starts step 2 twice, then a st
 		{ id = "b4", kind = "tools", tools = { delegate_tool("d-4", "dg-ask", "Add rate limiting to checkout", "s2"), delegate_tool("d-5", "dg-ask", "Add rate limiting to checkout", "s2") } },
 		{ id = "b5", kind = "text", text = "Step 5 next." },
 		{ id = "b6", kind = "tools", tools = { failed } },
+		{ id = "b7", kind = "tools", summary = "Called 1 tool", tools = { { id = "m-1", kind = "mcp", verb = "Marked step done", step = "s2", step_state = "done" } } },
 	} })
 	plan_messages:set(now)
 end }

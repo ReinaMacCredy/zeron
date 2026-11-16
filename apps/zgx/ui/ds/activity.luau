@@ -59,6 +59,8 @@ export type Tool = {
 	added: number?,
 	removed: number?,
 	failed: boolean?,
+	step: string?,
+	step_state: string?,
 	-- What its row opens to beyond its call (ds/tool_detail): its output
 	-- (as the harness gave it, escapes and all, growing while it runs), a
 	-- command's exit code, its files' counts, an older doc's diff, and the
@@ -714,7 +716,8 @@ local function row(
 	open_file: ((path: string) -> ())?,
 	pictures: ReplyPicture.Pictures?,
 	file_opens: ((path: string) -> boolean)?,
-	live: (() -> boolean)?
+	live: (() -> boolean)?,
+	plan: (() -> any)?
 ): Node
 	local t = now()
 	if t.kind == "thought" then
@@ -772,6 +775,14 @@ local function row(
 	if t.kind == "cloud" or t.kind == "git" then
 		verb = function(): string
 			return now().verb
+		end
+		label = verb
+	elseif t.step and plan then
+		verb = function(): string
+			local n = now()
+			local p = plan()
+			local s = if p and p.by_step and n.step then p.by_step[n.step] else nil
+			return if s and s.number then locale.s("ds.activity.step_marked", { n = s.number, state = n.step_state or "" }) else n.verb
 		end
 		label = verb
 	end
@@ -1195,7 +1206,7 @@ return ui.component(function(props: Props): Node
 				return place() < last_branch:get()
 			end, function(): boolean
 				return live() and place() == count:get()
-			end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.open_file, props.pictures, props.file_opens, live)
+			end, props.open_subagent, props.thought, props.key, resized, place() < count:peek(), props.open_file, props.pictures, props.file_opens, live, props.plan)
 		end
 		-- (A call arriving joins as a row joining a `ui.each` does; the rest
 		-- are made as they come into view, as they were.)

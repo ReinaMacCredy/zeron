@@ -678,6 +678,7 @@ return {
 	["ds.activity.open_subagent"] = "Open subagent {title}",
 	["ds.activity.subagent"] = "Subagent",
 	["ds.activity.worked_for"] = "Worked for {secs}s · {summary}",
+	["ds.activity.step_marked"] = "{state, select, done {Marked step {n} done} skipped {Marked step {n} skipped} open {Reopened step {n}} other {Marked step {n}}}",
 	["ds.message_rail.attached_image"] = "Attached image",
 	["ds.message_rail.attached_file"] = "Attached file",
 	["ds.message_rail.attached_images"] = "{n} attached images",

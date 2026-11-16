@@ -1037,7 +1037,7 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
 /// identifiers the chip names the child by).
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input
-/// (but `respond_to_input`, a `tasks` plan call, `delegate_task` and `plan`'s action keep the short ids [`zeron_badge`] lists,
+/// (but `respond_to_input`, a `tasks` plan call, `delegate_task`, `plan` and the thread and task tools keep the short ids [`zeron_badge`] lists,
 /// and `ExitPlanMode` keeps its plan).
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
@@ -1091,17 +1091,28 @@ fn zeron_badge(call: &ToolCall) -> Option<serde_json::Value> {
         "tasks" if input.get("action").and_then(|a| a.as_str()) == Some("plan") => {
             &["action", "taskId"]
         }
-        "delegate_task" => &["title"],
-        "plan" => &["action"],
+        "delegate_task" => &["title", "stepId"],
+        "plan" => &["action", "stepId", "state"],
+        "read_thread" | "send_message_to_thread" => &["threadId"],
+        "task_cancel" | "task_status" => &["taskId"],
         _ => return None,
     };
-    let kept: serde_json::Map<String, serde_json::Value> = keys
+    let mut kept: serde_json::Map<String, serde_json::Value> = keys
         .iter()
         .filter_map(|key| {
             let value = input.get(key)?.as_str()?.trim();
             (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
         })
         .collect();
+    if tool == "plan" {
+        let steps = input
+            .get("steps")
+            .and_then(|s| s.as_array())
+            .map(|s| s.len() as u64);
+        if let Some(n) = steps.or_else(|| input.get("stepCount")?.as_u64()) {
+            kept.insert("stepCount".to_owned(), serde_json::Value::from(n));
+        }
+    }
     (!kept.is_empty()).then_some(serde_json::Value::Object(kept))
 }
 
@@ -1706,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_keeps_a_plan_calls_task_and_a_delegate_title_only() {
+    fn sanitize_keeps_a_plan_calls_task_and_the_short_ids_zeron_rows_name() {
         let plan = ToolCall::Unknown {
             name: "mcp__zeron__tasks".into(),
             input: Some(serde_json::json!({
@@ -1740,6 +1751,56 @@ mod tests {
             sanitize_tool_call(&delegate),
             ToolCall::Mcp { input: Some(input), .. } if input == serde_json::json!({ "title": "Audit" })
         ));
+        let step = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "delegate_task".into(),
+            input: Some(
+                serde_json::json!({ "task": "the whole prompt", "title": "Audit", "stepId": "s3" }),
+            ),
+        };
+        assert!(matches!(
+            sanitize_tool_call(&step),
+            ToolCall::Mcp { input: Some(input), .. } if input == serde_json::json!({ "title": "Audit", "stepId": "s3" })
+        ));
+        for (tool, input, kept) in [
+            (
+                "plan",
+                serde_json::json!({ "action": "step", "stepId": "s2", "state": "done" }),
+                serde_json::json!({ "action": "step", "stepId": "s2", "state": "done" }),
+            ),
+            (
+                "read_thread",
+                serde_json::json!({ "threadId": "th1", "limit": 50 }),
+                serde_json::json!({ "threadId": "th1" }),
+            ),
+            (
+                "send_message_to_thread",
+                serde_json::json!({ "threadId": "th1", "text": "secret" }),
+                serde_json::json!({ "threadId": "th1" }),
+            ),
+            (
+                "task_cancel",
+                serde_json::json!({ "taskId": "t1", "reason": "secret" }),
+                serde_json::json!({ "taskId": "t1" }),
+            ),
+            (
+                "task_status",
+                serde_json::json!({ "taskId": "t1" }),
+                serde_json::json!({ "taskId": "t1" }),
+            ),
+        ] {
+            let call = ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: tool.into(),
+                input: Some(input),
+            };
+            let clean = sanitize_tool_call(&call);
+            assert!(
+                matches!(&clean, ToolCall::Mcp { input: Some(input), .. } if *input == kept),
+                "{tool}"
+            );
+            assert_eq!(sanitize_tool_call(&clean), clean, "{tool}");
+        }
         let write = serde_json::json!({ "action": "write", "overview": "secret", "steps": [{ "title": "secret" }] });
         let lead = ToolCall::Unknown {
             name: "mcp__zeron__plan".into(),
@@ -1750,13 +1811,13 @@ mod tests {
             kept,
             ToolCall::Unknown {
                 name: "mcp__zeron__plan".into(),
-                input: Some(serde_json::json!({ "action": "write" })),
+                input: Some(serde_json::json!({ "action": "write", "stepCount": 1 })),
             }
         );
         assert_eq!(sanitize_tool_call(&kept), kept);
         assert!(matches!(
             sanitize_tool_call(&ToolCall::Mcp { server: "zeron".into(), tool: "plan".into(), input: Some(write) }),
-            ToolCall::Mcp { input: Some(input), .. } if input == serde_json::json!({ "action": "write" })
+            ToolCall::Mcp { input: Some(input), .. } if input == serde_json::json!({ "action": "write", "stepCount": 1 })
         ));
     }
 

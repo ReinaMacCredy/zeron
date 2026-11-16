@@ -325,6 +325,9 @@ test("threads: a step started twice reads once; a failed start of a step draws i
 	expect(app:tree("#steps-started-d-4")).to_contain("Add rate limiting to checkout")
 	expect(app:has("#steps-started-d-6")).to_be(false)
 	expect(app:has("#delegate-d-6")).to_be(true)
+	app:click('#fixture-plan >> role:button "Called 1 tool"')
+	app:frames(30)
+	expect(app:tree("#fixture-plan")).to_contain("Marked step 2 done")
 	expect(app:error()).to_be(nil)
 end)
 

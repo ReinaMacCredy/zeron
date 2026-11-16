@@ -3148,7 +3148,7 @@ ui.command {
 			blocks = {
 				{ id = "g:st", kind = "tools", summary = "Thought process · ran 1 command · called 1 tool", live = true, tools = {
 					{ id = "st-x", kind = "exec", verb = "Ran", target = one, call = SCRIPT },
-					{ id = "st-t", kind = "exec", verb = "Used", target = "ToolSearch" },
+					{ id = "st-t", kind = "mcp", verb = "Used", target = "github.search_issues" },
 					{ id = "st-r", kind = "thought", verb = "Thought" },
 				} },
 			},
@@ -3172,7 +3172,7 @@ ui.command {
 			blocks = {
 				{ id = "g:st2", kind = "tools", summary = "Thought process · ran 1 command · called 1 tool", live = true, tools = {
 					{ id = "st2-x", kind = "exec", verb = "Ran", target = SCRIPT },
-					{ id = "st2-t", kind = "exec", verb = "Used", target = "ToolSearch" },
+					{ id = "st2-t", kind = "mcp", verb = "Used", target = "github.search_issues" },
 					{ id = "st2-r", kind = "thought", verb = "Thought" },
 				} },
 			},

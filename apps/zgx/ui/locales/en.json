@@ -840,7 +840,8 @@
       "show_all_lines": "Show all {n} lines",
       "open_subagent": "Open subagent {title}",
       "subagent": "Subagent",
-      "worked_for": "Worked for {secs}s · {summary}"
+      "worked_for": "Worked for {secs}s · {summary}",
+      "step_marked": "{state, select, done {Marked step {n} done} skipped {Marked step {n} skipped} open {Reopened step {n}} other {Marked step {n}}}"
     },
     "message_rail": {
       "attached_image": "Attached image",

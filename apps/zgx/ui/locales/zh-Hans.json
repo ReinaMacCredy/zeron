@@ -840,7 +840,8 @@
       "show_all_lines": "显示全部 {n} 行",
       "open_subagent": "打开子智能体 {title}",
       "subagent": "子智能体",
-      "worked_for": "运行了 {secs} 秒 · {summary}"
+      "worked_for": "运行了 {secs} 秒 · {summary}",
+      "step_marked": "{state, select, done {Marked step {n} done} skipped {Marked step {n} skipped} open {Reopened step {n}} other {Marked step {n}}}"
     },
     "message_rail": {
       "attached_image": "已附加图片",

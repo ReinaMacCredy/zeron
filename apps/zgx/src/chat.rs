@@ -7494,18 +7494,21 @@ fn zeron_tool(call: &Json) -> Option<&str> {
 
 const SAID_TOOLS: &[&str] = &["plan", "read_thread", "send_message_to_thread", "task_cancel", "task_status"];
 
-/// (The doc keeps only `plan`'s `action` of these inputs, crates/doc `zeron_badge`: the rest is read from a whole-JSON output.)
-fn zeron_said(part: &Json) -> (String, Option<String>) {
+type MarkedStep = Option<(String, String)>;
+
+/// (The doc keeps these tools' short ids, crates/doc `zeron_badge`; an older doc's are read from a whole-JSON output.)
+fn zeron_said(part: &Json) -> (String, Option<String>, MarkedStep) {
     let call = &part["call"];
     let input = &call["input"];
     let output: Json = part["output"].as_str().and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
     let arg = |k: &str| input[k].as_str().or(output[k].as_str()).filter(|v| !v.is_empty());
-    let thread = || arg("threadId").and_then(|id| CHATS.with(|c| c.chats.borrow().get(id).and_then(|chat| chat["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned)));
-    let (verb, target) = match zeron_tool(call).unwrap_or_default() {
+    let title = |k: &str| arg(k).and_then(|id| CHATS.with(|c| c.chats.borrow().get(id).and_then(|chat| chat["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned)));
+    let marked = || arg("stepId").map(|step| (step.to_owned(), arg("state").unwrap_or_default().to_owned()));
+    let (verb, target, step) = match zeron_tool(call).unwrap_or_default() {
         "plan" => match input["action"].as_str() {
             Some("write") => {
-                let steps = input["steps"].as_array().or(output["steps"].as_array()).map(Vec::len);
-                ("Wrote the plan", steps.map(|n| if n == 1 { "1 step".to_owned() } else { format!("{n} steps") }))
+                let steps = input["stepCount"].as_u64().map(|n| n as usize).or(input["steps"].as_array().or(output["steps"].as_array()).map(Vec::len));
+                ("Wrote the plan", steps.map(|n| if n == 1 { "1 step".to_owned() } else { format!("{n} steps") }), None)
             }
             Some("step") => (
                 match arg("state") {
@@ -7515,15 +7518,16 @@ fn zeron_said(part: &Json) -> (String, Option<String>) {
                     _ => "Marked step",
                 },
                 None,
+                marked(),
             ),
-            _ => ("Read the plan", None),
+            _ => ("Read the plan", None, None),
         },
-        "read_thread" => ("Read thread", thread()),
-        "send_message_to_thread" => ("Messaged thread", thread()),
-        "task_cancel" => ("Stopped task", None),
-        _ => ("Checked task", None),
+        "read_thread" => ("Read thread", title("threadId"), None),
+        "send_message_to_thread" => ("Messaged thread", title("threadId"), None),
+        "task_cancel" => ("Stopped task", title("taskId"), None),
+        _ => ("Checked task", title("taskId"), None),
     };
-    (verb.to_owned(), target)
+    (verb.to_owned(), target, step)
 }
 
 #[derive(PartialEq)]
@@ -7904,6 +7908,7 @@ fn cloud_setup_step(part: &Json) -> Option<&str> {
 
 fn tool_row(part: &Json, live: bool) -> Option<Value> {
     let id = part["id"].as_str()?;
+    let mut marked: MarkedStep = None;
     let (kind, verb, target): (&str, String, Option<String>) = match part["kind"].as_str()? {
         "reasoning" => {
             let words = part["text"].as_str().unwrap_or_default();
@@ -7952,10 +7957,11 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
                     (kind, s("name").unwrap_or_default(), None)
                 }
                 _ if is_thread_link(part) => ("thread", "Started thread".into(), call["input"]["title"].as_str().map(Into::into)),
-                // (The doc keeps a delegate's `title` alone: crates/doc `zeron_badge`.)
+                // (The doc keeps a delegate's `title` and `stepId` alone: crates/doc `zeron_badge`.)
                 _ if is_delegate(part) => ("delegate", "Delegated".into(), call["input"]["title"].as_str().or(call["input"]["task"].as_str()).map(Into::into)),
                 _ if zeron_tool(call).is_some_and(|t| SAID_TOOLS.contains(&t)) => {
-                    let (verb, target) = zeron_said(part);
+                    let (verb, target, step) = zeron_said(part);
+                    marked = step;
                     ("mcp", verb, target)
                 }
                 "mcp" => {
@@ -8009,6 +8015,10 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
     }
     if zeron_tool(&part["call"]) == Some("plan") && part["call"]["input"]["action"].as_str() == Some("write") {
         fields.push(("plan", Value::from("write")));
+    }
+    if let Some((step, state)) = &marked {
+        fields.push(("step", Value::from(step.as_str())));
+        fields.push(("step_state", Value::from(state.as_str())));
     }
     // A subagent's spawn: the doc it runs in (its lane, a panel tab of its
     // own), how it stands, and its tab's title (the shipping app's).
@@ -10314,7 +10324,14 @@ mod tests {
         let mut marked = zeron("plan", json!({ "action": "step" }));
         marked["output"] = json!(r#"{"state":"skipped","stepId":"s2"}"#);
         assert_eq!(f(&row(marked), "verb"), "Marked step skipped");
-        assert_eq!(f(&row(zeron("plan", json!({ "action": "step", "stepId": "s1", "state": "done" }))), "verb"), "Marked step done");
+        let done = row(zeron("plan", json!({ "action": "step", "stepId": "s1", "state": "done" })));
+        assert_eq!((f(&done, "verb"), f(&done, "step"), f(&done, "step_state")), ("Marked step done".into(), "s1".into(), "done".into()), "the UI names the step by its number");
+        assert_eq!(f(&row(zeron("plan", json!({ "action": "write", "stepCount": 3 }))), "target"), "3 steps", "the doc keeps a write's step count");
+        CHATS.with(|c| c.chats.borrow_mut().insert("th-said".into(), json!({ "title": "Port the parser" })));
+        for (tool, key) in [("read_thread", "threadId"), ("send_message_to_thread", "threadId"), ("task_cancel", "taskId"), ("task_status", "taskId")] {
+            assert_eq!(f(&row(zeron(tool, json!({ key: "th-said" }))), "target"), "Port the parser", "{tool}");
+        }
+        CHATS.with(|c| c.chats.borrow_mut().remove("th-said"));
         assert!(row(zeron("plan", json!({ "action": "step" }))).field("plan").is_none(), "only a write holds the plan card");
         for (tool, verb) in [("read_thread", "Read thread"), ("send_message_to_thread", "Messaged thread"), ("task_cancel", "Stopped task"), ("task_status", "Checked task")] {
             let said = row(call("t", json!({ "kind": "mcp", "server": "zeron", "tool": tool })));
