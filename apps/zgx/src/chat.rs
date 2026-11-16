@@ -4621,7 +4621,11 @@ pub(crate) fn agent_icon(harness: &str) -> Option<String> {
 }
 
 pub(crate) fn chat_config(id: &str) -> Option<Json> {
-    CHATS.with(|chats| chats.chat(id)).map(|c| c["config"].clone())
+    chat_row(id).map(|c| c["config"].clone())
+}
+
+pub(crate) fn chat_row(id: &str) -> Option<Json> {
+    CHATS.with(|chats| chats.chat(id))
 }
 
 /// A new chat's picks as a config (`model`, `effort`, `access`, `options`,

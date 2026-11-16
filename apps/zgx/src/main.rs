@@ -38,6 +38,7 @@ mod appshots;
 mod auth;
 mod carried_settings;
 mod chat;
+mod claude_panel;
 mod cloud;
 mod dev;
 mod dictation;
@@ -859,6 +860,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         // Cloud choice.
         cloud::install(cx, &host);
         usage::install(cx, &host);
+        claude_panel::install(&host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
         // What there is to update, on every device (src/updates.rs).
