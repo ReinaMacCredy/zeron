@@ -1257,6 +1257,28 @@ local function seed_threads()
 	end
 end
 ui.command { id = "threads_seed", title = "Threads across chats", run = seed_threads }
+ui.command {
+	id = "peer_run",
+	title = "Delegates send runs of messages",
+	run = function()
+		local function peer(id: string, from: string, text: string, clock: string): any
+			return { id = id, role = "user", text = text, from_chat = from, clock = clock, at = `Sep 8, {clock}`, copy = text }
+		end
+		store.messages:push(peer("p1", "dg-done", "First note from the review.", "4:20 PM"))
+		store.messages:push(peer("p2", "dg-done", "Second note, the newest.", "4:21 PM"))
+		store.messages:push { id = "p3", role = "user", text = "Delegated task dg-done (\"Review the diff\") completed.", from_chat = "dg-done", wake = { "dg-done" }, at = "Sep 8, 4:22 PM" }
+		store.messages:push(peer("p4", "dg-run", "Parser half done.", "4:23 PM"))
+		store.messages:push { id = "p5", role = "user", text = "Keep going.", at = "Sep 8, 4:24 PM", copy = "Keep going." }
+		store.messages:push(peer("p6", "dg-run", "Parser done.", "4:25 PM"))
+	end,
+}
+ui.command {
+	id = "peer_more",
+	title = "The parser delegate sends one more",
+	run = function()
+		store.messages:push { id = "p7", role = "user", text = "Benchmarks attached.", from_chat = "dg-run", clock = "4:26 PM", at = "Sep 8, 4:26 PM", copy = "Benchmarks attached." }
+	end,
+}
 -- What the threads' rows sent the host (a limit's choice).
 stub.limit = function(id: string, op: string): any
 	note(`limit:{id}:{op}`)

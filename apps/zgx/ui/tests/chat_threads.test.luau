@@ -84,10 +84,10 @@ test("threads: a native route is the delegate chip on the chat's own agent, its 
 	expect(app:has('role:button ~"Summarize the logs"')).to_be(false)
 end)
 
-test("threads: a peer's message is prose under From, a wake a line with Open subagent, a self-sent turn Continued", function()
+test("threads: a peer's message is a card, a wake a line with Open subagent, a self-sent turn Continued", function()
 	local app = open()
 	local tree = app:tree("#transcript")
-	expect(tree).to_contain("From")
+	expect(app:has("#card-tu2")).to_be(true)
 	expect(tree).to_contain("4:12 PM")
 	expect(tree).to_contain("The parser tests pass on my side.")
 	expect(tree).to_contain("Delegated task “Review the diff” finished")
@@ -180,4 +180,63 @@ test("threads: a thread an agent started gets its limit card under its group", f
 	app:frames(20)
 	expect(app:has("#limit-card-th-1")).to_be(true)
 	expect(app:tree("#limit-card-th-1")).to_contain("Claude Code hit its usage limit")
+end)
+
+local function count_of(s: string, word: string): number
+	local n, at = 0, 1
+	while true do
+		local i = string.find(s, word, at, true)
+		if not i then
+			return n
+		end
+		n += 1
+		at = i + #word
+	end
+end
+
+local function with_runs(): any
+	local app = open()
+	app:command("peer_run")
+	app:frames(40)
+	return app
+end
+
+test("threads: consecutive messages from one thread are one card; its count and preview follow the newest", function()
+	local app = with_runs()
+	expect(app:has("#card-p1")).to_be(true)
+	expect(app:has("#card-p2")).to_be(false)
+	local card = app:tree("#card-p1")
+	expect(card).to_contain("2 messages")
+	expect(card).to_contain("4:21 PM")
+	expect(card).to_contain("Second note, the newest.")
+	expect(string.find(card, "First note from the review.", 1, true)).to_be(nil)
+	app:click('role:button "Messages from Review the diff"')
+	app:frames(30)
+	card = app:tree("#card-p1")
+	expect(card).to_contain("First note from the review.")
+	expect(card).to_contain("4:20 PM")
+	app:click('role:button "Open Review the diff"')
+	app:frames(60)
+	expect(calls(app)).to_contain("lane:s1:side_chat:dg-done")
+	expect(app:has("#card-p1-item-p1")).to_be(true)
+end)
+
+test("threads: a prompt between two messages from one thread makes two cards, and a new one joins the last", function()
+	local app = with_runs()
+	expect(app:has("#card-p4")).to_be(true)
+	expect(app:has("#card-p6")).to_be(true)
+	expect(string.find(app:tree("#card-p4"), "messages", 1, true)).to_be(nil)
+	app:command("peer_more")
+	app:frames(40)
+	expect(app:has("#card-p7")).to_be(false)
+	local card = app:tree("#card-p6")
+	expect(card).to_contain("2 messages")
+	expect(card).to_contain("Benchmarks attached.")
+end)
+
+test("threads: a wake right after its thread's card is the card's Done badge, not a row of its own", function()
+	local app = with_runs()
+	expect(app:has("#wake-p3")).to_be(false)
+	expect(app:has("#card-p1 >> .peer-card-done")).to_be(true)
+	expect(count_of(app:tree("#transcript"), "Delegated task “Review the diff” finished")).to_be(1)
 end)

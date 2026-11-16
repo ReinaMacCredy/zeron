@@ -1265,6 +1265,8 @@ return {
 	["ds.threads.plan.edit"] = "Edit plan",
 	["ds.threads.plan.approve"] = "Approve and run",
 	["ds.threads.plan.approved"] = "Approved",
+	["ds.threads.card.messages"] = "{n, plural, one {# message} other {# messages}}",
+	["ds.threads.card.toggle"] = "Messages from {title}",
 	["ds.annotation.add_to_chat"] = "Add to chat",
 	["ds.annotation.ask_side"] = "Ask in side chat",
 	["ds.annotation.comment"] = "Comment",

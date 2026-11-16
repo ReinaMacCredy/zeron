@@ -4,8 +4,23 @@ local FadeText = require("@self/fade_text")
 local status = require("@self/status")
 local locale = require("@self/locale")
 local Button = require("@self/button")
+local motion = require("@self/motion")
 
 local M = {}
+
+ui.theme.tokens {
+	zeron = {
+		peer_card = {
+			fill = "alpha({text.primary}, 0.02)",
+			ring = "alpha({accent}, 0.16)",
+			sweep = "alpha({accent}, 0.12)",
+			rule = "alpha({border}, 0.6)",
+			done = "alpha({success}, 0.15)",
+			failed = "alpha({danger}, 0.15)",
+			stopped = "alpha({text.secondary}, 0.15)",
+		},
+	},
+}
 
 -- (A table's length can't be trusted past a hole.)
 local function nodes(...: any): { Node }
@@ -1113,6 +1128,511 @@ function M.From(props: { id: string, senders: { string }, clock: string?, thread
 		row[i] = n
 	end
 	return ui.row(row)
+end
+
+local CARD_EASE = "cubicBezier(0.2, 0.8, 0.2, 1)"
+local STAGGER_MAX = 12
+local BADGE: { [string]: { ink: string, wash: string } } = {
+	done = { ink = "$success", wash = "$zeron.peer_card.done" },
+	failed = { ink = "$danger", wash = "$zeron.peer_card.failed" },
+	stopped = { ink = "$text.secondary", wash = "$zeron.peer_card.stopped" },
+}
+
+export type CardProps = {
+	id: string,
+	from: string,
+	threads: Threads?,
+	ids: () -> { string },
+	text: (id: string) -> string,
+	clock: (id: string) -> string?,
+	open: State<boolean>,
+	fresh: () -> boolean,
+	woken: () -> boolean,
+	found: (() -> boolean)?,
+	body: (id: string) -> Node,
+	lane: (id: string, hovered: () -> boolean) -> Node,
+	hovered: () -> boolean,
+}
+
+local function flat(s: string): string
+	return (string.gsub(string.gsub(s, "%s+", " "), "^%s*(.-)%s*$", "%1"))
+end
+
+local function live_dot(): Node
+	return ui.div {
+		class = "peer-card-live",
+		w = 6,
+		h = 6,
+		shrink = 0,
+		relative = true,
+		aria_hidden = true,
+		if motion.reduced_now()
+			then nil
+			else ui.div {
+				absolute = true,
+				left = 0,
+				top = 0,
+				w = 6,
+				h = 6,
+				rounded = "$radius.full",
+				bg = "$accent",
+				scale = ui.loop { from = 1, to = 3, duration = 1400, yoyo = false, fps = 30 },
+				opacity = ui.loop { from = 0.55, to = 0, duration = 1400, yoyo = false, fps = 30 },
+			},
+		ui.div { absolute = true, left = 0, top = 0, w = 6, h = 6, rounded = "$radius.full", bg = "$accent" },
+	}
+end
+
+local function badge(kind: string, pop: boolean): Node
+	local tone = BADGE[kind]
+	local reduced = motion.reduced_now()
+	return ui.row {
+		class = `peer-card-{kind}`,
+		h = 16,
+		px = ui.raw(6, "the mockup's peer card"),
+		gap = ui.raw(3, "the mockup's peer card"),
+		rounded = "$radius.lg",
+		shrink = 0,
+		items = "center",
+		bg = tone.wash,
+		color = tone.ink,
+		opacity = if pop then 0 else 1,
+		on_mount = if pop
+			then function(el)
+				anime.animate(el, if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else {
+					opacity = { 0, 1 },
+					scale = { { from = 0.4, to = 1.12, duration = 204, ease = "out(2)" }, { to = 1, duration = 136, ease = "inOut(2)" } },
+					duration = 204,
+				})
+			end
+			else nil,
+		if kind == "done"
+			then ui.div {
+				shrink = 0,
+				aria_hidden = true,
+				opacity = if pop then 0 else 1,
+				on_mount = if pop
+					then function(el)
+						anime.animate(el, if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, scale = { 0.3, 1 }, delay = 180, duration = 260, ease = "out(2)" })
+					end
+					else nil,
+				Icon { name = "check", size = 9 },
+			}
+			else nil,
+		ui.text { locale.s(`ds.threads.state.{kind}`), wrap = false, text_size = ui.raw(10, "the mockup's peer card"), weight = "$font.weight.semibold" },
+	}
+end
+
+function M.Card(props: CardProps): Node
+	local threads = props.threads
+	local open = props.open
+	local function child(): Child?
+		return if threads then threads.child(props.from) else nil
+	end
+	local function title(): string
+		local c = child()
+		return if c and c.title and c.title ~= "" then c.title else props.from
+	end
+	local function model(): string
+		local c = child()
+		if not c or not c.model then
+			return ""
+		end
+		return (if threads and threads.model_label then threads.model_label(c.harness, c.model) else nil) or c.model
+	end
+	local function standing(): string?
+		local c = child()
+		if not c then
+			return nil
+		end
+		local d = c.delegation
+		if d == "failed" then
+			return "failed"
+		elseif d == "cancelled" or d == "interrupted" then
+			return "stopped"
+		elseif d == "completed" or props.woken() then
+			return "done"
+		end
+		return if c.status == "working" then "working" else nil
+	end
+	local function newest(): string
+		local ids = props.ids()
+		return ids[#ids] or props.id
+	end
+	local c0 = child()
+	local mark = if c0 then c0.mark or c0.agent else nil
+	local mounted = false
+	local opened_at = -1e9
+	local turn = ui.use_state(if open:peek() then 1 else 0)
+	local natural = ui.use_state(0)
+	local flash = ui.use_state(0)
+	local sweep = ui.use_state(0)
+	local card_w = ui.use_state(0)
+	local over = ui.use_state(nil :: string?)
+	local turning: any = nil
+	local function set_open(on: boolean)
+		if open:peek() == on then
+			return
+		end
+		if on then
+			opened_at = ui.now()
+		end
+		open:set(on)
+		if turning then
+			turning:pause()
+			turning = nil
+		end
+		if motion.reduced_now() then
+			turn:set(if on then 1 else 0)
+			return
+		end
+		turning = anime.animate(turn, { value = { turn:peek(), if on then 1 else 0 }, duration = 220, ease = CARD_EASE })
+	end
+	local function flash_border()
+		if motion.reduced_now() then
+			return
+		end
+		flash:set(1)
+		anime.animate(flash, { value = { 1, 0 }, delay = 350, duration = 650, ease = "out(2)" })
+	end
+	if props.found then
+		local found = props.found
+		ui.effect(function()
+			if found() then
+				set_open(true)
+			end
+		end)
+	end
+	local seen: string? = nil
+	ui.effect(function()
+		local id = newest()
+		local was = seen
+		seen = id
+		if was == nil or was == id or not mounted then
+			return
+		end
+		flash_border()
+		if not open:peek() and not motion.reduced_now() then
+			sweep:set(0)
+			anime.animate(sweep, { value = { 0, 1 }, duration = 750, ease = "out(2)" })
+		end
+	end)
+	local reduced = motion.reduced_now()
+	local roll_in = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, y = { 12, 0 }, duration = 260, ease = CARD_EASE }
+	local roll_out = if reduced then { opacity = 0, duration = motion.FADE } else { opacity = 0, y = -12, duration = 260, ease = CARD_EASE }
+	local items = ui.computed(function(): { { id: string, k: number } }
+		local out = {}
+		for k, id in props.ids() do
+			table.insert(out, { id = id, k = k })
+		end
+		return out
+	end)
+
+	local function item(it: { id: string, k: number }): Node
+		local id, k = it.id, it.k
+		local function last(): boolean
+			return newest() == id
+		end
+		local staggered = ui.now() - opened_at < 100 and #props.ids() <= STAGGER_MAX
+		local arriving = mounted and ui.now() - opened_at >= 100 and last()
+		local moves = staggered or arriving
+		return ui.column {
+			id = `{props.id}-item-{id}`,
+			class = "peer-card-item",
+			relative = true,
+			w_full = true,
+			min_w = 0,
+			pt = "$space.2",
+			pl = ui.raw(30, "the mockup's peer card"),
+			pr = "$space.3",
+			opacity = if moves then 0 else 1,
+			on_mount = if moves
+				then function(el)
+					anime.animate(el, if motion.reduced_now() then { opacity = { 0, 1 }, duration = motion.FADE } elseif staggered then { opacity = { 0, 1 }, y = { 6, 0 }, duration = 240, delay = 40 * (k - 1), ease = CARD_EASE } else { opacity = { 0, 1 }, y = { 6, 0 }, duration = 200, ease = CARD_EASE })
+				end
+				else nil,
+			on_hover = function(inside: boolean)
+				if inside then
+					over:set(id)
+				elseif over:peek() == id then
+					over:set(nil)
+				end
+			end,
+			on_focus = function()
+				over:set(id)
+			end,
+			ui.div { absolute = true, left = 0, right = 0, top = 0, h = 1, bg = "$zeron.peer_card.rule", aria_hidden = true },
+			ui.div {
+				absolute = true,
+				left = 11,
+				top = 11,
+				w = 8,
+				h = 8,
+				rounded = "$radius.full",
+				border = 1.5,
+				border_color = function(): string
+					return if last() then "$accent" else "$text.tertiary"
+				end,
+				bg = function(): string
+					return if last() then "$accent" else "#00000000"
+				end,
+				aria_hidden = true,
+			},
+			ui.row {
+				w_full = true,
+				min_w = 0,
+				items = "start",
+				gap = "$space.2",
+				-- (The prose sets its own ink; an older one is dimmed toward the secondary.)
+				ui.column {
+					grow = 1,
+					min_w = 0,
+					opacity = function(): number
+						return if last() then 1 else 0.72
+					end,
+					props.body(id),
+				},
+				ui.text {
+					function(): string
+						return props.clock(id) or ""
+					end,
+					literal = true,
+					shrink = 0,
+					wrap = false,
+					pt = ui.raw(3, "the mockup's peer card"),
+					font = "$font.mono",
+					text_size = ui.raw(10, "the mockup's peer card"),
+					color = "$text.tertiary",
+				},
+			},
+			props.lane(id, function(): boolean
+				return props.hovered() and over:get() == id
+			end),
+		}
+	end
+
+	local header = ui.button {
+		id = `{props.id}-head`,
+		class = "peer-card-head",
+		label = function(): string
+			return locale.s("ds.threads.card.toggle", { title = title() })
+		end,
+		expanded = function(): boolean
+			return open:get()
+		end,
+		selectable = false,
+		w_full = true,
+		min_w = 0,
+		h = 32,
+		p = 0,
+		pl = ui.raw(11, "the mockup's peer card"),
+		pr = ui.raw(10, "the mockup's peer card"),
+		gap = ui.raw(7, "the mockup's peer card"),
+		items = "center",
+		rounded = 0,
+		bg = "#00000000",
+		hover = { bg = "$hover" },
+		active = { bg = "$hover" },
+		text_size = "$font.size.xs",
+		color = "$text.secondary",
+		cursor = "pointer",
+		on_click = function()
+			set_open(not open:peek())
+		end,
+		on_press = function() end,
+		on_release = function() end,
+		ui.div {
+			shrink = 0,
+			aria_hidden = true,
+			color = "$text.tertiary",
+			rotate = motion.tween(ui.computed(function(): number
+				return if open:get() then 90 else 0
+			end), { duration = 220, ease = CARD_EASE }),
+			Icon { name = "chevron-right", size = 10 },
+		},
+		if mark then ui.div { shrink = 0, aria_hidden = true, AgentMark.Mark { label = mark, mark = mark, size = 12, bare = true } } else nil,
+		ui.button {
+			id = `{props.id}-from-{props.from}`,
+			label = function(): string
+				return locale.s("ds.threads.from_label", { title = title() })
+			end,
+			h = "auto" :: any,
+			p = 0,
+			min_w = 0,
+			shrink = 1,
+			bg = "#00000000",
+			hover = { bg = "#00000000" },
+			active = { bg = "#00000000" },
+			color = "$text.primary",
+			cursor = "pointer",
+			on_click = function()
+				if threads and threads.open_chat then
+					threads.open_chat(props.from)
+				end
+			end,
+			ui.text { title, literal = true, truncate = true, wrap = false, weight = "$font.weight.medium" },
+		},
+		ui.text { model, literal = true, shrink = 0, wrap = false, color = "$text.tertiary" },
+		ui.presence(standing, function(kind: string): Node
+			if kind == "working" then
+				return live_dot()
+			end
+			return badge(kind, mounted)
+		end, { shrink = 0 }),
+		ui.div { grow = 1, min_w = 0 },
+		ui.presence(function(): string?
+			local n = #props.ids()
+			return if n > 1 then tostring(n) else nil
+		end, function(n: string): Node
+			return ui.text { locale.s("ds.threads.card.messages", { n = tonumber(n) }), wrap = false, color = "$text.tertiary" }
+		end, { shrink = 0, enter = roll_in, exit = roll_out }),
+		ui.text {
+			function(): string
+				return props.clock(newest()) or ""
+			end,
+			literal = true,
+			shrink = 0,
+			wrap = false,
+			font = "$font.mono",
+			text_size = ui.raw(10, "the mockup's peer card"),
+			color = "$text.tertiary",
+		},
+	}
+
+	local card = ui.column {
+		id = props.id,
+		class = "peer-card",
+		relative = true,
+		w_full = true,
+		min_w = 0,
+		rounded = "$radius.xl",
+		border = 1,
+		border_color = "$border",
+		bg = "$zeron.peer_card.fill",
+		overflow = "hidden",
+		on_resize = function(size: { w: number, h: number })
+			card_w:set(size.w)
+		end,
+		header,
+		ui.show(
+			function(): boolean
+				return not open:get()
+			end,
+			ui.column {
+				w_full = true,
+				min_w = 0,
+				pl = ui.raw(30, "the mockup's peer card"),
+				pr = "$space.3",
+				pb = ui.raw(10, "the mockup's peer card"),
+				ui.presence(newest, function(id: string): Node
+					return ui.text {
+						function(): string
+							return flat(props.text(id))
+						end,
+						class = "peer-card-preview",
+						literal = true,
+						wrap = true,
+						lines = 2,
+						truncate = true,
+						w_full = true,
+						min_w = 0,
+						text_size = "$font.size.md",
+						color = "$text.secondary",
+					}
+				end, {
+					w_full = true,
+					enter = if reduced then roll_in else { opacity = { 0, 1 }, y = { 8, 0 }, delay = 90, duration = 260, ease = CARD_EASE },
+					exit = if reduced then roll_out else { opacity = 0, y = -10, duration = 200, ease = "in(2)" },
+				}),
+			}
+		),
+		ui.show(
+			function(): boolean
+				return open:get() or turn:get() > 0
+			end,
+			ui.column {
+				w_full = true,
+				min_w = 0,
+				overflow = function(): string
+					return if turn:get() < 1 then "hidden" else "visible"
+				end,
+				max_h = function(): number
+					local t = turn:get()
+					return if t < 1 then t * natural:get() else 1e6
+				end,
+				ui.column {
+					w_full = true,
+					min_w = 0,
+					shrink = 0,
+					on_resize = function(size: { w: number, h: number })
+						natural:set(size.h)
+					end,
+					ui.each(items, item, {
+						key = function(it: { id: string, k: number }): string
+							return it.id
+						end,
+						w_full = true,
+					}),
+				},
+			}
+		),
+		ui.div {
+			absolute = true,
+			top = 0,
+			bottom = 0,
+			w = function(): number
+				return card_w:get() * 0.45
+			end,
+			left = function(): number
+				local band = card_w:get() * 0.45
+				return -band + sweep:get() * (card_w:get() + band)
+			end,
+			opacity = function(): number
+				local s = sweep:get()
+				return if s <= 0 or s >= 1 then 0 else math.sin(s * math.pi)
+			end,
+			bg = "$zeron.peer_card.sweep",
+			rounded = "$radius.full",
+			pointer_events = "none",
+			aria_hidden = true,
+		},
+	}
+
+	return ui.column {
+		relative = true,
+		w_full = true,
+		min_w = 0,
+		on_mount = function(el)
+			mounted = true
+			if not props.fresh() then
+				return
+			end
+			if motion.reduced_now() then
+				anime.animate(el, { opacity = { 0, 1 }, duration = motion.FADE })
+				return
+			end
+			anime.animate(el, { opacity = { 0, 1 }, y = { 12, 0 }, scale = { 0.98, 1 }, duration = 280, ease = CARD_EASE })
+			flash_border()
+		end,
+		card,
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			rounded = "$radius.xl",
+			border = 1,
+			border_color = "$accent",
+			outline = 3,
+			outline_color = "$zeron.peer_card.ring",
+			pointer_events = "none",
+			aria_hidden = true,
+			opacity = function(): number
+				return flash:get()
+			end,
+		},
+	}
 end
 
 function M.AutoContinue(): Node

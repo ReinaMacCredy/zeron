@@ -1525,6 +1525,10 @@
         "edit": "Edit plan",
         "approve": "Approve and run",
         "approved": "Approved"
+      },
+      "card": {
+        "messages": "{n, plural, one {# message} other {# messages}}",
+        "toggle": "Messages from {title}"
       }
     },
     "annotation": {
@@ -3570,6 +3574,14 @@
         "label": "Delegated tasks per chat",
         "description": "How many delegated tasks one chat may run at once.",
         "terms": "delegated tasks per chat running children limit"
+      },
+      "notes": {
+        "title": "Model notes",
+        "description": "One line per model on its cost and what it suits. Agents read these notes to choose the model and effort for each child.",
+        "terms": "model notes cost effort choose describe description",
+        "name": "Note for {model}",
+        "placeholder": "Cost and what this model suits",
+        "reset": "Reset"
       }
     },
     "playbooks": {

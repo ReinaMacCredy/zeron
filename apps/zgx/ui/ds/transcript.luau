@@ -1320,6 +1320,7 @@ local function Transcript(props: Props): Node
 	end)
 	-- A prompt the host adds at the end on its own (a queued message, as a turn or a compaction ends) lands in place.
 	local landing: { id: string, at: number }? = nil
+	local arrived: { [string]: number } = {}
 	local tail: string? = nil
 	local tail_read = false
 	ui.effect(function()
@@ -1331,6 +1332,12 @@ local function Transcript(props: Props): Node
 		end
 		local was, first = tail, not tail_read
 		tail, tail_read = id, true
+		if not first and was and last and last.from_chat ~= nil then
+			local at = messages:index_of("id", was)
+			if at and at < n then
+				arrived[id :: string] = ui.now()
+			end
+		end
 		if first or not last or not was or last.role ~= "user" or last.from_chat ~= nil or SENT:peek()[id] or not at_end:peek() or motion.reduced_now() then
 			return
 		end
@@ -2394,6 +2401,110 @@ local function Transcript(props: Props): Node
 		return if r and r.id == id then r.dy else 0
 	end
 
+	local function peer_of(x: Message): string?
+		if x.role ~= "user" or not x.from_chat or x.continued_on ~= nil or x.wake or (x.steps and #x.steps > 1) then
+			return nil
+		end
+		return if voice_of(x, props) == "peer" then x.from_chat else nil
+	end
+	local cards_open: { [string]: boolean } = {}
+	local function peer_card(m: Message, index: State<number>, shape: () -> string, hovered: () -> boolean): Node
+		local ids = ui.computed(function(): { string }
+			local s = shape()
+			return if string.sub(s, 1, 5) == "card\0" then string.split(string.sub(s, 8), "\0") else { m.id }
+		end)
+		local function at(id: string): Message?
+			local k = table.find(ids:get(), id)
+			local x = if k then messages:at(index:get() + k - 1) else nil
+			return if x and x.id == id then x else nil
+		end
+		local function lane(id: string, hov: () -> boolean): Node
+			local now = ui.computed(function(): Message
+				return at(id) or ({ id = id, role = "user", text = "" } :: Message)
+			end)
+			return ui.column {
+				provide = { message = id },
+				w_full = true,
+				strip({ id = id, role = "user", text = "" } :: Message, now :: any, hov),
+			}
+		end
+		local open = ui.use_state(cards_open[m.id] == true)
+		ui.effect(function()
+			cards_open[m.id] = if open:get() then true else nil
+		end)
+		local function newest(): string
+			local l = ids:get()
+			return l[#l] or m.id
+		end
+		return ui.column {
+			w_full = true,
+			min_w = 0,
+			Threads.Card {
+				id = `card-{m.id}`,
+				from = m.from_chat :: string,
+				threads = props.threads,
+				ids = function(): { string }
+					return ids:get()
+				end,
+				text = function(id: string): string
+					local x = at(id)
+					return if x then x.text or "" else ""
+				end,
+				clock = function(id: string): string?
+					local x = at(id)
+					return if x then x.clock else nil
+				end,
+				open = open,
+				fresh = function(): boolean
+					local came = arrived[m.id]
+					return came ~= nil and ui.now() - came < 1500
+				end,
+				woken = function(): boolean
+					return string.sub(shape(), 6, 6) == "w"
+				end,
+				found = if find
+					then function(): boolean
+						local c = (find :: TranscriptFind).current()
+						if not c then
+							return false
+						end
+						local i = index:get()
+						return c.row >= i and c.row < i + #ids:get()
+					end
+					else nil,
+				body = function(id: string): Node
+					return ui.column {
+						class = "message message-peer",
+						provide = { message = id },
+						w_full = true,
+						min_w = 0,
+						Markdown {
+							text = function(): string
+								local x = at(id)
+								return if x then x.text or "" else ""
+							end,
+							breaks = true,
+							open = props.open_link,
+							chat_mark = chat_mark,
+							link_menu = props.link_menu,
+							find = if find_for then find_for(`{id}:u`) else nil,
+						},
+					}
+				end,
+				lane = lane,
+				hovered = hovered,
+			},
+			ui.show(
+				function(): boolean
+					return not open:get()
+				end,
+				ui.presence(newest, function(id: string): Node
+					return lane(id, hovered)
+				end, { w_full = true })
+			),
+		}
+	end
+
 	local function row(m: Message, index: State<number>, state: State<Message>): Node
 		local mine = m.role == "user"
 		-- The runway: the room under the newest prompt that lets it stand at
@@ -2479,9 +2590,49 @@ local function Transcript(props: Props): Node
 		local function told(): boolean
 			return foldable and state:get().continued_on ~= nil
 		end
+		local voice = if mine then voice_of(m, props) else nil
+		local woken = if voice == "wake" and m.wake and #m.wake == 1 then m.wake[1] else nil
+		local grouped = voice == "peer" and peer_of(m) ~= nil
+		local shape: (() -> string)? = nil
+		if grouped or woken then
+			local from = m.from_chat
+			local made = ui.computed(function(): string
+				local i = index:get()
+				local prev = if i > 1 then messages:at(i - 1) else nil
+				local before = if prev then peer_of(prev) else nil
+				if woken then
+					return if before == woken then "gone" else "wake"
+				end
+				if before == from then
+					return "gone"
+				end
+				local ids = { m.id }
+				local k = i + 1
+				while true do
+					local nx = messages:at(k)
+					if not nx or peer_of(nx) ~= from then
+						break
+					end
+					table.insert(ids, nx.id)
+					k += 1
+				end
+				local after = messages:at(k)
+				local woke = after ~= nil and after.role == "user" and after.from_chat ~= nil and after.wake ~= nil and #after.wake == 1 and after.wake[1] == from and voice_of(after, props) == "wake"
+				return `card\0{if woke then "w" else "-"}\0` .. table.concat(ids, "\0")
+			end)
+			shape = function(): string
+				return made:get()
+			end
+		end
+		local function gone(): boolean
+			return shape ~= nil and (shape :: () -> string)() == "gone"
+		end
 		-- Zeron's gaps: a message opens 16 under the lane of the one before;
 		-- a prompt sits 6 under the switch seam over it.
 		local function pt(): number
+			if gone() then
+				return 0
+			end
 			if told() then
 				return 0
 			end
@@ -2669,8 +2820,18 @@ local function Transcript(props: Props): Node
 					elseif m.role == "system" then line_row(m.hint, function(): any
 						return state:get()
 					end, `{m.id}:row`, find_for)
-					elseif mine and voice_of(m, props) == "wake" then Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
-					elseif mine and voice_of(m, props) == "peer" then ui.column {
+					elseif voice == "wake" and shape then ui.presence(function(): string?
+						return if (shape :: () -> string)() == "wake" then "wake" else nil
+					end, function(): Node
+						return Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
+					end, { w_full = true })
+					elseif voice == "wake" then Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
+					elseif grouped and shape then ui.presence(function(): string?
+						return if (shape :: () -> string)() ~= "gone" then "card" else nil
+					end, function(): Node
+						return peer_card(m, index, shape :: () -> string, hovered)
+					end, { w_full = true })
+					elseif voice == "peer" then ui.column {
 						class = "message message-peer",
 						provide = { message = m.id },
 						w_full = true,

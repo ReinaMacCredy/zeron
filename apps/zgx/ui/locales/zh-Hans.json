@@ -1525,6 +1525,10 @@
         "edit": "编辑计划",
         "approve": "批准并运行",
         "approved": "已批准"
+      },
+      "card": {
+        "messages": "{n, plural, other {# 条消息}}",
+        "toggle": "来自 {title} 的消息"
       }
     },
     "annotation": {
@@ -3570,6 +3574,14 @@
         "label": "每个对话的委派任务数",
         "description": "一个对话同时最多可以运行多少个委派任务。",
         "terms": "委派 任务 每个对话 同时 上限"
+      },
+      "notes": {
+        "title": "模型说明",
+        "description": "每个模型一行说明，写明成本和适合的工作。智能体按这些说明为每个子任务选择模型和推理强度。",
+        "terms": "模型 说明 成本 推理强度 选择 描述",
+        "name": "{model} 的说明",
+        "placeholder": "成本，以及这个模型适合做什么",
+        "reset": "重置"
       }
     },
     "playbooks": {
