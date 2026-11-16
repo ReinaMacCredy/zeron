@@ -40,11 +40,31 @@ impl RegistryDoc {
         Ok(row)
     }
 
+    /// Closed plans' overviews give way, oldest first, so a long history never refuses a write.
     fn plan_op(&mut self, chat_id: &str, plan: Option<&ChatPlan>) -> Result<RowOp, DocError> {
-        if let Some(plan) = plan {
-            check_plan(plan)?;
+        let Some(plan) = plan else {
+            return self.chat_op(chat_id, fields([("plan", Value::Null)]));
+        };
+        check_plan(plan)?;
+        let mut plan = plan.clone();
+        loop {
+            let op = self.chat_op(chat_id, fields([("plan", plan_value(Some(&plan))?)]));
+            match plan.closed.iter_mut().find(|old| !old.overview.is_empty()) {
+                Some(old) if op.is_err() => old.overview.clear(),
+                _ => return op,
+            }
         }
-        self.chat_op(chat_id, fields([("plan", plan_value(plan)?)]))
+    }
+
+    fn current_steps(&self, chat_id: &str, plan: Option<&ChatPlan>) -> Vec<TaskStep> {
+        self.steps_of(chat_id)
+            .into_iter()
+            .filter(|step| !plan.is_some_and(|plan| plan.is_closed(step.plan)))
+            .collect()
+    }
+
+    fn chat_plan(&self, chat_id: &str) -> Result<Option<ChatPlan>, DocError> {
+        Ok(self.chat(chat_id)?.and_then(|chat| chat.plan))
     }
 
     pub fn set_chat_plan(
@@ -53,13 +73,17 @@ impl RegistryDoc {
         plan: Option<&ChatPlan>,
         pending: bool,
     ) -> Result<(), DocError> {
-        if let Some(plan) = plan {
-            check_plan(plan)?;
+        let mut plan = plan.cloned();
+        if let Some(plan) = plan.as_mut().filter(|plan| plan.closed.is_empty()) {
+            plan.closed = self
+                .chat_plan(chat_id)?
+                .map(|old| old.closed)
+                .unwrap_or_default();
         }
-        let op = self.chat_op(
-            chat_id,
-            fields([("plan", plan_value(plan)?), ("planPending", json!(pending))]),
-        )?;
+        let mut op = self.plan_op(chat_id, plan.as_ref())?;
+        if let Some(set) = op.set.as_mut() {
+            set.insert("planPending".into(), json!(pending));
+        }
         self.enqueue_ops(vec![op]);
         Ok(())
     }
@@ -79,11 +103,18 @@ impl RegistryDoc {
         pending: bool,
         now: DateTime<Utc>,
     ) -> Result<(), DocError> {
-        let (kept, dropped): (Vec<TaskStep>, Vec<TaskStep>) = self
-            .steps_of(chat_id)
+        let replaced = self.chat_plan(chat_id)?;
+        let dropped: Vec<TaskStep> = self
+            .current_steps(chat_id, replaced.as_ref())
             .into_iter()
-            .partition(|step| self.step_started(step));
-        check_step_count(kept.len() + steps.len())?;
+            .filter(|step| !self.step_started(step))
+            .collect();
+        let kept = self
+            .current_steps(chat_id, Some(plan))
+            .into_iter()
+            .filter(|step| self.step_started(step))
+            .count();
+        check_step_count(kept + steps.len())?;
         let mut plan_op = self.plan_op(chat_id, Some(plan))?;
         if pending && let Some(set) = plan_op.set.as_mut() {
             set.insert("planPending".into(), json!(true));
@@ -112,9 +143,8 @@ impl RegistryDoc {
         deletes: &[String],
         now: DateTime<Utc>,
     ) -> Result<(), DocError> {
-        check_step_count(
-            (self.steps_of(chat_id).len() + creates.len()).saturating_sub(deletes.len()),
-        )?;
+        let current = self.current_steps(chat_id, self.chat_plan(chat_id)?.as_ref());
+        check_step_count((current.len() + creates.len()).saturating_sub(deletes.len()))?;
         let mut batch: Vec<RowOp> = match plan {
             Some(plan) => vec![self.plan_op(chat_id, Some(plan))?],
             None => Vec::new(),
@@ -188,6 +218,7 @@ impl RegistryDoc {
                 same_agents: flag(&task, "sameAgents"),
                 images: list(&task, "images"),
                 resources: list(&task, "resources"),
+                closed: Vec::new(),
             };
             let Ok(plan) = serde_json::to_value(&plan) else {
                 continue;

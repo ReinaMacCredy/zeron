@@ -68,30 +68,30 @@ function M.question(chat: string?): string?
 	return nil
 end
 
+local function steps_in(rows: { any }?, order: { string }?): { any }
+	local by: { [string]: any } = {}
+	for _, r in rows or {} do
+		if r.step then
+			by[r.step] = r
+		end
+	end
+	local out: { any } = {}
+	for i, id in order or {} do
+		table.insert(out, { id = id, at = i, row = by[id] })
+	end
+	return out
+end
+
 local function steps_of(chat: string?): ({ any }, any)
 	local entry = M.of(chat)
 	local plan = entry and entry.plan
 	if not plan then
 		return {}, nil
 	end
-	local by: { [string]: any } = {}
-	for _, r in entry.rows or {} do
-		if r.step then
-			by[r.step] = r
-		end
-	end
-	local out: { any } = {}
-	for i, id in plan.order or {} do
-		table.insert(out, { id = id, at = i, row = by[id] })
-	end
-	return out, plan
+	return steps_in(entry.rows, plan.order), plan
 end
 
-local function build_card(chat: string?): any
-	local steps, plan = steps_of(chat)
-	if not plan then
-		return nil
-	end
+local function lines_of(steps: { any }): ({ any }, { [string]: any }, { [string]: string })
 	local lines: { any } = {}
 	local by_step: { [string]: any } = {}
 	local by_thread: { [string]: string } = {}
@@ -129,6 +129,37 @@ local function build_card(chat: string?): any
 			end
 		end
 	end
+	return lines, by_step, by_thread
+end
+
+local function build_card(chat: string?): any
+	local steps, plan = steps_of(chat)
+	if not plan then
+		return nil
+	end
+	local lines, by_step, by_thread = lines_of(steps)
+	local closed: { any } = {}
+	for _, c in (if type(plan.closed) == "table" then plan.closed else {}) do
+		local own = steps_in(c.rows, c.order)
+		local l, b, t = lines_of(own)
+		table.insert(closed, {
+			number = c.number,
+			done = c.done or 0,
+			total = c.total or #own,
+			review = c.review or 0,
+			overview = c.overview,
+			written = c.written,
+			ended = c.closed,
+			ran = c.ran,
+			until_id = c["until"],
+			count = #own,
+			steps = l,
+			by_step = b,
+			threads = t,
+			rows = c.rows or {},
+			order = c.order or {},
+		})
+	end
 	local progress = plan.progress or {}
 	return {
 		overview = plan.overview or "",
@@ -139,6 +170,9 @@ local function build_card(chat: string?): any
 		threads = by_thread,
 		done = progress.done or 0,
 		total = progress.total or #steps,
+		number = plan.number or 1,
+		review = plan.review or 0,
+		closed = closed,
 	}
 end
 
@@ -392,7 +426,7 @@ function M.edit(chat: string?)
 	end
 	local k, id = tab_of(chat)
 	if k and id then
-		state.patch(k, id, { editing = true, thread = false })
+		state.patch(k, id, { editing = true, thread = false, history = false })
 	end
 end
 
@@ -1162,7 +1196,27 @@ local GroupSection = ui.component(function(props: { ctx: Ctx, group: string, row
 	end, { w_full = true })
 end)
 
-local function PlanBar(chat: string): Node
+local function closed_of(p: any): number
+	return if p and type(p.closed) == "table" then #p.closed else 0
+end
+
+local function review_of(p: any): number
+	return if p and type(p.review) == "number" then p.review else 0
+end
+
+local function plan_title(p: any): string
+	return if closed_of(p) > 0 then locale.s("chat.threads.plan.numbered", { n = p.number or 1 }) else locale.s("chat.threads.plan.title")
+end
+
+local history_at = -1e9
+
+function M.history(ctx: Ctx)
+	history_at = ui.now()
+	state.patch(ctx.key, ctx.tab, { history = true })
+end
+
+local function PlanBar(ctx: Ctx): Node
+	local chat = ctx.session
 	local function plan(): any
 		local e = M.of(chat)
 		return e and e.plan
@@ -1182,7 +1236,14 @@ local function PlanBar(chat: string): Node
 			w_full = true,
 			items = "center",
 			gap = ui.raw(6, "the mockup's plan bar"),
-			ui.text { locale.t("chat.threads.plan.title"), weight = "$font.weight.semibold", wrap = false },
+			ui.text {
+				function(): string
+					return plan_title(plan())
+				end,
+				id = "threads-plan-title",
+				weight = "$font.weight.semibold",
+				wrap = false,
+			},
 			Transcript.Roll {
 				id = "threads-plan-progress",
 				value = function(): string
@@ -1215,6 +1276,43 @@ local function PlanBar(chat: string): Node
 				end,
 			})
 		end
+		table.insert(head, ui.show(function(): boolean
+			return closed_of(plan()) > 0
+		end, ds.Button {
+			Icon { name = "clock-circle", size = 12 },
+			ui.text { locale.t("chat.threads.plan.history"), wrap = false },
+			ui.show(function(): boolean
+				return review_of(plan()) > 0
+			end, ui.row {
+				id = "threads-plan-history-count",
+				h = ui.raw(16, "the mockup's history count"),
+				min_w = ui.raw(16, "the mockup's history count"),
+				px = ui.raw(4, "the mockup's history count"),
+				items = "center",
+				justify = "center",
+				rounded = "$radius.full",
+				bg = "$zeron.tone.warning.wash",
+				ui.text {
+					function(): string
+						return tostring(review_of(plan()))
+					end,
+					wrap = false,
+					tabular = true,
+					text_size = ui.raw(10.5, "the mockup's history count"),
+					weight = "$font.weight.semibold",
+					color = "$zeron.tone.warning.ink",
+				},
+			}),
+			label = function(): string
+				return locale.s("chat.threads.plan.history_label", { n = review_of(plan()) })
+			end,
+			id = "threads-plan-history",
+			tone = "ghost",
+			size = "xs",
+			on_click = function()
+				M.history(ctx)
+			end,
+		}))
 		table.insert(head, ds.Button {
 			locale.t("chat.threads.plan.edit"),
 			id = "threads-plan-edit",
@@ -1350,13 +1448,394 @@ local function List(ctx: Ctx): Node
 					px = ui.raw(8, "the mockup's list"),
 					pt = ui.raw(6, "the mockup's list"),
 					pb = ui.raw(20, "the mockup's list"),
-					PlanBar(chat),
+					PlanBar(ctx),
 					ui.column(sections),
 				},
 			}
 		end, { w_full = true, grow = 1, min_h = 0 }),
 	}
 end
+
+local history_folds = ui.state("chat_threads_history_open", {} :: { [string]: boolean })
+
+local function closed_plan(chat: string, number: number): any?
+	local c = M.card(chat)
+	for _, p in (if c then c.closed else {}) do
+		if p.number == number then
+			return p
+		end
+	end
+	return nil
+end
+
+local function history_word(r: any): string?
+	local st = r.state
+	if st == "readyForReview" then
+		return locale.s("chat.threads.group.review")
+	elseif st == "waitingOnYou" then
+		return locale.s("chat.threads.group.waiting")
+	elseif st == "working" then
+		return locale.s("chat.threads.group.working")
+	elseif st == "planned" then
+		return locale.s("chat.threads.group.planned")
+	elseif st == "failed" then
+		return locale.s("ds.status.failed")
+	end
+	return tag_of(r)
+end
+
+local HistoryRow = ui.component(function(props: { ctx: Ctx, now: () -> any }): Node
+	local ctx, now = props.ctx, props.now
+	local dk = dom_id(now().id or "")
+	local hovered = ui.use_state(false)
+	return ui.row {
+		id = `threads-history-row-{dk}`,
+		class = "threads-history-row",
+		label = function(): string
+			return now().title or ""
+		end,
+		w_full = true,
+		p = ui.raw(6, "the mockup's history row"),
+		gap = ui.raw(8, "the mockup's history row"),
+		items = "start",
+		rounded = ui.raw(7, "the mockup's history row"),
+		bg = function(): string
+			return if hovered:get() and now().chat then "$hover" else "#00000000"
+		end,
+		cursor = function(): string
+			return if now().chat then "pointer" else "default"
+		end,
+		on_hover = function(inside: boolean)
+			hovered:set(inside)
+		end,
+		on_click = function()
+			local c = now().chat
+			if c then
+				state.patch(ctx.key, ctx.tab, { thread = c })
+			end
+		end,
+		ui.presence(function(): string
+			return now().state or "done"
+		end, function(st: string): Node
+			return ui.div { mt = ui.raw(1, "the mockup's history row"), M.state_icon(st, 16) }
+		end, { shrink = 0 }),
+		ui.text {
+			function(): string
+				return tostring(now().number or "")
+			end,
+			min_w = ui.raw(14, "the mockup's step number"),
+			shrink = 0,
+			tabular = true,
+			wrap = false,
+			align = "right",
+			color = "$text.tertiary",
+		},
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = ui.raw(1, "the mockup's history row"),
+			FadeText {
+				function(): string
+					return now().title or ""
+				end,
+				literal = true,
+				min_w = 0,
+				shrink = 1,
+				color = "$text.primary",
+			},
+			ui.row {
+				gap = ui.raw(4, "the mockup's history row"),
+				items = "center",
+				text_size = ui.raw(11.5, "the mockup's history row"),
+				color = "$text.tertiary",
+				ui.presence(function(): string?
+					return history_word(now())
+				end, function(w: string): Node
+					return ui.text { w, literal = true, wrap = false }
+				end, { shrink = 0 }),
+				Transcript.Chips {
+					chips = function(): { any }
+						return Transcript.chips(now())
+					end,
+				},
+				ui.show(
+					function(): boolean
+						return now().state == "readyForReview"
+					end,
+					ui.row {
+						gap = ui.raw(4, "the mockup's history row"),
+						items = "center",
+						ui.text { "·", literal = true, wrap = false },
+						ui.button {
+							id = `threads-history-done-{dk}`,
+							label = function(): string
+								return `{locale.s("chat.threads.menu.done")} {now().title or ""}`
+							end,
+							p = 0,
+							bg = "#00000000",
+							color = "$text.secondary",
+							hover = { color = "$text.primary", underline = true },
+							on_click = function()
+								call("threads.mark", { step = now().id, state = "done" })
+							end,
+							ui.text { locale.t("chat.threads.menu.done"), wrap = false },
+						},
+					}
+				),
+			},
+		},
+	}
+end)
+
+local HistoryCard = ui.component(function(props: { ctx: Ctx, number: number }): Node
+	local ctx, number = props.ctx, props.number
+	local chat = ctx.session
+	local fold = `{chat}:{number}`
+	local last = closed_plan(chat, number) or {}
+	local function now(): any
+		local p = closed_plan(chat, number)
+		if p then
+			last = p
+		end
+		return last
+	end
+	local open = ui.computed(function(): boolean
+		return history_folds:get()[fold] == true
+	end)
+	local steps = ui.computed(function(): { any }
+		return now().steps or {}
+	end)
+	local by_id = ui.computed(function(): { [string]: any }
+		local out: { [string]: any } = {}
+		for _, s in steps:get() do
+			out[s.id] = s
+		end
+		return out
+	end)
+	local reduced = motion.reduced_now()
+	local opened_at = -1e9
+	local function when(): string
+		local p = now()
+		local date = if type(p.written) == "number" then locale.month_day(p.written) else ""
+		local ran = if type(p.ran) == "number" then Transcript.elapsed(p.ran) else ""
+		return if date ~= "" and ran ~= "" then locale.s("chat.threads.history.when", { date = date, ran = ran }) else date .. ran
+	end
+	local function item(s: any, i: number): Node
+		local id, seen = s.id, s
+		local stagger = ui.now() - opened_at < 100 and not motion.reduced_now()
+		return ui.column {
+			w_full = true,
+			opacity = if stagger then 0 else nil,
+			on_mount = if stagger
+				then function(el: any)
+					anime.animate(el, { opacity = { 0, 1 }, y = { -4, 0 }, duration = 180, delay = 35 * math.min(i - 1, 8), ease = EASE })
+				end
+				else nil,
+			HistoryRow {
+				ctx = ctx,
+				now = function(): any
+					local x = by_id:get()[id]
+					if x then
+						seen = x
+					end
+					return seen
+				end,
+			},
+		}
+	end
+	return ui.column {
+		id = `threads-history-plan-{number}`,
+		class = "threads-history-plan",
+		w_full = true,
+		mt = ui.raw(8, "the mockup's history card"),
+		p = ui.raw(8, "the mockup's history card"),
+		rounded = ui.raw(9, "the mockup's history card"),
+		border = 1,
+		border_color = "$border.subtle",
+		ui.button {
+			id = `threads-history-plan-{number}-head`,
+			label = function(): string
+				local p = now()
+				return locale.s("chat.threads.history.card", { number = number, done = p.done or 0, total = p.total or 0 })
+			end,
+			expanded = function(): boolean
+				return open:get()
+			end,
+			w_full = true,
+			p = 0,
+			bg = "#00000000",
+			gap = ui.raw(8, "the mockup's history card"),
+			items = "center",
+			text_size = ui.raw(13, "the mockup's history card"),
+			color = "$text.secondary",
+			hover = { color = "$text.primary" },
+			on_click = function()
+				local all = table.clone(history_folds:peek())
+				if open:peek() then
+					all[fold] = nil
+				else
+					all[fold] = true
+					opened_at = ui.now()
+				end
+				history_folds:set(all)
+			end,
+			ui.div {
+				shrink = 0,
+				color = "$text.tertiary",
+				rotate = motion.tween(ui.computed(function(): number
+					return if open:get() then 0 else -90
+				end), { duration = 200, ease = EASE }),
+				Icon { name = "lucide-chevron-down", size = 12 },
+			},
+			ui.text { locale.s("chat.threads.plan.numbered", { n = number }), weight = "$font.weight.semibold", color = "$text.primary", wrap = false, shrink = 0 },
+			ui.text {
+				function(): string
+					local p = now()
+					return `{p.done or 0}/{p.total or 0}`
+				end,
+				tabular = true,
+				wrap = false,
+				shrink = 0,
+				color = "$text.tertiary",
+			},
+			ui.show(function(): boolean
+				return (now().review or 0) > 0
+			end, Transcript.Chip {
+				id = `threads-history-plan-{number}-review`,
+				text = function(): string
+					return locale.s("chat.threads.history.review", { n = now().review or 0 })
+				end,
+			}),
+			ui.div { grow = 1 },
+			ui.text { when, literal = true, wrap = false, truncate = true, min_w = 0, text_size = ui.raw(11.5, "the mockup's history card"), color = "$text.tertiary" },
+		},
+		ui.column {
+			w_full = true,
+			overflow = "hidden",
+			layout = "height",
+			layout_clip = true,
+			layout_duration = if reduced then 0 else MOVE_MS,
+			layout_ease = EASE,
+			ui.presence(function(): string?
+				return if open:get() then "open" else nil
+			end, function(): Node
+				return ui.column {
+					id = `threads-history-plan-{number}-steps`,
+					w_full = true,
+					pt = ui.raw(6, "the mockup's history card"),
+					ui.show(function(): boolean
+						return (now().overview or "") ~= ""
+					end, ui.text {
+						function(): string
+							return now().overview or ""
+						end,
+						literal = true,
+						wrap = true,
+						px = ui.raw(6, "the mockup's history row"),
+						pb = ui.raw(4, "the mockup's history card"),
+						text_size = ui.raw(12.5, "the mockup's history card"),
+						color = "$text.secondary",
+					}),
+					ui.each(steps, item, {
+						key = function(s: any): string
+							return s.id
+						end,
+						w_full = true,
+					}),
+				}
+			end, { w_full = true, exit = { opacity = 0, duration = motion.FADE } }),
+		},
+	}
+end)
+
+local History = ui.component(function(props: { ctx: Ctx }): Node
+	local ctx = props.ctx
+	local chat = ctx.session
+	local numbers = ui.computed(function(): { number }
+		local out: { number } = {}
+		local c = M.card(chat)
+		for _, p in (if c then c.closed else {}) do
+			table.insert(out, p.number)
+		end
+		return out
+	end)
+	local opening = ui.now() - history_at < 300
+	return ui.column {
+		id = "threads-history",
+		w_full = true,
+		grow = 1,
+		min_h = 0,
+		opacity = if opening then 0 else nil,
+		on_mount = if opening
+			then function(el: any)
+				if motion.reduced_now() then
+					anime.animate(el, { opacity = { 0, 1 }, duration = motion.FADE })
+				else
+					anime.animate(el, { opacity = { 0, 1 }, duration = 160 })
+					anime.animate(el, { x = { el.width or 320, 0 }, duration = MOVE_MS, ease = EASE })
+				end
+			end
+			else nil,
+		ui.row {
+			w_full = true,
+			h = ui.raw(36, "the mockup's list head"),
+			shrink = 0,
+			px = ui.raw(6, "the mockup's thread head"),
+			gap = "$space.1",
+			items = "center",
+			border = 1,
+			border_sides = { 0, 0, 1, 0 },
+			border_color = "$border.subtle",
+			ui.button {
+				id = "threads-history-back",
+				label = function(): string
+					local e = M.of(chat)
+					return plan_title(e and e.plan)
+				end,
+				bg = "#00000000",
+				h = 24,
+				pl = ui.raw(2, "the mockup's back"),
+				pr = ui.raw(6, "the mockup's back"),
+				gap = ui.raw(4, "the mockup's back"),
+				items = "center",
+				rounded = "$radius.sm",
+				text_size = ui.raw(12.5, "the mockup's back"),
+				color = "$text.secondary",
+				hover = { bg = "$hover", color = "$text.primary" },
+				on_click = function()
+					state.patch(ctx.key, ctx.tab, { history = false })
+				end,
+				Icon { name = "alt-arrow-left", size = 14 },
+				ui.text {
+					function(): string
+						local e = M.of(chat)
+						return plan_title(e and e.plan)
+					end,
+					wrap = false,
+				},
+			},
+			ui.text { locale.t("chat.threads.history.head"), grow = 1, weight = "$font.weight.semibold", text_size = ui.raw(13.5, "the mockup's editor head"), wrap = false },
+		},
+		ui.scroll {
+			w_full = true,
+			grow = 1,
+			min_h = 0,
+			ui.column {
+				w_full = true,
+				px = ui.raw(8, "the mockup's list"),
+				pb = ui.raw(20, "the mockup's list"),
+				ui.each(numbers, function(n: number): Node
+					return HistoryCard { ctx = ctx, number = n }
+				end, {
+					key = function(n: number): string
+						return tostring(n)
+					end,
+					w_full = true,
+				}),
+			},
+		},
+	}
+end)
 
 local ThreadView = ui.component(function(props: { ctx: Ctx, thread: string }): Node
 	local ctx, thread = props.ctx, props.thread
@@ -1369,6 +1848,14 @@ local ThreadView = ui.component(function(props: { ctx: Ctx, thread: string }): N
 		for _, r in M.rows(ctx.session) do
 			if r.chat == thread then
 				return r
+			end
+		end
+		local c = M.card(ctx.session)
+		for _, p in (if c then c.closed else {}) do
+			for _, r in p.rows do
+				if r.chat == thread then
+					return r
+				end
 			end
 		end
 		return nil
@@ -1900,7 +2387,7 @@ local StepRow = ui.component(function(props: { chat: string, key: string, number
 				function(): string
 					return tostring(props.number())
 				end,
-				w = 14,
+				min_w = 14,
 				shrink = 0,
 				tabular = true,
 				text_size = ui.raw(12, "the mockup's editor row"),
@@ -2239,8 +2726,14 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string }): Node
 	return ui.presence(function(): string
 		for _, t in state.of(ctx.key).tabs do
 			if t.id == ctx.tab then
-				local entry = if t.editing then M.of(ctx.session) else nil
-				return if entry and entry.plan then "\0edit" else t.thread or ""
+				local entry = if t.editing or t.history then M.of(ctx.session) else nil
+				local plan = entry and entry.plan
+				if t.editing and plan then
+					return "\0edit"
+				elseif t.thread then
+					return t.thread
+				end
+				return if t.history and closed_of(plan) > 0 then "\0history" else ""
 			end
 		end
 		return ""
@@ -2249,6 +2742,8 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string }): Node
 			return List(ctx)
 		elseif thread == "\0edit" then
 			return Editor { chat = ctx.session }
+		elseif thread == "\0history" then
+			return History { ctx = ctx }
 		end
 		return ThreadView { ctx = ctx, thread = thread }
 	end, { w_full = true, grow = 1, min_h = 0 })

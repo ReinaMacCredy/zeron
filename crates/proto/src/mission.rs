@@ -85,7 +85,11 @@ pub fn rollup<B>(
     let lead = lead_chat.map(&indicator);
     let steps: Vec<StepRow<B>> = steps
         .iter()
-        .filter(|step| !step.deleted && lead_chat.is_some_and(|lead| lead.id == step.owner_chat_id))
+        .filter(|step| {
+            !step.deleted
+                && lead_chat
+                    .is_some_and(|lead| lead.id == step.owner_chat_id && lead.in_current_plan(step))
+        })
         .map(|step| {
             let chat = step
                 .chat_id

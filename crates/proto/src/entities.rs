@@ -424,6 +424,35 @@ pub struct ChatPlan {
     pub images: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed: Vec<ClosedPlan>,
+}
+
+impl ChatPlan {
+    pub fn number(&self) -> u32 {
+        self.closed
+            .iter()
+            .map(|plan| plan.number)
+            .max()
+            .map_or(1, |n| n + 1)
+    }
+
+    pub fn is_closed(&self, number: u32) -> bool {
+        self.closed.iter().any(|plan| plan.number == number)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedPlan {
+    pub number: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub overview: String,
+    pub written_at: DateTime<Utc>,
+    pub closed_at: DateTime<Utc>,
+    /// The person's message the next plan answered: this plan's writes come before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -741,6 +770,14 @@ impl Chat {
 
     pub fn has_plan(&self) -> bool {
         self.plan.is_some()
+    }
+
+    pub fn plan_number(&self) -> u32 {
+        self.plan.as_ref().map_or(1, ChatPlan::number)
+    }
+
+    pub fn in_current_plan(&self, step: &TaskStep) -> bool {
+        !self.plan.as_ref().is_some_and(|plan| plan.is_closed(step.plan))
     }
 
     pub fn mission(&self) -> Option<ChatMission> {
@@ -1124,6 +1161,16 @@ pub struct TaskStep {
     pub target: Option<RouteTarget>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<String>,
+    #[serde(default = "first_plan", skip_serializing_if = "is_first_plan")]
+    pub plan: u32,
+}
+
+pub fn first_plan() -> u32 {
+    1
+}
+
+fn is_first_plan(plan: &u32) -> bool {
+    *plan == 1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
