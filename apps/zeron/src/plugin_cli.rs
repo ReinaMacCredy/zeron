@@ -175,7 +175,15 @@ pub async fn run(
             } else {
                 json!({ "id": target })
             };
-            let reply = call(methods::SIGN_PLUGIN, params).await?;
+            let reply = call(methods::SIGN_PLUGIN, params).await.map_err(|e| {
+                if e.to_string().starts_with("review:") {
+                    anyhow::anyhow!(
+                        "Signing makes a plugin yours, so only Zeron's own window can do it: open Settings, Plugins, the plugin, and choose \"It's mine…\""
+                    )
+                } else {
+                    e
+                }
+            })?;
             let files = reply["files"].as_u64().unwrap_or(0);
             let name = reply["id"].as_str().map(str::to_owned).unwrap_or(target);
             println!(

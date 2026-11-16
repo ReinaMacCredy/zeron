@@ -215,7 +215,7 @@ async fn signing_needs_the_consent_window() {
     let f = fixture();
     waiting(&f.plugins, "theirs").await;
     let refused = call(&f.plugins, methods::SIGN_PLUGIN, json!({ "id": "theirs" })).await;
-    assert!(refused.as_ref().is_err_and(|e| e.starts_with("review:")), "{refused:?}");
+    assert!(refused.as_ref().is_err_and(|e| e.starts_with("review: Signing a plugin")), "{refused:?}");
     assert!(!f.plugins.entry("theirs").unwrap().item.own);
 
     let outside = tempfile::tempdir().unwrap();

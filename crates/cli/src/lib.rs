@@ -202,7 +202,8 @@ pub enum PluginCommand {
         #[arg(long = "permission", value_name = "P")]
         permissions: Vec<String>,
     },
-    /// Sign a plugin as you: an id in the plugins folder, or a folder's path.
+    /// Sign a plugin as you: done in Zeron's own window (the plugin's sheet,
+    /// "It's mine…"), which this points to.
     Sign { target: String },
     /// Check a plugin folder's signature and who made it.
     Verify { path: String },

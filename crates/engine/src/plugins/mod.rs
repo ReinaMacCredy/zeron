@@ -1636,6 +1636,7 @@ impl Plugins {
         self.rescan().await;
         let hash = self.entry(&id).map(|e| e.item.hash).unwrap_or_default();
         self.redeem_review(reviews::Kind::Plugin, &id, &hash, review)
+            .map_err(|_| reviews::needed("Signing a plugin"))
     }
 
     // ── Methods ─────────────────────────────────────────────────────────────
