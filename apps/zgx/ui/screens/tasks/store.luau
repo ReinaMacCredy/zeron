@@ -3,6 +3,7 @@
 local sessions = require("@account/sessions")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
+local prefs = require("@app/screens/settings/prefs")
 
 ui.theme.tokens {
 	zeron = {
@@ -156,7 +157,7 @@ function M.assign(id: string, chat: string, send: boolean): any
 end
 
 function M.start(id: string, picks: any, project: string?, plan: boolean, done: ((string) -> ())?, fail: ((any) -> ())?): any
-	return settle(M.host.start({ id = id, picks = picks, project = project, orchestrate = plan }), done, fail)
+	return settle(M.host.start({ id = id, picks = picks, project = project, orchestrate = plan, size = prefs.mission_defaults:peek().size }), done, fail)
 end
 
 -- Open first in their order, then done, latest first (proto `split_tasks`).

@@ -418,6 +418,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let mut params = json!({
             "op": "startTask", "taskId": id, "chatId": chat, "config": config,
             "orchestrate": plan, "approvePlan": true, "sameAgents": false, "planDoc": plan,
+            "size": crate::chat::plan_size(args.field("size").map(text).as_deref()),
         });
         if let Some(project) = args.field("project").map(text) {
             params["spaceId"] = if project.is_empty() { Json::Null } else { json!(project) };

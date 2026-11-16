@@ -1055,6 +1055,30 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let access = args.field("access").is_some();
         async move { if access { crate::plugins::preview::refuse("chat.configure")?; } v.configure(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
+    // The default plan size changed in Settings: every chat with Mission on takes it.
+    host.async_action("chat.mission_size", |args| async move {
+        crate::plugins::preview::refuse("chat.mission_size")?;
+        let size = plan_size(args.field("size").map(text).as_deref());
+        let chats = CHATS.with(Rc::clone);
+        let moved = resized(&chats.chats.borrow(), size);
+        for (id, config) in &moved {
+            if let Some(c) = chats.chats.borrow_mut().get_mut(id) {
+                c["config"] = config.clone();
+            }
+        }
+        if !moved.is_empty() {
+            chats.publish_views();
+        }
+        for (id, config) in moved {
+            if let Err(e) = engine::get()
+                .call("Mutate", json!({ "op": "setChatConfig", "chatId": id, "config": config }))
+                .await
+            {
+                eprintln!("zeron-zgx: chat: the default plan size didn't reach a chat's config: {e}");
+            }
+        }
+        Ok::<Value, String>(Value::Nil)
+    });
     // Shown as the call is made: a chat on another device answers a round trip later.
     let pick = which.clone();
     // A profile applied to a chat, or none ("No profile"), as one config
@@ -2123,7 +2147,19 @@ fn mission_value(config: &Json) -> Value {
     ])
 }
 
-fn plan_size(size: Option<&str>) -> &'static str {
+fn resized(chats: &HashMap<String, Json>, size: &str) -> Vec<(String, Json)> {
+    chats
+        .iter()
+        .filter(|(_, chat)| chat["config"]["mission"].is_object() && chat["config"]["mission"]["size"] != size)
+        .map(|(id, chat)| {
+            let mut config = chat["config"].clone();
+            config["mission"]["size"] = json!(size);
+            (id.clone(), config)
+        })
+        .collect()
+}
+
+pub(crate) fn plan_size(size: Option<&str>) -> &'static str {
     match size {
         Some("small") => "small",
         Some("large") => "large",
@@ -9608,6 +9644,15 @@ mod tests {
         assert_eq!(super::merged_config(&row["config"], &large)["mission"]["size"], "large");
         let odd = zgx_script::Value::from_json(r#"{"mission":{"size":"huge"}}"#).unwrap();
         assert_eq!(super::merged_config(&row["config"], &odd)["mission"]["size"], "medium");
+        let chats: std::collections::HashMap<String, serde_json::Value> = [
+            ("lead".to_string(), serde_json::json!({ "config": super::merged_config(&row["config"], &large) })),
+            ("plain".to_string(), row.clone()),
+        ]
+        .into();
+        let moved = super::resized(&chats, "small");
+        assert_eq!(moved.len(), 1, "only a chat with Mission on follows the default");
+        assert_eq!((moved[0].0.as_str(), &moved[0].1["mission"]["size"]), ("lead", &serde_json::json!("small")));
+        assert!(super::resized(&chats, "large").is_empty());
         let off = zgx_script::Value::from_json(r#"{"mission":false}"#).unwrap();
         assert!(super::merged_config(&config, &off).get("mission").is_none());
         assert!(!super::mission_offered(&row, &config), "a side chat offers no mission");

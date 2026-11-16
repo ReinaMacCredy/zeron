@@ -230,6 +230,22 @@ local function Composer(): Node
 	local locals: { [string]: State<any> } =
 		{ model = model, effort = effort, fast = fast, options = options, access = access, plan = plan, mission = mission }
 
+	-- The default plan size changed in Settings: a mission switched on here takes it.
+	local default_size = prefs.mission_defaults:peek().size
+	ui.effect(function()
+		local size = prefs.mission_defaults:get().size
+		if size == default_size then
+			return
+		end
+		default_size = size
+		local m = mission:peek()
+		if type(m) == "table" and m.size ~= size then
+			local next = table.clone(m)
+			next.size = size
+			mission:set(next)
+		end
+	end)
+
 	-- A pick answered yes in the switch dialog: its words for the divider.
 	local landing: model_switch.Ask? = nil
 	-- In: what the session says (or the defaults, arriving on a new chat).

@@ -108,6 +108,7 @@ M.ZERON_ROWS = {
 		end,
 		set = function(v: string)
 			set_default("size", v)
+			pcall(ui.invoke, "chat.mission_size", { size = v })
 		end,
 	},
 	{
