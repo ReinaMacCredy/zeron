@@ -456,7 +456,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "plan",
-            "description": "This chat's plan: steps, each run on a thread this chat owns. `write` replaces the steps that have not started with `steps` [{title, notes, role, target, threadId}] and keeps the rest; `overview` and `resources` (port:<n>, slot:<name>, path:<path in the project>; [] clears) replace theirs when given. A step's `threadId` hands it to a thread this chat delegated that runs no open step. Replaced steps' images move to the same-titled step or the overview (`imagesMoved`). Run a step with delegate_task and its `stepId`. `step` marks `stepId` `state` done, skipped or open; a step is done only once marked. `read` returns the plan: `overview`, `planPending` (run no step until the person approves) and each step's `status` (planned, working, waitingOnYou, readyForReview, failed, cancelled, done or skipped), `threadId` and `target`.",
+            "description": "This chat's plan: steps, each run on a thread this chat owns. `write` replaces the steps that have not started with `steps` [{title, notes, role, target, threadId}] and keeps the rest; `overview` and `resources` (port:<n>, slot:<name>, path:<path in the project>; [] clears) replace theirs when given. A step's `threadId` hands it to a thread this chat delegated that runs no open step. Replaced steps' images move to the same-titled step or the overview (`imagesMoved`). Run a step with delegate_task and its `stepId`. `step` marks `stepId` `state` done, skipped or open; a step is done only once marked, a closed plan's step too. A `write` in the turn of the person's new goal, when no step of the current plan is planned or working, closes that plan and starts the next: its steps are numbered from 1, so your step 1 is the person's step 1. `read` returns the current plan: `plan` (its number), `overview`, `planPending` (run no step until the person approves) and each step's `status` (planned, working, waitingOnYou, readyForReview, failed, cancelled, done or skipped), `threadId` and `target`, plus `closedPlans` (`plan`, `done`, `total`, `toReview`).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2491,7 +2491,7 @@ impl ThreadTools {
                     .into_iter()
                     .filter(|step| step.owner_chat_id == self.chat_id && !step.deleted)
                     .collect();
-                Ok(plan_json(chat, &self.statuses_of(steps).await?))
+                Ok(plan_json(chat, &self.states_of(steps, false).await?))
             }
             "write" => {
                 let steps: Vec<Value> = args["steps"]
@@ -2546,7 +2546,7 @@ impl ThreadTools {
                     .map_err(|e| format!("planSteps: {e}"))?;
                 let steps: Vec<TaskStep> = serde_json::from_value(planned["steps"].clone())
                     .map_err(|e| format!("planSteps: {e}"))?;
-                let mut reply = plan_json(&chat, &self.statuses_of(steps).await?);
+                let mut reply = plan_json(&chat, &self.states_of(steps, false).await?);
                 if planned["imagesMoved"]
                     .as_array()
                     .is_some_and(|moved| !moved.is_empty())
@@ -2591,6 +2591,14 @@ impl ThreadTools {
         &self,
         steps: Vec<TaskStep>,
     ) -> Result<Vec<(TaskStep, ThreadState)>, String> {
+        self.states_of(steps, true).await
+    }
+
+    async fn states_of(
+        &self,
+        steps: Vec<TaskStep>,
+        current_only: bool,
+    ) -> Result<Vec<(TaskStep, ThreadState)>, String> {
         if steps.is_empty() {
             return Ok(Vec::new());
         }
@@ -2599,6 +2607,13 @@ impl ThreadTools {
         let now = Utc::now();
         Ok(steps
             .into_iter()
+            .filter(|step| {
+                !current_only
+                    || chats
+                        .iter()
+                        .find(|chat| chat.id == step.owner_chat_id)
+                        .is_none_or(|lead| lead.in_current_plan(step))
+            })
             .map(|step| {
                 let thread = step
                     .chat_id
@@ -3886,13 +3901,16 @@ fn add_progress(row: &mut Value, task: &Task, steps: &[(TaskStep, ThreadState)])
     }
 }
 
-fn plan_json(chat: &Chat, steps: &[(TaskStep, ThreadState)]) -> Value {
+fn plan_json(chat: &Chat, all: &[(TaskStep, ThreadState)]) -> Value {
+    let (steps, closed): (Vec<&(TaskStep, ThreadState)>, Vec<_>) =
+        all.iter().partition(|(step, _)| chat.in_current_plan(step));
     if chat.plan.is_none() && steps.is_empty() {
         return json!({ "plan": null });
     }
     let plan = chat.plan.clone().unwrap_or_default();
     let statuses: Vec<ThreadState> = steps.iter().map(|(_, status)| *status).collect();
     let mut view = json!({
+        "plan": plan.number(),
         "overview": plan.overview,
         "planDoc": plan.plan_doc,
         "planPending": chat.plan_pending,
@@ -3924,6 +3942,26 @@ fn plan_json(chat: &Chat, steps: &[(TaskStep, ThreadState)]) -> Value {
     }
     if !plan.images.is_empty() {
         view["images"] = json!(plan.images);
+    }
+    if !plan.closed.is_empty() {
+        view["closedPlans"] = plan
+            .closed
+            .iter()
+            .map(|old| {
+                let states: Vec<ThreadState> = closed
+                    .iter()
+                    .filter(|(step, _)| step.plan == old.number)
+                    .map(|(_, status)| *status)
+                    .collect();
+                let progress = zeron_proto::plan_progress(&states);
+                json!({
+                    "plan": old.number,
+                    "done": progress.done,
+                    "total": progress.total,
+                    "toReview": states.iter().filter(|s| **s == ThreadState::ReadyForReview).count(),
+                })
+            })
+            .collect();
     }
     view
 }
@@ -5827,6 +5865,47 @@ mod tests {
         assert_eq!(
             (&started["stepId"], &started["spaceId"], &started["cwd"]),
             (&json!("s3"), &json!("s2"), &json!("/tmp"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_read_shows_the_current_plan_and_counts_the_closed_ones() {
+        let mut fake = fixture();
+        fake.chats[0]["plan"] = json!({ "overview": "Then the docs", "closed": [{
+            "number": 1, "overview": "The API", "writtenAt": "2026-09-18T09:00:00Z",
+            "closedAt": "2026-09-18T11:00:00Z", "until": "m9",
+        }] });
+        for step in &mut fake.task_steps[2..] {
+            step["plan"] = json!(2);
+        }
+        let rig = rig(fake);
+        let read = rig
+            .tools
+            .call("plan", &json!({ "action": "read" }))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = read["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["s3", "s4", "s5", "s6"], "only the current plan's steps");
+        assert_eq!(read["plan"], 2);
+        assert_eq!(read["overview"], "Then the docs");
+        assert_eq!(
+            read["closedPlans"],
+            json!([{ "plan": 1, "done": 1, "total": 2, "toReview": 0 }])
+        );
+        let listed = rig
+            .tools
+            .call("tasks", &json!({ "action": "list" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["tasks"][0]["progress"],
+            json!({ "done": 0, "total": 3 }),
+            "a to-do's progress counts its lead's current plan"
         );
     }
 
