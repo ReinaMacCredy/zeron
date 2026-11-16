@@ -19,6 +19,14 @@ export type Name =
 	| "hermes"
 	| "muse"
 	| "fx"
+	-- Model providers (an agent's accounts per provider, their API keys):
+	-- one set, one ink each.
+	| "provider-anthropic"
+	| "provider-openai"
+	| "provider-openrouter"
+	| "provider-gemini"
+	| "provider-xai"
+	| "provider-deepseek"
 
 local FILES: { [Name]: string } = {
 	claude = "claude-mark",
@@ -32,11 +40,30 @@ local FILES: { [Name]: string } = {
 	hermes = "hermes-mark",
 	muse = "muse-mark",
 	fx = "fx-mark",
+	["provider-anthropic"] = "provider-anthropic",
+	["provider-openai"] = "provider-openai",
+	["provider-openrouter"] = "provider-openrouter",
+	["provider-gemini"] = "provider-gemini",
+	["provider-xai"] = "provider-xai",
+	["provider-deepseek"] = "provider-deepseek",
 }
 
 -- Marks drawn in one ink (black, for the white tile): bare, they take the
 -- colour of the text around them instead, or they vanish on dark.
-local MONO: { [Name]: boolean } = { openai = true, grok = true, cursor = true, devin = true, hermes = true, fx = true }
+local MONO: { [Name]: boolean } = {
+	openai = true,
+	grok = true,
+	cursor = true,
+	devin = true,
+	hermes = true,
+	fx = true,
+	["provider-anthropic"] = true,
+	["provider-openai"] = true,
+	["provider-openrouter"] = true,
+	["provider-gemini"] = true,
+	["provider-xai"] = true,
+	["provider-deepseek"] = true,
+}
 
 
 -- `bare`: the glyph alone, no tile (inline, beside text: a model's chip),

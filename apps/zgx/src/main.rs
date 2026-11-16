@@ -109,6 +109,12 @@ mod route_motion_tests;
 #[cfg(test)]
 mod skills_motion_tests;
 #[cfg(test)]
+mod composer_metrics_tests;
+#[cfg(test)]
+mod composer_layout_tests;
+#[cfg(test)]
+mod composer_motion_tests;
+#[cfg(test)]
 mod hit_sweep_tests;
 #[cfg(test)]
 mod hit_tests;
@@ -377,6 +383,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
     }
+    // A clicked banner: Zeron forward on its chat (src/links.rs).
+    links::take_banner_clicks();
     let options = match screen {
         Screen::Intro => intro_window(),
         Screen::Onboarding => onboarding_window(),

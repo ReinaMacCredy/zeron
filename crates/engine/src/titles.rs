@@ -480,6 +480,7 @@ mod tests {
             default: false,
             id: id.into(),
             label: label.into(),
+            provider: None,
             description: None,
             reasoning_levels: vec![],
             options: vec![],

@@ -82,8 +82,8 @@ use tokio::sync::mpsc;
 
 use zeron_proto::{
     AccessMode, AgentEvent, Compaction, DoneStatus, HarnessId, Model, ModelOption,
-    ModelOptionChoice, ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind, SteeringMode,
-    TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
+    ModelOptionChoice, ModelProvider, ReasoningLevel, RunRequest, SlashCommand, SlashCommandKind,
+    SteeringMode, TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, Command, Stdio};
@@ -1842,6 +1842,10 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
                     default: false,
                     id: format!("{provider_id}/{model_id}"),
                     label,
+                    provider: Some(ModelProvider {
+                        id: provider_id.to_owned(),
+                        name: provider_name.to_owned(),
+                    }),
                     description: Some(provider_name.to_owned()),
                     reasoning_levels: levels,
                     options: Vec::new(),

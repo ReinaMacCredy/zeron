@@ -138,7 +138,7 @@ pub(crate) fn tools() -> Vec<Value> {
     vec![
         tool(
             CREATE_PLUGIN,
-            "Create a Zeron plugin on this device: a folder with a manifest (zeron-plugin.json), init.luau to edit, and zeron.luau, the SDK. Zeron signs it as yours and loads it, and re-signs and reloads it as you save; the person allows once, in Zeron, any permissions it asks for. `id` is lowercase letters, digits and dashes (2-40). `permissions` are what the plugin may do (ui.add, ui.change, ui.replace, profile.read, sessions.read, messages.read, account.email, files.read, panel.tabs, pages.add, github, github.write, navigate, compose, network, clipboard, files, web, windows, tools, devices, native, commands: with a manifest `commands` list of programs it runs, as you). The reply links the authoring guide (`guide`): read it before writing.",
+            "Create a Zeron plugin on this device: a folder with a manifest (zeron-plugin.json), init.luau to edit, and zeron.luau, the SDK. Zeron signs it as yours and loads it, and re-signs and reloads it as you save; the person allows once, in Zeron, any permissions it asks for. `id` is lowercase letters, digits and dashes (2-40). `permissions` are what the plugin may do (ui.add, ui.change, ui.replace, profile.read, sessions.read, messages.read, account.email, files.read, panel.tabs, pages.add, github, github.write, navigate, compose, draft, network, clipboard, files, web, windows, tools, devices, native, commands: with a manifest `commands` list of programs it runs, as you). The reply links the authoring guide (`guide`): read it before writing.",
             json!({
                 "type": "object",
                 "properties": {
