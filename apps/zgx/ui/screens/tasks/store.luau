@@ -157,7 +157,8 @@ function M.assign(id: string, chat: string, send: boolean): any
 end
 
 function M.start(id: string, picks: any, project: string?, plan: boolean, done: ((string) -> ())?, fail: ((any) -> ())?): any
-	return settle(M.host.start({ id = id, picks = picks, project = project, orchestrate = plan, size = prefs.mission_defaults:peek().size }), done, fail)
+	local mission = prefs.mission_defaults:peek()
+	return settle(M.host.start({ id = id, picks = picks, project = project, orchestrate = plan, size = mission.size, same_agents = mission.same_agents == true, approve = mission.approve ~= false }), done, fail)
 end
 
 -- Open first in their order, then done, latest first (proto `split_tasks`).

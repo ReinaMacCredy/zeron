@@ -417,7 +417,9 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let plan = args.field("orchestrate").is_some_and(Value::truthy);
         let mut params = json!({
             "op": "startTask", "taskId": id, "chatId": chat, "config": config,
-            "orchestrate": plan, "approvePlan": true, "sameAgents": false, "planDoc": plan,
+            "orchestrate": plan, "planDoc": plan,
+            "approvePlan": args.field("approve").is_none_or(Value::truthy),
+            "sameAgents": args.field("same_agents").is_some_and(Value::truthy),
             "size": crate::chat::plan_size(args.field("size").map(text).as_deref()),
         });
         if let Some(project) = args.field("project").map(text) {

@@ -188,7 +188,7 @@ store.host.assign = function(args: any): any
 	return done(nil)
 end
 store.host.start = function(args: any): any
-	note(`start:{args.id}:{args.picks and args.picks.model or ""}{if args.orchestrate then ":plan" else ""}{if args.project then ` in {args.project}` else ""}`)
+	note(`start:{args.id}:{args.picks and args.picks.model or ""}{if args.orchestrate then ":plan" else ""}{if args.same_agents then ":same" else ""}{if args.approve == false then ":runs" else ""}{if args.project then ` in {args.project}` else ""}`)
 	return done("new-chat")
 end
 store.host.today = function(): any
