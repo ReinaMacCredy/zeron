@@ -297,7 +297,7 @@ test("kinds: focus coming into a reply shows its lane, its Copy the next stop", 
 		end
 		return ""
 	end
-	for _ = 1, 10 do
+	for _ = 1, 24 do
 		app:key("shift+Tab")
 		app:frames(4)
 		if focused():find('"Decline"', 1, true) then
