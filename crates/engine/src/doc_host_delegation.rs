@@ -197,6 +197,36 @@ fn background_note(
     ))
 }
 
+const QUIET_AFTER_MS: i64 = 5 * 60 * 1000;
+
+fn quiet_after() -> chrono::Duration {
+    chrono::Duration::milliseconds(
+        std::env::var("ZERON_QUIET_NOTICE_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(QUIET_AFTER_MS),
+    )
+}
+
+fn quiet_text(child: &Chat, step: Option<(&str, &str)>, minutes: i64) -> String {
+    let quiet = format!(
+        "has been quiet for {minutes} minute{}: no tool call and no text, only reasoning. It is still running.",
+        if minutes == 1 { "" } else { "s" }
+    );
+    let title = one_line(child.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS);
+    match step {
+        Some((step_id, step_title)) => format!(
+            "Step \"{}\" (stepId {step_id}) on thread {} {quiet}\nRead it with read_thread, nudge it with send_message_to_thread, or stop it with task_cancel.",
+            zeron_proto::view::single_line(step_title),
+            child.id
+        ),
+        None => format!(
+            "Delegated task {} (\"{title}\") {quiet}\nRead it with task_status, nudge it with send_message_to_thread, or stop it with task_cancel.",
+            child.id
+        ),
+    }
+}
+
 fn earliest(
     due: Option<chrono::DateTime<Utc>>,
     at: chrono::DateTime<Utc>,
@@ -1911,6 +1941,7 @@ impl DocHost {
         let host = self.clone();
         self.spawn_worker(async move {
             let mut limits = None;
+            let mut activity = None;
             let mut due: Option<chrono::DateTime<Utc>> = None;
             loop {
                 if limits.is_none() {
@@ -1918,11 +1949,20 @@ impl DocHost {
                         .sessions()
                         .and_then(|sessions| sessions.resume_schedule().map(|s| s.watch()));
                 }
+                if activity.is_none() {
+                    activity = host.sessions().map(|sessions| sessions.watch_thread_activity());
+                }
                 tokio::select! {
                     changed = statuses.changed() => if changed.is_err() { return },
                     changed = async {
                         match limits.as_mut() {
                             Some(limits) => limits.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => if changed.is_err() { return },
+                    changed = async {
+                        match activity.as_mut() {
+                            Some(activity) => activity.changed().await,
                             None => std::future::pending().await,
                         }
                     } => if changed.is_err() { return },
@@ -1990,6 +2030,11 @@ impl DocHost {
                     self.drain_queue(handle).await;
                     continue;
                 }
+                if let Some(until) = session.as_ref().and_then(|session| {
+                    self.quiet_watch(&sessions, chat, delegation, session, observed)
+                }) {
+                    due = earliest(due, until);
+                }
                 if !task_queued && session.as_ref().is_some_and(turn_live) {
                     continue;
                 }
@@ -2039,6 +2084,63 @@ impl DocHost {
             self.reoffer_lost_wakes().await;
         }
         due
+    }
+
+    /// Wakes the owner once per quiet spell of a working child; returns when
+    /// the current spell would cross the line.
+    fn quiet_watch(
+        &self,
+        sessions: &SessionsEngine,
+        child: &Chat,
+        delegation: &Delegation,
+        session: &Session,
+        now: chrono::DateTime<Utc>,
+    ) -> Option<chrono::DateTime<Utc>> {
+        if session.status != SessionStatus::Working
+            || session.compacting
+            || session.held_by_subagents
+            || session.running_subagents > 0
+            || delegation.cancel_requested
+            || sessions.open_tools(&child.id) > 0
+        {
+            return None;
+        }
+        let activity = sessions
+            .thread_activity(&child.id)
+            .filter(|activity| activity.quiet_since.is_none())?;
+        let until = activity.at + quiet_after();
+        if until > now {
+            return Some(until);
+        }
+        if sessions.mark_quiet(&child.id, activity.at) && delegation.wake != DelegationWake::Never {
+            self.offer_quiet_notice(child, delegation, (now - activity.at).num_minutes());
+        }
+        None
+    }
+
+    fn offer_quiet_notice(&self, child: &Chat, delegation: &Delegation, minutes: i64) {
+        let Some(workspace) = self.workspace() else {
+            return;
+        };
+        let owner = delegation.delegated_by_chat_id.clone();
+        let live = workspace
+            .chat(&owner)
+            .ok()
+            .flatten()
+            .is_some_and(|chat| !chat.archived && chat.device_id == child.device_id);
+        if !live {
+            return;
+        }
+        let steps = workspace.read_task_steps().unwrap_or_default();
+        let step =
+            step_run_by(&steps, &child.id).map(|step| (step.id.as_str(), step.title.as_str()));
+        let text = quiet_text(child, step, minutes);
+        let (host, from) = (self.clone(), child.id.clone());
+        self.spawn_worker(async move {
+            if let Err(err) = host.queue_wake_note(&owner, &from, None, text).await {
+                tracing::warn!(chat = %owner, from = %from, error = %err, "quiet notice failed");
+            }
+        });
     }
 
     fn background_hold(
