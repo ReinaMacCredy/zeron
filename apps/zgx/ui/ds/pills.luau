@@ -140,7 +140,7 @@ function M.Segments(props: { states: () -> { string }, done: () -> number }): No
 					opacity = if st == "working" and not reduced then ui.loop { from = 1, to = 0.45, duration = 700, yoyo = true, fps = 30 } else nil,
 				}
 			end, { shrink = 0, enter = { opacity = { 0, 1 }, duration = if reduced then motion.FADE else 220 }, exit = { opacity = 0, duration = if reduced then motion.FADE else 220 } })
-		end, { gap = ui.raw(2, "the mockup's segments"), items = "center", shrink = 0 })
+		end, { direction = "row", gap = ui.raw(2, "the mockup's segments"), items = "center", shrink = 0 })
 	end, { shrink = 0 })
 end
 

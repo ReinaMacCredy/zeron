@@ -1250,8 +1250,6 @@ end
 -- (`landing`: the id of a prompt the host adds after `push`, a steer's.)
 local shown: (() -> ())? = nil
 local sending: ((push: () -> (), landing: string?) -> ())? = nil
-local to_plan: (() -> ())? = nil
-local named_to_plan: { [string]: () -> () } = {}
 -- A named transcript's (`name`: a side chat's), by its name.
 local named_shown: { [string]: () -> () } = {}
 local named_sending: { [string]: (push: () -> (), landing: string?) -> () } = {}
@@ -2416,15 +2414,6 @@ local function Transcript(props: Props): Node
 		end
 	end
 	land_on_step = go_plan
-	if props.name then
-		named_to_plan[props.name] = function()
-			go_plan()
-		end
-	else
-		to_plan = function()
-			go_plan()
-		end
-	end
 
 	local branch = props.branch
 	local editing = ui.use_state(nil :: { id: string, index: number, phase: MessageEdit.Phase, at_end: boolean }?)
@@ -3519,12 +3508,6 @@ return {
 	-- whatever they were reading).
 	latest = function(name: string?)
 		local go = if name then named_shown[name] else shown
-		if go then
-			go()
-		end
-	end,
-	to_plan = function(name: string?)
-		local go = if name then named_to_plan[name] else to_plan
 		if go then
 			go()
 		end

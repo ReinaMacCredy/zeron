@@ -331,18 +331,6 @@ test("threads: a step started twice reads once; a failed start of a step draws i
 	expect(app:error()).to_be(nil)
 end)
 
-test("threads: the Plan pill's way to the plan lands on the card, not on the top of a long reply", function()
-	local app = seeded()
-	app:command("plan_long")
-	app:command("show_plan")
-	app:frames(30)
-	app:command("go_plan")
-	app:frames(90)
-	local y = tonumber(string.match(app:tree("#plan-card"), "^@%d+ #plan%-card [%d.-]+,(-?[%d.]+) ")) :: number
-	expect(y >= 0 and y < 200).to_be(true)
-	expect(app:error()).to_be(nil)
-end)
-
 test("threads: a rerun step's line keeps the earlier attempt's handback, named, while the new attempt has none", function()
 	local app = seeded()
 	app:command("show_plan")
@@ -496,7 +484,7 @@ test("threads: optional row fields absent draw nothing; given, attempts, turn fa
 	expect(app:error()).to_be(nil)
 end)
 
-test("threads: with motion reduced, find and the Plan pill still land on the plan card", function()
+test("threads: with motion reduced, find still lands on the plan card", function()
 	local app = seeded()
 	app:set_state("ds/motion.luau::motion_reduce", true)
 	app:command("show_plan")
@@ -507,12 +495,6 @@ test("threads: with motion reduced, find and the Plan pill still land on the pla
 	expect(in_view(app, "#plan-card-step-s1-said")).to_be(true)
 	expect(plan_find(app, "Write the release notes")).to_be("1 of 1")
 	expect(in_view(app, "#plan-card-step-s5-row")).to_be(true)
-	app:scroll("#fixture-plan >> #transcript", 6000)
-	app:frames(30)
-	app:command("go_plan")
-	app:frames(40)
-	local y = tonumber(string.match(app:tree("#plan-card"), "^@%d+ #plan%-card [%d.-]+,(-?[%d.]+) ")) :: number
-	expect(y >= 0 and y < 200).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
 

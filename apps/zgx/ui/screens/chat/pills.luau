@@ -1342,9 +1342,12 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			local c = mission()
 			return locale.s("ds.pills.mission.label", { done = if c then c.done else 0, total = if c then c.total else 0 })
 		end,
+		active = function(): boolean
+			return Threads.shown(bind.id())
+		end,
 		on_press = press_in,
 		on_click = function()
-			T.to_plan()
+			Threads.open(bind.id())
 		end,
 		gap = ui.raw(7, "the mockup's plan pill"),
 		ui.text { locale.t("ds.pills.mission.title"), weight = "$font.weight.medium", color = "$text.primary", wrap = false, shrink = 0 },

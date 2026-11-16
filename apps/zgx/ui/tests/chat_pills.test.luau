@@ -658,6 +658,7 @@ test("a chat running a plan has the Plan pill in its threads pill's place: its c
 	expect(app:tree("#pills-plan")).to_contain("Three done")
 	app:click("#pills-plan")
 	pop(app)
+	expect(app:state("calls")).to_contain("threads_open:s2:")
 	local ended = plan("done", 3)
 	ended.s2.plan.progress.done = 3
 	ended.s2.rows[2].state = "done"

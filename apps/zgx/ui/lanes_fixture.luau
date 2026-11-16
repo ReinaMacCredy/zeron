@@ -759,9 +759,6 @@ end)
 ui.command { id = "plan_find_open", title = "Find in the plan's transcript", run = function()
 	plan_find.open()
 end }
-ui.command { id = "go_plan", title = "The Plan pill's click", run = function()
-	require("@ds/transcript").to_plan()
-end }
 ui.command { id = "plan_more", title = "Two steps hear back in one message; a wake mixes a step and a plain task", run = function()
 	local now = table.clone(plan_messages:peek())
 	for _, m in MORE do
