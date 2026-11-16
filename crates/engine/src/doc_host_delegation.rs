@@ -975,15 +975,20 @@ impl DocHost {
             cwd,
             delegation,
         )?;
-        let bind = |chat_id: Option<String>, earlier: Vec<String>| zeron_proto::TaskStepPatch {
-            chat_id: Some(chat_id),
-            earlier: Some(earlier),
-            ..Default::default()
-        };
+        let bind =
+            |chat_id: Option<String>, earlier: Vec<String>, turn: Option<zeron_proto::StepTurn>| {
+                zeron_proto::TaskStepPatch {
+                    chat_id: Some(chat_id),
+                    earlier: Some(earlier),
+                    turn: Some(turn),
+                    ..Default::default()
+                }
+            };
         if let Some(step) = &step {
             let mut earlier = step.earlier.clone();
             earlier.extend(step.chat_id.clone().filter(|old| !earlier.contains(old)));
-            let bound = workspace.update_task_step(&step.id, &bind(Some(chat_id.clone()), earlier));
+            let bound =
+                workspace.update_task_step(&step.id, &bind(Some(chat_id.clone()), earlier, None));
             if !matches!(bound, Ok(true)) {
                 workspace.delete_chat(&chat_id).ok();
                 self.purge_chat(&chat_id);
@@ -1014,7 +1019,14 @@ impl DocHost {
         {
             if let Some(step) = &step {
                 workspace
-                    .update_task_step(&step.id, &bind(step.chat_id.clone(), step.earlier.clone()))
+                    .update_task_step(
+                        &step.id,
+                        &bind(
+                            step.chat_id.clone(),
+                            step.earlier.clone(),
+                            step.turn.clone(),
+                        ),
+                    )
                     .ok();
             }
             workspace.update_chat_delegation(&chat_id, |d| {
@@ -1965,7 +1977,14 @@ impl DocHost {
                             Some(activity) => activity.changed().await,
                             None => std::future::pending().await,
                         }
-                    } => if changed.is_err() { return },
+                    } => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        // Activity only moves a quiet deadline later, but one it unmarked needs a new one.
+                        due = earliest(due, Utc::now() + quiet_after());
+                        continue;
+                    }
                     () = async {
                         match due {
                             Some(at) => tokio::time::sleep((at - Utc::now()).to_std().unwrap_or_default()).await,

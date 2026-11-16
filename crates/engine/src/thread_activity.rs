@@ -69,7 +69,7 @@ fn note(
 ) -> bool {
     let tool = match event {
         AgentEvent::ToolCall { call, .. } => Some(call),
-        AgentEvent::ToolResult { .. } => None,
+        AgentEvent::ToolResult { .. } | AgentEvent::InputResolved { .. } => None,
         AgentEvent::TextDelta { text } if !text.is_empty() => None,
         _ => return false,
     };
@@ -123,6 +123,7 @@ impl Inner {
             event,
             AgentEvent::ToolCall { .. }
                 | AgentEvent::ToolResult { .. }
+                | AgentEvent::InputResolved { .. }
                 | AgentEvent::TextDelta { .. }
         ) {
             self.thread_activity
@@ -209,6 +210,16 @@ mod tests {
                 command: "ls -la".into(),
             },
         };
+        let answered = AgentEvent::InputResolved {
+            request_id: "q1".into(),
+            answers: None,
+        };
+        assert!(
+            note(&mut all, "c", &answered, &[], at(399)),
+            "an answered question ends the quiet spell"
+        );
+        assert_eq!(all["c"].quiet_since, None);
+        assert!(mark(&mut all, "c", at(399)));
         assert!(note(&mut all, "c", &call, &[], at(400)));
         assert_eq!(all["c"].quiet_since, None, "activity clears the mark");
         assert_eq!(all["c"].label.as_deref(), Some("Run ls -la"));

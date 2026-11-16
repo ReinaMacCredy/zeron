@@ -5316,6 +5316,10 @@ async fn a_step_thread_stopped_before_its_first_reply_settles_and_the_step_runs_
         [thread.clone()],
         "attempt 1 stays on its step"
     );
+    assert_eq!(
+        rerun.turn, None,
+        "attempt 1's stopped turn is not the new attempt's"
+    );
     let first = core.workspace.chat(&thread).unwrap().unwrap();
     assert!(!first.archived, "an earlier attempt is not archived");
     assert_eq!(
