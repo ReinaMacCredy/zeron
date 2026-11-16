@@ -309,6 +309,8 @@ local TAIL = 32
 local TURN_GAP = 16
 local SEAM_GAP = 6
 local JUMP_H = 30
+local LAND_GAP = 12
+local SETTLE_TRIES = 12
 local DIM, DIM_MS = 0.38, 160
 local WAIT_GRACE_MS = 500
 local FOLD_MS, FOLD_FADE_MS, FOLD_EASE = 240, 160, "cubicBezier(0.4, 0, 0.2, 1)"
@@ -797,6 +799,12 @@ type View = {
 	open_subagent: ((sub: any) -> ())?,
 	threads: Threads.Threads?,
 	plan_call: (() -> string?)?,
+	plan: (() -> any?)?,
+	plan_ref: Ref?,
+	plan_place: ((step: string, ref: Ref, gone: boolean?) -> ())?,
+	handback: ((step: string) -> Threads.Handback?)?,
+	plan_body: ((text: string, key: string?) -> Node)?,
+	plan_found: ((key: string) -> boolean)?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
 	-- The text an open annotation input washes in it.
@@ -838,7 +846,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		if (b.kind == "tools" or b.kind == "work") and top and view and view.plan_call and view.threads then
 			local plan_call, threads = view.plan_call, view.threads
 			local function card(): Node
-				return Threads.Plan { id = "plan-card", threads = threads }
+				return Threads.Plan { id = "plan-card", ref = view.plan_ref, place = view.plan_place, threads = threads, card = view.plan, handback = view.handback, body = view.plan_body, found = view.plan_found, find = view.find }
 			end
 			return ui.presence(function(): string
 				local id = plan_call()
@@ -869,6 +877,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				pictures = if view then view.shown_pictures else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
+				plan = if view then view.plan else nil,
 				-- (A long group builds only what's near the view, as a long
 				-- reply does.)
 				window = if view
@@ -1095,6 +1104,7 @@ local function reply(
 				open_subagent = if view then view.open_subagent else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
+				plan = if view then view.plan else nil,
 				pictures = if view then view.shown_pictures else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
@@ -1207,6 +1217,8 @@ end
 -- (`landing`: the id of a prompt the host adds after `push`, a steer's.)
 local shown: (() -> ())? = nil
 local sending: ((push: () -> (), landing: string?) -> ())? = nil
+local to_plan: (() -> ())? = nil
+local named_to_plan: { [string]: () -> () } = {}
 -- A named transcript's (`name`: a side chat's), by its name.
 local named_shown: { [string]: () -> () } = {}
 local named_sending: { [string]: (push: () -> (), landing: string?) -> () } = {}
@@ -1281,9 +1293,49 @@ local function Transcript(props: Props): Node
 			offset:set(math.max(0, offset:peek() + (y - top) - h / 3))
 		end
 		find_for = function(key: string): any
-			return { key = key, query = f.query, current = f.current, reveal = reveal }
+			-- (The plan card's own words land with the card's step, not by a reveal from before its row is laid out.)
+			local shown = if string.sub(key, 1, 10) == "plan-card:" then nil else reveal
+			return { key = key, query = f.query, current = f.current, reveal = shown }
 		end
 	end
+	local card = ui.computed(function(): any
+		return if plan_call and plan_call() and threads and threads.plan then (threads.plan :: any)() else nil
+	end)
+	local plan_ref = ui.ref()
+	local step_refs: { [string]: Ref } = {}
+	local land_on_step: ((step: string) -> ())? = nil
+	local function plan_card(): any
+		return card:get()
+	end
+	local handbacks = ui.computed(function(): { [string]: Threads.Handback }
+		local p = plan_card()
+		return if p then Threads.step_handbacks(messages:get(), p) else {}
+	end)
+	local function step_back(x: Message): boolean
+		local p = plan_card()
+		return p ~= nil and Threads.step_back(x, p, if props.sent_from then props.sent_from() else nil)
+	end
+	local function said_of(x: Message): string
+		return if x.steps and #x.steps > 0 then Threads.handback_text(x.text or "") else x.text or ""
+	end
+	local function plan_body(text: string, key: string?): Node
+		return Markdown {
+			text = text,
+			small = true,
+			ink = "$text.secondary",
+			breaks = true,
+			open = props.open_link,
+			chat_mark = chat_mark,
+			link_menu = props.link_menu,
+			find = if find_for and key then find_for(key) else nil,
+		}
+	end
+	local plan_found = if find
+		then function(key: string): boolean
+			local c = (find :: TranscriptFind).current()
+			return c ~= nil and c.key == key
+		end
+		else nil
 	-- Whether the transcript this one replaces rested at its end (kept
 	-- state: a reload's rebuild knows it; `keep` brings a view back only if
 	-- it didn't). Then a new one starts at its end.
@@ -1664,6 +1716,20 @@ local function Transcript(props: Props): Node
 		ui.effect(function()
 			local c = f.current()
 			if not c then
+				return
+			end
+			local step = string.match(c.key, "^plan%-card:(.+):%a+$")
+			if step then
+				local r = step_refs[step]
+				local el, view = if r then r:peek() else nil, list:peek()
+				if el and view and el.y ~= nil and view.y ~= nil and view.height ~= nil and el.y >= view.y and el.y < view.y + view.height - foot() then
+					return
+				end
+				ui.after(0, function()
+					if land_on_step then
+						land_on_step(step)
+					end
+				end)
 				return
 			end
 			local m = messages:at(c.row)
@@ -2202,7 +2268,7 @@ local function Transcript(props: Props): Node
 		})
 		going = this
 	end
-	local function go_to(id: string)
+	local function go_to(id: string, within: (() -> any)?)
 		local index = messages:index_of("id", id)
 		if not index or not list:peek() then
 			return
@@ -2214,17 +2280,41 @@ local function Transcript(props: Props): Node
 				table.insert(above, m.id)
 			end
 		end
-		glide_to(function(): number
-			return row_top(id, above)
-		end, function()
+		local function goal(): number
+			local top = row_top(id, above)
+			local r = rows[id]
+			local row_el, el = r and r.outer:peek(), within and within()
+			if row_el and el and row_el.y ~= nil and el.y ~= nil then
+				return math.max(0, top + (el.y :: number) - (row_el.y :: number) - LAND_GAP)
+			end
+			return top
+		end
+		-- (The part's place moves while the rows around it are first laid out: followed until it holds.)
+		local function settle(left: number)
+			local r = rows[id]
+			if r and r.outer:peek() and within and within() then
+				local to = goal()
+				if math.abs(to - offset:peek()) >= 0.5 then
+					offset:set(to)
+				end
+			end
+			if within and left > 0 then
+				ui.after(16, function()
+					settle(left - 1)
+				end)
+			end
+		end
+		glide_to(goal, function()
 			local r = rows[id]
 			if r and r.outer:peek() then
-				offset:set(math.max(0, row_top(id, above)))
+				offset:set(math.max(0, goal()))
+				settle(SETTLE_TRIES)
 				return
 			end
 			local now, el = messages:index_of("id", id), list:peek()
 			if now and el then
 				el:scroll_to_row(now, { align = "start" })
+				settle(SETTLE_TRIES)
 			end
 		end)
 	end
@@ -2266,6 +2356,32 @@ local function Transcript(props: Props): Node
 		end,
 		go = go_to,
 	}
+	local function go_plan(step: string?)
+		local id = if plan_call then plan_call() else nil
+		if not id then
+			return
+		end
+		for i = messages:len(), 1, -1 do
+			local x = messages:at(i)
+			if x and Threads.holds({ blocks = x.blocks, tools = x.tools }, id) then
+				go_to(x.id, function(): any
+					local r = if step then step_refs[step] else nil
+					return (r or plan_ref):peek()
+				end)
+				return
+			end
+		end
+	end
+	land_on_step = go_plan
+	if props.name then
+		named_to_plan[props.name] = function()
+			go_plan()
+		end
+	else
+		to_plan = function()
+			go_plan()
+		end
+	end
 
 	local branch = props.branch
 	local editing = ui.use_state(nil :: { id: string, index: number, phase: MessageEdit.Phase, at_end: boolean }?)
@@ -2520,7 +2636,7 @@ local function Transcript(props: Props): Node
 	end
 
 	local function peer_of(x: Message): string?
-		if x.role ~= "user" or not x.from_chat or x.continued_on ~= nil or x.wake or (x.steps and #x.steps > 1) then
+		if x.role ~= "user" or not x.from_chat or x.continued_on ~= nil or x.wake or (x.steps and #x.steps > 1) or step_back(x) then
 			return nil
 		end
 		return if voice_of(x, props) == "peer" then x.from_chat else nil
@@ -2566,7 +2682,7 @@ local function Transcript(props: Props): Node
 				end,
 				text = function(id: string): string
 					local x = at(id)
-					return if x then x.text or "" else ""
+					return if x then said_of(x) else ""
 				end,
 				clock = function(id: string): string?
 					local x = at(id)
@@ -2599,7 +2715,7 @@ local function Transcript(props: Props): Node
 						Markdown {
 							text = function(): string
 								local x = at(id)
-								return if x then x.text or "" else ""
+								return if x then said_of(x) else ""
 							end,
 							breaks = true,
 							open = props.open_link,
@@ -2729,11 +2845,17 @@ local function Transcript(props: Props): Node
 		end
 		local voice = if mine then voice_of(m, props) else nil
 		local woken = if voice == "wake" and m.wake and #m.wake == 1 then m.wake[1] else nil
-		local grouped = voice == "peer" and peer_of(m) ~= nil
+		local grouped = voice == "peer" and m.role == "user" and m.from_chat ~= nil and m.continued_on == nil and not m.wake and not (m.steps and #m.steps > 1)
+		local function hidden(): boolean
+			return voice == "peer" and step_back(state:get())
+		end
 		local shape: (() -> string)? = nil
 		if grouped or woken then
 			local from = m.from_chat
 			local made = ui.computed(function(): string
+				if hidden() then
+					return "hidden"
+				end
 				local i = index:get()
 				local prev = if i > 1 then messages:at(i - 1) else nil
 				local before = if prev then peer_of(prev) else nil
@@ -2762,7 +2884,11 @@ local function Transcript(props: Props): Node
 			end
 		end
 		local function gone(): boolean
-			return shape ~= nil and (shape :: () -> string)() == "gone"
+			if shape == nil then
+				return hidden()
+			end
+			local sh = (shape :: () -> string)()
+			return sh == "gone" or sh == "hidden"
 		end
 		-- Zeron's gaps: a message opens 16 under the lane of the one before;
 		-- a prompt sits 6 under the switch seam over it.
@@ -2965,27 +3091,32 @@ local function Transcript(props: Props): Node
 					end, { w_full = true })
 					elseif voice == "wake" then Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
 					elseif grouped and shape then ui.presence(function(): string?
-						return if (shape :: () -> string)() ~= "gone" then "card" else nil
+						local sh = (shape :: () -> string)()
+						return if sh ~= "gone" and sh ~= "hidden" then "card" else nil
 					end, function(): Node
 						return peer_card(m, index, shape :: () -> string, hovered)
 					end, { w_full = true })
-					elseif voice == "peer" then ui.column {
-						class = "message message-peer",
-						provide = { message = m.id },
-						w_full = true,
-						Threads.From { id = `from-{m.id}`, senders = if m.steps and #m.steps > 1 then m.steps else { m.from_chat :: string }, clock = m.clock, threads = props.threads },
-						Markdown {
-							text = function(): string
-								return state:get().text or ""
-							end,
-							breaks = true,
-							open = props.open_link,
-							chat_mark = chat_mark,
-							link_menu = props.link_menu,
-							find = if find_for then find_for(`{m.id}:u`) else nil,
-						},
-						strip(m, state, hovered),
-					}
+					elseif voice == "peer" then ui.presence(function(): string?
+						return if hidden() then nil else "peer"
+					end, function(): Node
+						return ui.column {
+							class = "message message-peer",
+							provide = { message = m.id },
+							w_full = true,
+							Threads.From { id = `from-{m.id}`, senders = if m.steps and #m.steps > 1 then m.steps else { m.from_chat :: string }, clock = m.clock, threads = props.threads },
+							Markdown {
+								text = function(): string
+									return said_of(state:get())
+								end,
+								breaks = true,
+								open = props.open_link,
+								chat_mark = chat_mark,
+								link_menu = props.link_menu,
+								find = if find_for then find_for(`{m.id}:u`) else nil,
+							},
+							strip(m, state, hovered),
+						}
+					end, { w_full = true })
 					elseif mine then landed(ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the
@@ -3033,7 +3164,15 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state),
 					})
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, plan_ref = plan_ref, plan_place = function(step: string, ref: Ref, gone: boolean?)
+								if not gone then
+									step_refs[step] = ref
+								elseif step_refs[step] == ref then
+									step_refs[step] = nil
+								end
+							end, handback = function(step: string): Threads.Handback?
+							return handbacks:get()[step]
+						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?
@@ -3335,6 +3474,12 @@ return {
 	-- whatever they were reading).
 	latest = function(name: string?)
 		local go = if name then named_shown[name] else shown
+		if go then
+			go()
+		end
+	end,
+	to_plan = function(name: string?)
+		local go = if name then named_to_plan[name] else to_plan
 		if go then
 			go()
 		end

@@ -44,6 +44,9 @@ use crate::doc_host::{ChatDocHandle, DocHost, Since};
 
 #[path = "session_activity.rs"]
 mod activity;
+#[path = "thread_activity.rs"]
+mod thread_activity;
+pub use thread_activity::{ThreadActivities, ThreadActivity};
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
@@ -917,6 +920,7 @@ struct Inner {
     /// to read `statuses`; terminal activity is merged at this boundary.
     activity_tx: OnceLock<watch::Sender<Vec<Session>>>,
     activity_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    thread_activity: watch::Sender<ThreadActivities>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
@@ -1302,6 +1306,7 @@ impl SessionsEngine {
                 sessions_tx,
                 activity_tx: OnceLock::new(),
                 activity_task: Mutex::new(None),
+                thread_activity: watch::channel(ThreadActivities::new()).0,
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 pending_branches: Mutex::new(HashMap::new()),
@@ -2181,12 +2186,11 @@ impl SessionsEngine {
             .map_err(EngineError::Other)?;
         self.inner
             .apply_native_policy(chat_id, harness_id, &mut request.disabled_tools);
-        if self
+        let chat = self
             .inner
             .workspace()
-            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
-            .is_some_and(|chat| chat.mission().is_some())
-        {
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten());
+        if chat.as_ref().is_some_and(|chat| chat.mission().is_some()) {
             request.plan = false;
         }
         // Native-only catalog entries have no portable file fallback. Reject
@@ -2209,7 +2213,9 @@ impl SessionsEngine {
         let (harness, instance_id) = self.inner.resolve_for_chat(chat_id, harness_id)?;
         let launch = self.inner.instance_launch(instance_id.as_deref());
         if request.computer_control && !harness.computer_tools_reachable() {
-            self.note_computer_unreachable(chat_id, harness_id);
+            if !chat.as_ref().is_some_and(|chat| chat.delegation.is_some()) {
+                self.note_computer_unreachable(chat_id, harness_id);
+            }
             request.computer_control = false;
         }
         let mut turn_computer = request.computer_control;
@@ -5995,11 +6001,13 @@ impl Inner {
                     if let Some(schedule) = self.resume_schedule.get() {
                         schedule.clear(chat_id);
                     }
+                    self.begin_activity(chat_id);
                 }
                 SessionStatus::Working | SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {
                     entry.started_at = None;
                     entry.compacting = false;
+                    self.end_activity(chat_id);
                 }
             }
             let session = entry.clone();
@@ -8039,7 +8047,7 @@ struct ParkedWait {
 /// stands. The runtime normally starts its wake turn at once (Claude Code:
 /// 0.1 s after the roster drains, live-verified 2.1.319), so this only ever
 /// runs out when no wake comes. `ZERON_WAKE_GRACE_MS` overrides it (tests).
-fn wake_grace() -> std::time::Duration {
+pub(crate) fn wake_grace() -> std::time::Duration {
     std::env::var("ZERON_WAKE_GRACE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -9923,6 +9931,7 @@ async fn drive_run(
             ) {
                 inner.bind_tool_parts(&chat_id, &run_id, &mut folded);
             }
+            inner.note_activity(&chat_id, &event, &folded);
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run

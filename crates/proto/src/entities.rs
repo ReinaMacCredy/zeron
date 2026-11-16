@@ -1039,6 +1039,12 @@ pub fn thread_link(chat: &Chat, steps: &[TaskStep]) -> Option<ThreadLink> {
             .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
             .filter(|step| step.owner_chat_id == parent)
             .max_by_key(|step| step.outcome.is_none())
+            .or_else(|| {
+                steps
+                    .iter()
+                    .filter(|step| !step.deleted && step.owner_chat_id == parent)
+                    .find(|step| step.earlier.contains(&chat.id))
+            })
             .map(|step| step.id.clone())
     };
     if let Some(source) = &chat.forked_from_chat_id {
@@ -1116,6 +1122,8 @@ pub struct TaskStep {
         deserialize_with = "lenient_option"
     )]
     pub target: Option<RouteTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1131,6 +1139,36 @@ pub struct StepTurn {
     pub ended: StepTurnEnd,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<TurnFacts>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnFacts {
+    pub ms: u64,
+    pub tools: u32,
+    pub failed: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_text: bool,
+}
+
+impl TurnFacts {
+    /// Shell writes leave no file count to trust, so none is claimed.
+    pub fn line(&self) -> String {
+        let calls = if self.tools == 1 { "call" } else { "calls" };
+        let mut line = format!(
+            "Turn: {}, {} tool {calls}, {} failed",
+            crate::background::elapsed_label((self.ms / 1000) as i64),
+            self.tools,
+            self.failed
+        );
+        if self.no_text {
+            line.push_str(", and its last message had no text");
+        }
+        line.push('.');
+        line
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1188,6 +1226,8 @@ pub struct TaskStepPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub target: Option<Option<RouteTarget>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earlier: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3638,6 +3678,7 @@ mod tests {
             bound.turn = Some(StepTurn {
                 ended: StepTurnEnd::Failed,
                 turn: Some("turn-1".into()),
+                facts: None,
             });
             assert_eq!(
                 step_state(&bound, indicator.map(|_| child(None)).as_ref(), indicator),
@@ -3736,6 +3777,14 @@ mod tests {
             link(&opened, &[gone]).map(|l| l.kind),
             Some(LinkKind::OpenedFrom)
         );
+        let mut rerun = bound.clone();
+        rerun.chat_id = Some("c2".into());
+        rerun.earlier = vec!["c".into()];
+        assert_eq!(
+            link(&delegated, std::slice::from_ref(&rerun)).and_then(|l| l.step_id),
+            Some("s1".into()),
+            "an earlier attempt stays linked to the step it ran"
+        );
         let mut fork = opened.clone();
         fork.forked_from_chat_id = Some("source".into());
         assert_eq!(
@@ -3804,7 +3853,8 @@ mod tests {
             patch.turn,
             Some(Some(StepTurn {
                 ended: StepTurnEnd::Completed,
-                turn: Some("m1".into())
+                turn: Some("m1".into()),
+                facts: None,
             }))
         );
         let patch: TaskStepPatch =

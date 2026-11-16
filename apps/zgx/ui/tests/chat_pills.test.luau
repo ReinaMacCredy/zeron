@@ -633,3 +633,39 @@ test("a press outside a card leaves the keyboard where the press put it", functi
 	expect(app:tree(field)).never.to_contain("focused")
 	expect(app:error()).to_be(nil)
 end)
+
+test("a chat running a plan has the Plan pill in its threads pill's place: its count, a segment a step, the newest event", function()
+	local app = opened()
+	local function plan(last: string, done: number): any
+		return { s2 = { plan = { overview = "", pending = false, order = { "a", "b", "c" }, progress = { done = done, total = 3 } }, rows = {
+			{ key = "owned:k1", kind = "owned", chat = "k1", step = "a", number = 1, title = "One", state = "done" },
+			{ key = "owned:k2", kind = "owned", chat = "k2", step = "b", number = 2, title = "Two", state = "working" },
+			{ key = "owned:k3", kind = "owned", chat = "k3", step = "c", number = 3, title = "Three", state = last },
+		} } }
+	end
+	app:set_state("test_threads", plan("working", 1))
+	pop(app)
+	expect(app:has("#pills-plan")).to_be(true)
+	expect(app:has("#pills-threads")).to_be(false)
+	expect(app:text("#pills-plan-count")).to_be("1/3")
+	expect(app:count(".pills-plan-seg")).to_be(3)
+	expect(app:count(".pills-plan-seg-working")).to_be(2)
+	app:set_state("test_threads", plan("done", 2))
+	gone(app)
+	gone(app)
+	expect(app:text("#pills-plan-count")).to_be("2/3")
+	expect(app:count(".pills-plan-seg-done")).to_be(2)
+	expect(app:tree("#pills-plan")).to_contain("Three done")
+	app:click("#pills-plan")
+	pop(app)
+	local ended = plan("done", 3)
+	ended.s2.plan.progress.done = 3
+	ended.s2.rows[2].state = "done"
+	table.insert(ended.s2.rows, { key = "owned:k4", kind = "owned", chat = "k4", title = "Lint", state = "working" })
+	app:set_state("test_threads", ended)
+	gone(app)
+	gone(app)
+	expect(app:has("#pills-plan")).to_be(false)
+	expect(app:has("#pills-threads")).to_be(true)
+	expect(app:error()).to_be(nil)
+end)

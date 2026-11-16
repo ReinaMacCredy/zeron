@@ -139,6 +139,100 @@ pub(super) fn clip(text: &str, max: usize) -> String {
 
 const HANDBACK_REPLY_CHARS: usize = 4_000;
 const FINDING_NOTE_CHARS: usize = 2_000;
+const BACKGROUND_HOLD_MS: i64 = 10 * 60 * 1000;
+
+pub(super) fn background_hold() -> chrono::Duration {
+    chrono::Duration::milliseconds(
+        std::env::var("ZERON_BACKGROUND_HOLD_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(BACKGROUND_HOLD_MS),
+    )
+}
+
+fn turn_ended_at(session: &Session) -> Option<chrono::DateTime<Utc>> {
+    session
+        .last_turn_outcome
+        .filter(|outcome| outcome.status == zeron_proto::DoneStatus::Completed)
+        .map(|outcome| outcome.finished_at)
+}
+
+fn background_hold_until(
+    session: &Session,
+    now: chrono::DateTime<Utc>,
+    hold: chrono::Duration,
+) -> Option<chrono::DateTime<Utc>> {
+    if session.status != SessionStatus::Idle
+        || turn_live(session)
+        || zeron_proto::view::background_tasks(Some(session), now).is_empty()
+    {
+        return None;
+    }
+    Some(turn_ended_at(session)? + hold).filter(|until| *until > now)
+}
+
+fn background_labels(tasks: &[zeron_proto::BackgroundTask]) -> Vec<String> {
+    tasks
+        .iter()
+        .map(|task| one_line(zeron_proto::background::task_label(task), TITLE_CHARS))
+        .collect()
+}
+
+fn background_note(
+    session: &Session,
+    completed_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+    hold: chrono::Duration,
+) -> Option<String> {
+    let tasks = zeron_proto::view::background_tasks(Some(session), now);
+    let ended = turn_ended_at(session)?;
+    if tasks.is_empty() || completed_at - ended < hold {
+        return None;
+    }
+    let minutes = (now - ended).num_minutes();
+    Some(format!(
+        "The thread ended its turn {minutes} minute{} ago; background command still running: {}.",
+        if minutes == 1 { "" } else { "s" },
+        background_labels(tasks).join("; ")
+    ))
+}
+
+const QUIET_AFTER_MS: i64 = 5 * 60 * 1000;
+
+fn quiet_after() -> chrono::Duration {
+    chrono::Duration::milliseconds(
+        std::env::var("ZERON_QUIET_NOTICE_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(QUIET_AFTER_MS),
+    )
+}
+
+fn quiet_text(child: &Chat, step: Option<(&str, &str)>, minutes: i64) -> String {
+    let quiet = format!(
+        "has been quiet for {minutes} minute{}: no tool call and no text, only reasoning. It is still running.",
+        if minutes == 1 { "" } else { "s" }
+    );
+    let title = one_line(child.title.as_deref().unwrap_or("Untitled"), TITLE_CHARS);
+    match step {
+        Some((step_id, step_title)) => format!(
+            "Step \"{}\" (stepId {step_id}) on thread {} {quiet}\nRead it with read_thread, nudge it with send_message_to_thread, or stop it with task_cancel.",
+            zeron_proto::view::single_line(step_title),
+            child.id
+        ),
+        None => format!(
+            "Delegated task {} (\"{title}\") {quiet}\nRead it with task_status, nudge it with send_message_to_thread, or stop it with task_cancel.",
+            child.id
+        ),
+    }
+}
+
+fn earliest(
+    due: Option<chrono::DateTime<Utc>>,
+    at: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    Some(due.map_or(at, |due| due.min(at)))
+}
 
 pub(super) fn handback_settle() -> std::time::Duration {
     std::time::Duration::from_millis(
@@ -194,6 +288,7 @@ struct TaskHandback {
     status: Option<DelegationStatus>,
     result: String,
     step: Option<(String, String)>,
+    notes: Vec<String>,
 }
 
 fn reruns_step(task: &TaskHandback) -> bool {
@@ -237,7 +332,19 @@ fn wake_text(tasks: &[TaskHandback]) -> String {
         .flatten()
         .collect::<Vec<_>>()
         .join(" ");
-    let children = tasks.iter().map(|task| match &task.step {
+    let children = tasks.iter().map(|task| {
+        let (status, reply) = status_and_reply(task);
+        let status = std::iter::once(status)
+            .chain(task.notes.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (status, reply)
+    });
+    handback_text(children, next)
+}
+
+fn status_and_reply(task: &TaskHandback) -> (String, Option<String>) {
+    match &task.step {
         Some((step_id, step_title)) => {
             let what = match task.status {
                 Some(DelegationStatus::Failed) => "failed",
@@ -273,8 +380,7 @@ fn wake_text(tasks: &[TaskHandback]) -> String {
                 agent_response(&task.result, "task_status"),
             )
         }
-    });
-    handback_text(children, next)
+    }
 }
 
 pub(super) const WAKE_QUESTION_CHARS: usize = 1_500;
@@ -515,6 +621,58 @@ fn result_parts(entries: &[SessionMessageEntry], anchor: &str) -> (Option<String
         }
     }
     (text, error)
+}
+
+fn step_run_by<'a>(
+    steps: &'a [zeron_proto::TaskStep],
+    chat_id: &str,
+) -> Option<&'a zeron_proto::TaskStep> {
+    let runs = |step: &&zeron_proto::TaskStep| step.chat_id.as_deref() == Some(chat_id);
+    steps
+        .iter()
+        .filter(runs)
+        .find(|step| step.outcome.is_none())
+        .or_else(|| steps.iter().find(runs))
+}
+
+fn result_from(entries: Option<&[SessionMessageEntry]>, delegation: &Delegation) -> String {
+    entries
+        .map(|entries| {
+            let (text, error) = result_parts(entries, &delegation.anchor);
+            result_text(delegation.status, text, error)
+        })
+        .or(delegation.summary.clone())
+        .unwrap_or_default()
+}
+
+fn turn_facts(entries: &[SessionMessageEntry], anchor: &str) -> Option<zeron_proto::TurnFacts> {
+    let at = entries.iter().position(|entry| entry.id == anchor)?;
+    let replies: Vec<&SessionMessageEntry> = entries[at + 1..]
+        .iter()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .collect();
+    let last = replies.last()?;
+    let ended = replies
+        .iter()
+        .map(|entry| entry.created_at + entry.duration_ms.unwrap_or(0))
+        .max()?;
+    let (tools, failed) =
+        replies
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .fold((0, 0), |(tools, failed), part| match part {
+                MessagePart::Tool { is_error, .. } => (tools + 1, failed + u32::from(*is_error)),
+                _ => (tools, failed),
+            });
+    Some(zeron_proto::TurnFacts {
+        ms: (ended - entries[at].created_at).max(0) as u64,
+        tools,
+        failed,
+        no_text: !last
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty())),
+    })
 }
 
 fn result_text(status: DelegationStatus, text: Option<String>, error: Option<String>) -> String {
@@ -817,12 +975,20 @@ impl DocHost {
             cwd,
             delegation,
         )?;
-        let bind = |chat_id: Option<String>| zeron_proto::TaskStepPatch {
-            chat_id: Some(chat_id),
-            ..Default::default()
-        };
+        let bind =
+            |chat_id: Option<String>, earlier: Vec<String>, turn: Option<zeron_proto::StepTurn>| {
+                zeron_proto::TaskStepPatch {
+                    chat_id: Some(chat_id),
+                    earlier: Some(earlier),
+                    turn: Some(turn),
+                    ..Default::default()
+                }
+            };
         if let Some(step) = &step {
-            let bound = workspace.update_task_step(&step.id, &bind(Some(chat_id.clone())));
+            let mut earlier = step.earlier.clone();
+            earlier.extend(step.chat_id.clone().filter(|old| !earlier.contains(old)));
+            let bound =
+                workspace.update_task_step(&step.id, &bind(Some(chat_id.clone()), earlier, None));
             if !matches!(bound, Ok(true)) {
                 workspace.delete_chat(&chat_id).ok();
                 self.purge_chat(&chat_id);
@@ -852,7 +1018,16 @@ impl DocHost {
             .await
         {
             if let Some(step) = &step {
-                workspace.update_task_step(&step.id, &bind(None)).ok();
+                workspace
+                    .update_task_step(
+                        &step.id,
+                        &bind(
+                            step.chat_id.clone(),
+                            step.earlier.clone(),
+                            step.turn.clone(),
+                        ),
+                    )
+                    .ok();
             }
             workspace.update_chat_delegation(&chat_id, |d| {
                 d.status = DelegationStatus::Failed;
@@ -1032,16 +1207,14 @@ impl DocHost {
         }
     }
 
-    fn result_of(&self, child: &Chat, delegation: &Delegation) -> String {
-        self.open(&child.id)
+    fn child_entries(&self, chat_id: &str) -> Option<Vec<SessionMessageEntry>> {
+        self.open(chat_id)
             .ok()
             .and_then(|handle| handle.doc.read_entries().ok())
-            .map(|entries| {
-                let (text, error) = result_parts(&entries, &delegation.anchor);
-                result_text(delegation.status, text, error)
-            })
-            .or(delegation.summary.clone())
-            .unwrap_or_default()
+    }
+
+    fn result_of(&self, child: &Chat, delegation: &Delegation) -> String {
+        result_from(self.child_entries(&child.id).as_deref(), delegation)
     }
 
     fn task_wake_text(&self, task_ids: &[String]) -> String {
@@ -1053,28 +1226,39 @@ impl DocHost {
             .workspace()
             .and_then(|workspace| workspace.read_task_steps().ok())
             .unwrap_or_default();
+        let now = Utc::now();
         let tasks: Vec<TaskHandback> = task_ids
             .iter()
             .map(|id| {
                 let child = chats.iter().find(|chat| &chat.id == id);
                 let delegation = child.and_then(|chat| chat.delegation.as_ref());
-                let runs = |step: &&zeron_proto::TaskStep| step.chat_id.as_ref() == Some(id);
+                let entries = child.and_then(|chat| self.child_entries(&chat.id));
+                let facts = delegation
+                    .filter(|d| !d.is_running())
+                    .zip(entries.as_deref())
+                    .and_then(|(d, entries)| turn_facts(entries, &d.anchor));
+                let held = delegation
+                    .filter(|d| d.status == DelegationStatus::Completed)
+                    .and_then(|d| d.completed_at)
+                    .zip(self.sessions().and_then(|s| s.session_status(id)))
+                    .and_then(|(completed_at, session)| {
+                        background_note(&session, completed_at, now, background_hold())
+                    });
                 TaskHandback {
-                    step: steps
-                        .iter()
-                        .filter(runs)
-                        .find(|step| step.outcome.is_none())
-                        .or_else(|| steps.iter().find(runs))
-                        .map(|step| (step.id.clone(), step.title.clone())),
+                    step: step_run_by(&steps, id).map(|step| (step.id.clone(), step.title.clone())),
                     id: id.clone(),
                     title: child
                         .and_then(|chat| chat.title.clone())
                         .unwrap_or_else(|| "Untitled".into()),
                     status: delegation.map(|d| d.status),
-                    result: child
-                        .zip(delegation)
-                        .map(|(child, d)| self.result_of(child, d))
+                    result: delegation
+                        .map(|d| result_from(entries.as_deref(), d))
                         .unwrap_or_default(),
+                    notes: facts
+                        .map(|facts| facts.line())
+                        .into_iter()
+                        .chain(held)
+                        .collect(),
                 }
             })
             .collect();
@@ -1769,11 +1953,16 @@ impl DocHost {
         let host = self.clone();
         self.spawn_worker(async move {
             let mut limits = None;
+            let mut activity = None;
+            let mut due: Option<chrono::DateTime<Utc>> = None;
             loop {
                 if limits.is_none() {
                     limits = host
                         .sessions()
                         .and_then(|sessions| sessions.resume_schedule().map(|s| s.watch()));
+                }
+                if activity.is_none() {
+                    activity = host.sessions().map(|sessions| sessions.watch_thread_activity());
                 }
                 tokio::select! {
                     changed = statuses.changed() => if changed.is_err() { return },
@@ -1783,8 +1972,27 @@ impl DocHost {
                             None => std::future::pending().await,
                         }
                     } => if changed.is_err() { return },
+                    changed = async {
+                        match activity.as_mut() {
+                            Some(activity) => activity.changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        // Activity only moves a quiet deadline later, but one it unmarked needs a new one.
+                        due = earliest(due, Utc::now() + quiet_after());
+                        continue;
+                    }
+                    () = async {
+                        match due {
+                            Some(at) => tokio::time::sleep((at - Utc::now()).to_std().unwrap_or_default()).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {}
                 }
-                host.settle_delegations(None).await;
+                due = host.settle_delegations(None).await;
             }
         });
     }
@@ -1799,15 +2007,21 @@ impl DocHost {
     }
 
     /// Children older than `booted_at` lost their run with the previous engine.
-    pub(super) async fn settle_delegations(&self, booted_at: Option<chrono::DateTime<Utc>>) {
+    /// Returns when a held child next needs another look.
+    pub(super) async fn settle_delegations(
+        &self,
+        booted_at: Option<chrono::DateTime<Utc>>,
+    ) -> Option<chrono::DateTime<Utc>> {
         let _settling = self.inner.delegation_lock.lock().await;
         let (Some(workspace), Some(sessions)) = (self.workspace(), self.sessions()) else {
-            return;
+            return None;
         };
         self.reopen_reruns(workspace, &sessions).await;
+        let hold = background_hold();
+        let mut due = None;
         for _ in 0..4 {
             let Ok(chats) = workspace.read_chats() else {
-                return;
+                return due;
             };
             let mut finished = Vec::new();
             for chat in &chats {
@@ -1835,7 +2049,22 @@ impl DocHost {
                     self.drain_queue(handle).await;
                     continue;
                 }
+                if let Some(until) = session.as_ref().and_then(|session| {
+                    self.quiet_watch(&sessions, chat, delegation, session, observed)
+                }) {
+                    due = earliest(due, until);
+                }
                 if !task_queued && session.as_ref().is_some_and(turn_live) {
+                    lock(&self.inner.background_held).remove(&chat.id);
+                    continue;
+                }
+                if !task_queued
+                    && !delegation.cancel_requested
+                    && let Some(until) = session
+                        .as_ref()
+                        .and_then(|session| self.background_hold(&chat.id, session, observed, hold))
+                {
+                    due = earliest(due, until);
                     continue;
                 }
                 let entries = handle
@@ -1852,10 +2081,12 @@ impl DocHost {
                     }),
                     after_restart,
                 ) {
+                    lock(&self.inner.background_held).remove(&chat.id);
                     finished.push((
                         chat.clone(),
                         status,
                         result_text(status, text, error),
+                        turn_facts(&entries, &delegation.anchor),
                         observed,
                     ));
                 }
@@ -1863,13 +2094,129 @@ impl DocHost {
             if finished.is_empty() {
                 break;
             }
-            for (child, status, result, observed) in finished {
+            for (child, status, result, facts, observed) in finished {
                 self.finish_child(&sessions, &child, status, result, observed)
                     .await;
+                self.record_step_turn(&child.id, status, facts);
             }
         }
         if booted_at.is_some() {
             self.reoffer_lost_wakes().await;
+        }
+        due
+    }
+
+    /// Wakes the owner once per quiet spell of a working child; returns when
+    /// the current spell would cross the line.
+    fn quiet_watch(
+        &self,
+        sessions: &SessionsEngine,
+        child: &Chat,
+        delegation: &Delegation,
+        session: &Session,
+        now: chrono::DateTime<Utc>,
+    ) -> Option<chrono::DateTime<Utc>> {
+        if session.status != SessionStatus::Working
+            || session.compacting
+            || session.held_by_subagents
+            || session.running_subagents > 0
+            || delegation.cancel_requested
+            || sessions.open_tools(&child.id) > 0
+        {
+            return None;
+        }
+        let activity = sessions
+            .thread_activity(&child.id)
+            .filter(|activity| activity.quiet_since.is_none())?;
+        let until = activity.at + quiet_after();
+        if until > now {
+            return Some(until);
+        }
+        if sessions.mark_quiet(&child.id, activity.at) && delegation.wake != DelegationWake::Never {
+            self.offer_quiet_notice(child, delegation, (now - activity.at).num_minutes());
+        }
+        None
+    }
+
+    fn offer_quiet_notice(&self, child: &Chat, delegation: &Delegation, minutes: i64) {
+        let Some(workspace) = self.workspace() else {
+            return;
+        };
+        let owner = delegation.delegated_by_chat_id.clone();
+        let live = workspace
+            .chat(&owner)
+            .ok()
+            .flatten()
+            .is_some_and(|chat| !chat.archived && chat.device_id == child.device_id);
+        if !live {
+            return;
+        }
+        let steps = workspace.read_task_steps().unwrap_or_default();
+        let step =
+            step_run_by(&steps, &child.id).map(|step| (step.id.as_str(), step.title.as_str()));
+        let text = quiet_text(child, step, minutes);
+        let (host, from) = (self.clone(), child.id.clone());
+        self.spawn_worker(async move {
+            if let Err(err) = host.queue_wake_note(&owner, &from, None, text).await {
+                tracing::warn!(chat = %owner, from = %from, error = %err, "quiet notice failed");
+            }
+        });
+    }
+
+    fn background_hold(
+        &self,
+        chat_id: &str,
+        session: &Session,
+        now: chrono::DateTime<Utc>,
+        hold: chrono::Duration,
+    ) -> Option<chrono::DateTime<Utc>> {
+        let mut held = lock(&self.inner.background_held);
+        if let Some(until) = background_hold_until(session, now, hold) {
+            held.insert(chat_id.to_string(), None);
+            return Some(until);
+        }
+        if session.status != SessionStatus::Idle
+            || !zeron_proto::view::background_tasks(Some(session), now).is_empty()
+        {
+            return None;
+        }
+        let drained = *held.get_mut(chat_id)?.get_or_insert(now);
+        let grace = chrono::Duration::from_std(crate::sessions::wake_grace()).unwrap_or_default();
+        Some(drained + grace).filter(|until| *until > now)
+    }
+
+    fn record_step_turn(
+        &self,
+        chat_id: &str,
+        status: DelegationStatus,
+        facts: Option<zeron_proto::TurnFacts>,
+    ) {
+        let Some(workspace) = self.workspace() else {
+            return;
+        };
+        let steps = workspace.read_task_steps().unwrap_or_default();
+        let Some(step) = step_run_by(&steps, chat_id) else {
+            return;
+        };
+        let ended = match status {
+            DelegationStatus::Failed => zeron_proto::StepTurnEnd::Failed,
+            DelegationStatus::Cancelled | DelegationStatus::Interrupted => {
+                zeron_proto::StepTurnEnd::Stopped
+            }
+            DelegationStatus::Completed | DelegationStatus::Running => {
+                zeron_proto::StepTurnEnd::Completed
+            }
+        };
+        let patch = zeron_proto::TaskStepPatch {
+            turn: Some(Some(zeron_proto::StepTurn {
+                ended,
+                turn: None,
+                facts,
+            })),
+            ..Default::default()
+        };
+        if let Err(err) = workspace.update_task_step(&step.id, &patch) {
+            tracing::warn!(step = %step.id, error = %err, "recording a step's turn failed");
         }
     }
 
@@ -2178,6 +2525,165 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_child_with_live_background_work_is_held_until_the_cap() {
+        let now = Utc::now();
+        let hold = chrono::Duration::minutes(10);
+        let mut s = session(SessionStatus::Idle);
+        s.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+            status: zeron_proto::DoneStatus::Completed,
+            finished_at: now - chrono::Duration::minutes(3),
+        });
+        assert_eq!(
+            background_hold_until(&s, now, hold),
+            None,
+            "no background work: the turn's end is the end"
+        );
+        s.background_tasks = vec![zeron_proto::BackgroundTask {
+            id: "bg".into(),
+            command: "npm run test:battery".into(),
+            ..Default::default()
+        }];
+        assert_eq!(
+            background_hold_until(&s, now, hold),
+            Some(now + chrono::Duration::minutes(7))
+        );
+        s.status = SessionStatus::Working;
+        assert_eq!(background_hold_until(&s, now, hold), None, "a live turn");
+        s.status = SessionStatus::Idle;
+        assert_eq!(
+            background_hold_until(&s, now + chrono::Duration::minutes(8), hold),
+            None,
+            "past the cap the turn's end stands"
+        );
+        s.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+            status: zeron_proto::DoneStatus::Interrupted,
+            finished_at: now,
+        });
+        assert_eq!(
+            background_hold_until(&s, now, hold),
+            None,
+            "a stopped turn is not held"
+        );
+    }
+
+    #[test]
+    fn a_capped_handback_names_the_background_work_still_running() {
+        let now = Utc::now();
+        let hold = chrono::Duration::minutes(10);
+        let ended = now - chrono::Duration::minutes(10);
+        let mut s = session(SessionStatus::Idle);
+        s.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+            status: zeron_proto::DoneStatus::Completed,
+            finished_at: ended,
+        });
+        s.background_tasks = vec![
+            zeron_proto::BackgroundTask {
+                id: "dev".into(),
+                command: "pnpm dev".into(),
+                description: Some("Start the dev server".into()),
+                ..Default::default()
+            },
+            zeron_proto::BackgroundTask {
+                id: "bat".into(),
+                command: "node battery.js".into(),
+                ..Default::default()
+            },
+        ];
+        let note = background_note(&s, now, now, hold).expect("held to the cap");
+        assert_eq!(
+            note,
+            "The thread ended its turn 10 minutes ago; background command still running: Start the dev server; node battery.js."
+        );
+        assert_eq!(
+            background_note(&s, ended + chrono::Duration::seconds(5), now, hold),
+            None,
+            "a turn that finished before the cap is an ordinary finish"
+        );
+        let task = TaskHandback {
+            id: "t".into(),
+            title: "Grade".into(),
+            status: Some(DelegationStatus::Completed),
+            result: "Battery still running.".into(),
+            step: Some(("st".into(), "Grade A1".into())),
+            notes: vec![note.clone()],
+        };
+        let text = wake_text(&[task]);
+        assert!(
+            text.starts_with(&format!(
+                "Step \"Grade A1\" (stepId st) finished a turn on its thread t.\n{note}\n\n<agent-response>"
+            )),
+            "{text}"
+        );
+        assert_eq!(zeron_proto::transcript::step_handback_threads(&text), ["t"]);
+    }
+
+    #[test]
+    fn a_turns_facts_time_it_from_its_task_and_count_its_calls_and_failures() {
+        let tool = |id: &str, is_error: bool| -> MessagePart {
+            serde_json::from_value(serde_json::json!({
+                "kind": "tool", "id": id, "call": { "kind": "exec", "command": "ls" },
+                "isError": is_error, "resolved": true,
+            }))
+            .unwrap()
+        };
+        let text = |text: &str| MessagePart::Text {
+            id: "x".into(),
+            text: text.into(),
+        };
+        let entry = |id: &str, role, created_at, duration_ms, parts| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts,
+            created_at,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            from_chat_id: None,
+            fork_import: false,
+            answers_request_id: None,
+            duration_ms,
+        };
+        let mut entries = vec![
+            entry(
+                "old",
+                MessageRole::Assistant,
+                0,
+                Some(1_000),
+                vec![tool("t0", true)],
+            ),
+            entry("task", MessageRole::User, 10_000, None, Vec::new()),
+            entry(
+                "a1",
+                MessageRole::Assistant,
+                10_500,
+                Some(400_000),
+                vec![text("Inspecting."), tool("t1", false), tool("t2", true)],
+            ),
+            entry(
+                "a2",
+                MessageRole::Assistant,
+                410_600,
+                Some(18_400),
+                vec![text("  ")],
+            ),
+        ];
+        assert_eq!(
+            turn_facts(&entries, "task"),
+            Some(zeron_proto::TurnFacts {
+                ms: 419_000,
+                tools: 2,
+                failed: 1,
+                no_text: true,
+            }),
+            "only the task's turn counts, and its last message said nothing"
+        );
+        entries[3].parts = vec![text("Done.")];
+        assert!(!turn_facts(&entries, "task").unwrap().no_text);
+        assert_eq!(turn_facts(&entries[..2], "task"), None, "no reply yet");
+        assert_eq!(turn_facts(&entries, "missing"), None);
+    }
+
+    #[test]
     fn a_restart_settles_a_child_whose_run_died() {
         let d = delegation();
         assert_eq!(
@@ -2311,6 +2817,7 @@ mod tests {
             status,
             result: result.into(),
             step: None,
+            notes: Vec::new(),
         };
         assert_eq!(
             wake_text(&[task("a", Some(DelegationStatus::Completed), " done \n")]),

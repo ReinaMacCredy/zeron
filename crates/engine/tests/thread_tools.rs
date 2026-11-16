@@ -2112,14 +2112,26 @@ async fn a_finished_child_wakes_its_idle_owner_once_and_task_status_acknowledges
     let d = delegation(&rig.core, &child);
     assert_eq!(d.status, zeron_proto::DelegationStatus::Completed);
     assert_eq!(d.delivery, Some(zeron_proto::DelegationDelivery::Delivered));
-    let wakes = rig
+    assert_eq!(
+        prompts_equal(&rig, &wake),
+        1,
+        "one wake, carrying the child's reply"
+    );
+    let raw = rig
         .prompts
         .lock()
         .unwrap()
         .iter()
-        .filter(|p| **p == wake)
-        .count();
-    assert_eq!(wakes, 1, "one wake, carrying the child's reply");
+        .find(|p| p.starts_with(&format!("Delegated task {child} ")))
+        .cloned()
+        .unwrap();
+    let (status, rest) = raw.split_once('\n').unwrap();
+    assert!(status.ends_with(") completed."), "{raw}");
+    assert!(
+        rest.starts_with("Turn: ")
+            && rest.contains(", 0 tool calls, 0 failed.\n\n<agent-response>"),
+        "the facts line follows the status line: {raw}"
+    );
 
     let read = rig
         .core
@@ -2258,6 +2270,219 @@ async fn a_never_wake_child_finishes_without_waking_its_idle_owner() {
     rig.core.shutdown().await;
 }
 
+const LEAVE_RUNNING: &str = "LEAVE IT RUNNING: ";
+
+/// A prompt starting with [`LEAVE_RUNNING`] ends its turn with one background
+/// process named by the rest; the test ends it through the captured turn.
+struct BackgroundHarness {
+    prompts: Arc<Mutex<Vec<String>>>,
+    turns: Arc<Mutex<Vec<zeron_harness::TurnControl>>>,
+}
+
+#[async_trait]
+impl Harness for BackgroundHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Background"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::StepBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    fn compaction(&self) -> Compaction {
+        Compaction::SlashText("/compact".into())
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.prompts.lock().unwrap().push(request.prompt.clone());
+        let left = request
+            .prompt
+            .strip_prefix(LEAVE_RUNNING)
+            .map(str::to_owned);
+        if left.is_some() {
+            self.turns.lock().unwrap().push(controls.turn.clone());
+        }
+        let RunControls {
+            mut steering,
+            interrupt,
+            turn,
+            ..
+        } = controls;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let done = || AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("hs-bg".into()),
+        };
+        let prompts = self.prompts.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "bg-1".into(),
+                tools: vec![],
+                cwd: "/tmp".into(),
+                session_id: "hs-bg".into(),
+                assistant_message_id: "a-bg".into(),
+            });
+            let _ = tx.send(AgentEvent::TextDelta {
+                text: "ending the turn; it keeps running".into(),
+            });
+            if let Some(label) = &left {
+                turn.set_background_processes(vec![zeron_proto::BackgroundTask {
+                    id: "bg-1".into(),
+                    command: "node job.js".into(),
+                    description: Some(label.clone()),
+                    ..Default::default()
+                }]);
+                turn.set_background(1);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let _ = tx.send(done());
+            loop {
+                tokio::select! {
+                    () = interrupt.cancelled() => break,
+                    message = steering.recv() => {
+                        let Some(message) = message else { break };
+                        prompts.lock().unwrap().push(message.prompt);
+                        let _ = tx.send(AgentEvent::Steered {
+                            assistant_message_id: None,
+                            next_assistant_message_id: None,
+                        });
+                        let _ = tx.send(AgentEvent::TextDelta { text: "noted".into() });
+                        let _ = tx.send(done());
+                    }
+                }
+            }
+            turn.set_background_processes(Vec::new());
+            turn.set_background(0);
+            if interrupt.is_cancelled() {
+                let _ = tx.send(AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: Some("hs-bg".into()),
+                });
+            }
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (Ok(event), rx))
+        })
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_child_idle_with_a_live_background_command_hands_back_only_when_it_ends_or_at_the_cap() {
+    // SAFETY: only the background children of this test hold on either knob.
+    unsafe {
+        std::env::set_var("ZERON_BACKGROUND_HOLD_MS", "1500");
+        std::env::set_var("ZERON_WAKE_GRACE_MS", "200");
+    }
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let turns = Arc::new(Mutex::new(Vec::new()));
+    let rig = rig_on(Arc::new(BackgroundHarness {
+        prompts: prompts.clone(),
+        turns: turns.clone(),
+    }));
+    let woke = |child: &str| {
+        entries(&rig.core, "lead")
+            .iter()
+            .filter(|e| e.from_chat_id.as_deref() == Some(child))
+            .count()
+    };
+    let battery = rig
+        .core
+        .doc_host
+        .delegate_task(
+            delegate(&format!("{LEAVE_RUNNING}Run the stuck-enemy battery")),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(
+        || turns.lock().unwrap().len() == 1 && idle(&rig.core, &battery),
+        "the battery's turn to end",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        delegation(&rig.core, &battery).is_running(),
+        "a turn that left its battery running is not the task's end"
+    );
+    assert_eq!(woke(&battery), 0, "no handback while the battery runs");
+
+    let ended = turns.lock().unwrap()[0].clone();
+    ended.set_background_processes(Vec::new());
+    ended.set_background(0);
+    wait_for(
+        || woke(&battery) == 1,
+        "the handback once the battery ended",
+    )
+    .await;
+    assert_eq!(
+        delegation(&rig.core, &battery).status,
+        zeron_proto::DelegationStatus::Completed
+    );
+    assert!(
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.contains(&format!("Delegated task {battery} ")))
+            .all(|p| !p.contains("background command still running")),
+        "an ordinary finish"
+    );
+
+    let server = rig
+        .core
+        .doc_host
+        .delegate_task(
+            delegate(&format!("{LEAVE_RUNNING}Start the dev server")),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(
+        || turns.lock().unwrap().len() == 2 && idle(&rig.core, &server),
+        "the server's turn to end",
+    )
+    .await;
+    assert!(delegation(&rig.core, &server).is_running());
+    wait_for(|| woke(&server) == 1, "the handback at the cap").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(woke(&server), 1, "the capped handback goes out once");
+    let told: Vec<String> = prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.contains(&format!("Delegated task {server} ")))
+        .cloned()
+        .collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].contains("ago; background command still running: Start the dev server."),
+        "{}",
+        told[0]
+    );
+    rig.core.shutdown().await;
+}
+
 const FOLLOW_UP_REPLY: &str = "Because the handle outlives the request.";
 
 fn completed_wake(child: &str, title: &str, reply: &str) -> String {
@@ -2271,7 +2496,7 @@ fn prompts_equal(rig: &Rig, text: &str) -> usize {
         .lock()
         .unwrap()
         .iter()
-        .filter(|p| *p == text)
+        .filter(|p| facts_free(p) == text)
         .count()
 }
 
@@ -3111,7 +3336,7 @@ async fn a_child_that_finishes_mid_turn_steers_its_wake_into_the_owners_turn() {
                 .unwrap()
                 .iter()
                 .any(|steer| {
-                    steer.contains(&format!(
+                    facts_free(steer).contains(&format!(
                         "Delegated task {child} (\"probe the cache\") completed.\n\n<agent-response>\nok\n</agent-response>"
                     ))
                 })
@@ -3215,7 +3440,7 @@ async fn children_finishing_while_the_wake_waits_share_one_wake() {
     assert_eq!(wakes[0].delegated_tasks, children);
     for (child, task) in children.iter().zip(["first", "second"]) {
         assert!(
-            wakes[0].text.contains(&format!(
+            facts_free(&wakes[0].text).contains(&format!(
                 "Delegated task {child} (\"{task}\") completed.\n\n<agent-response>\nok\n</agent-response>"
             )),
             "{}",
@@ -3955,13 +4180,21 @@ fn pending_request(core: &EngineCore, chat_id: &str) -> Option<String> {
     })
 }
 
+/// A handback's `Turn:` line carries wall-clock time, so exact matches skip it.
+fn facts_free(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.starts_with("Turn: "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn prompts_with(rig: &Rig, needle: &str) -> Vec<String> {
     rig.prompts
         .lock()
         .unwrap()
         .iter()
+        .map(|prompt| facts_free(prompt))
         .filter(|prompt| prompt.contains(needle))
-        .cloned()
         .collect()
 }
 
@@ -4647,6 +4880,27 @@ async fn an_orchestrated_task_runs_its_approved_steps_on_bound_threads() {
         [handback.clone()],
         "one handback carrying the step's reply, without peer framing"
     );
+    assert!(
+        rig.prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with(&format!(
+                "Step \"Build the API\" (stepId {}) finished a turn on its thread {first}.\nTurn: ",
+                steps[0].id
+            ))),
+        "the facts line follows the parseable first line"
+    );
+    let turn = rig
+        .core
+        .workspace
+        .task_step(&steps[0].id)
+        .unwrap()
+        .turn
+        .expect("the step records its thread's finished turn");
+    assert_eq!(turn.ended, zeron_proto::StepTurnEnd::Completed);
+    let facts = turn.facts.expect("with its facts");
+    assert_eq!((facts.tools, facts.failed, facts.no_text), (0, 0, false));
     let second = started(run(&steps[1], "task-lead").await);
     let err = refused(run(&steps[1], "task-lead").await);
     assert!(err.contains("still running"), "{err}");
@@ -5055,6 +5309,25 @@ async fn a_step_thread_stopped_before_its_first_reply_settles_and_the_step_runs_
     .await;
     let again = run_step(core, &step).await;
     assert_ne!(again, thread, "the lead starts the step again");
+    let rerun = core.workspace.task_step(&step.id).unwrap();
+    assert_eq!(rerun.chat_id.as_deref(), Some(again.as_str()));
+    assert_eq!(
+        rerun.earlier,
+        [thread.clone()],
+        "attempt 1 stays on its step"
+    );
+    assert_eq!(
+        rerun.turn, None,
+        "attempt 1's stopped turn is not the new attempt's"
+    );
+    let first = core.workspace.chat(&thread).unwrap().unwrap();
+    assert!(!first.archived, "an earlier attempt is not archived");
+    assert_eq!(
+        zeron_proto::thread_link(&first, &core.workspace.steps_of("task-lead"))
+            .and_then(|link| link.step_id),
+        Some(step.id.clone()),
+        "attempt 1 still links to its step"
+    );
     rig.core.shutdown().await;
 }
 

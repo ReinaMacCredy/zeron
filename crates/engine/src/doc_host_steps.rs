@@ -10,17 +10,21 @@ fn live(status: Option<SessionStatus>) -> bool {
     )
 }
 
+fn step_threads(step: &TaskStep) -> impl Iterator<Item = &str> {
+    step.chat_id.iter().chain(&step.earlier).map(String::as_str)
+}
+
 pub(super) fn marked_step_threads(workspace: &WorkspaceHost) -> HashSet<String> {
     let steps = workspace.watch_task_steps();
     let steps = steps.borrow();
     let open: HashSet<&str> = steps
         .iter()
         .filter(|step| step.outcome.is_none())
-        .filter_map(|step| step.chat_id.as_deref())
+        .flat_map(step_threads)
         .collect();
     steps
         .iter()
-        .filter_map(|step| step.chat_id.as_deref())
+        .flat_map(step_threads)
         .filter(|thread| !open.contains(thread))
         .map(str::to_owned)
         .collect()

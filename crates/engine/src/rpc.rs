@@ -4208,6 +4208,9 @@ fn forwardable(method: &str) -> bool {
     )
 }
 
+/// Local to this engine: the threads it runs. Belongs with `zeron_rpc::methods`.
+const WATCH_THREAD_ACTIVITY: &str = "WatchThreadActivity";
+
 /// Forwardable methods whose reply is a stream (proxied item-by-item).
 fn is_stream_method(method: &str) -> bool {
     if method == methods::OWN_VOICE_V2 {
@@ -5297,6 +5300,11 @@ impl RpcService for EngineRpc {
                         .boxed(),
                 ))
             }
+            WATCH_THREAD_ACTIVITY => Ok(RpcReply::Stream(
+                watch_stream(self.sessions.watch_thread_activity())
+                    .map(|threads| serde_json::json!({ "threads": threads }))
+                    .boxed(),
+            )),
             methods::WATCH_COMPOSER_PREDICTION => {
                 let p: ChatParams = parse_params(params)?;
                 let rx = self.sessions.watch_prediction(&p.chat_id);

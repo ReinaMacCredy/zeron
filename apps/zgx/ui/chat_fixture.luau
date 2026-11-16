@@ -1290,6 +1290,13 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "step_handback",
+	title = "A plan step's thread hands back its turn",
+	run = function()
+		store.messages:push { id = "hb1", role = "user", from_chat = "dg-run", steps = { "dg-run" }, clock = "4:27 PM", at = "Sep 8, 4:27 PM", text = 'Step "Write the parser" (stepId s1) finished a turn on its thread dg-run.\nTurn: 2m 5s, 3 tool calls, 1 failed.\n\n> The parser reads every fixture.\n\nRead it with read_thread, then mark the step done or skipped with the plan tool, action "step", or tell the thread what is still missing with send_message_to_thread.' }
+	end,
+}
+ui.command {
 	id = "peer_more",
 	title = "The parser delegate sends one more",
 	run = function()
@@ -3181,7 +3188,7 @@ ui.command {
 			blocks = {
 				{ id = "g:st", kind = "tools", summary = "Thought process · ran 1 command · called 1 tool", live = true, tools = {
 					{ id = "st-x", kind = "exec", verb = "Ran", target = one, call = SCRIPT },
-					{ id = "st-t", kind = "exec", verb = "Used", target = "ToolSearch" },
+					{ id = "st-t", kind = "mcp", verb = "Used", target = "github.search_issues" },
 					{ id = "st-r", kind = "thought", verb = "Thought" },
 				} },
 			},
@@ -3205,7 +3212,7 @@ ui.command {
 			blocks = {
 				{ id = "g:st2", kind = "tools", summary = "Thought process · ran 1 command · called 1 tool", live = true, tools = {
 					{ id = "st2-x", kind = "exec", verb = "Ran", target = SCRIPT },
-					{ id = "st2-t", kind = "exec", verb = "Used", target = "ToolSearch" },
+					{ id = "st2-t", kind = "mcp", verb = "Used", target = "github.search_issues" },
 					{ id = "st2-r", kind = "thought", verb = "Thought" },
 				} },
 			},

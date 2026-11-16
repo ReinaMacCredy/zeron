@@ -1369,7 +1369,10 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	-- ⌘F's own, over its own transcript.
 	local find = Find.bind(`chat.lane.{slot}.find`, view.messages, function(): boolean
 		return true
-	end, `lane-find-{slot}`)
+	end, `lane-find-{slot}`, function(): string?
+		local s = view.session:get()
+		return if s and s.state ~= "missing" then s.id else nil
+	end)
 	finders[slot], pickers[slot] = find, open_model
 	ui.on_cleanup(function()
 		if finders[slot] == find then

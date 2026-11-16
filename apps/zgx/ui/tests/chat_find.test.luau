@@ -78,6 +78,23 @@ test("Enter and the arrows step through the matches; Escape closes", function()
 	expect(app:error()).to_be(nil)
 end)
 
+test("find in a step's handback counts only the words its card shows", function()
+	local app = long_chat()
+	app:command("step_handback")
+	app:frames(20)
+	app:command("find_open")
+	settle(app)
+	app:type('role:textbox "Find"', "every fixture")
+	settle(app)
+	expect(tally(app)).to_be("1 of 1")
+	for _, hidden in { "finished a turn", "read_thread", "3 tool calls" } do
+		app:fill('role:textbox "Find"', hidden)
+		settle(app)
+		expect(tally(app)).to_be("No results")
+	end
+	expect(app:error()).to_be(nil)
+end)
+
 test("the newest match shows where it is, not at its reply's start", function()
 	local app = long_chat()
 	app:command("find_open")

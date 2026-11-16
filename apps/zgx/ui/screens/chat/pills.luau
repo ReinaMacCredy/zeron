@@ -17,6 +17,8 @@ local Threads = require("@app/screens/chat/threads")
 local PicksPill = require("@app/screens/chat/picks_pill")
 local typing = require("@app/screens/chat/typing")
 local glass = require("@ds/glass")
+local RollText = require("@ds/roll_text")
+local Steps = require("@ds/transcript_threads")
 local route = require("@app/screens/shell/route")
 
 local M = {}
@@ -1061,6 +1063,27 @@ local ShellsBody = ui.component(function(props: { bind: any, tasks: any, detail:
 	end, { w_full = true })
 end)
 
+local EVENT: { [string]: string } = {
+	working = "ds.pills.mission.started",
+	quiet = "ds.pills.mission.quiet",
+	background = "ds.pills.mission.background",
+	readyForReview = "ds.pills.mission.ready",
+	done = "ds.pills.mission.done",
+	failed = "ds.pills.mission.failed",
+	waitingOnYou = "ds.pills.mission.waiting",
+	cancelled = "ds.pills.mission.stopped",
+	skipped = "ds.pills.mission.skipped",
+}
+
+local function event_kind(step: any): string
+	if Steps.quiet(step) then
+		return "quiet"
+	elseif step.state == "working" and type(step.background) == "table" and #step.background > 0 then
+		return "background"
+	end
+	return step.state or "planned"
+end
+
 M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?, picks: (() -> string?)?, id: string?, keys: (() -> ())?, on_extent: ((w: number) -> ())? }): Node
 	local bind = props.bind
 	local keys = props.keys or typing.take
@@ -1079,6 +1102,51 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	local function threads_working(): number
 		return if main then Threads.working(bind.id()) else 0
 	end
+	local function plan_live(): boolean
+		return main and Threads.plan_running(bind.id())
+	end
+	local mission_now = ui.computed(function(): any
+		return if main then Threads.card(bind.id()) else nil
+	end)
+	local function mission(): any
+		return mission_now:get()
+	end
+	local event = ui.use_state("")
+	local seen: { [string]: string }? = nil
+	local seen_chat: string? = nil
+	ui.effect(function()
+		local c = mission()
+		local chat = bind.id()
+		if not c or c.pending then
+			seen = nil
+			return
+		end
+		local first = seen == nil or seen_chat ~= chat
+		local was = seen or {}
+		local now: { [string]: string } = {}
+		local said: string? = nil
+		local running = 0
+		for _, step in c.steps do
+			local k = event_kind(step)
+			now[step.id] = k
+			if k == "working" then
+				running += 1
+			end
+			local resumed = k == "working" and (was[step.id] == "quiet" or was[step.id] == "background")
+			if not first and was[step.id] ~= k and EVENT[k] and not resumed then
+				said = locale.s(EVENT[k], { title = step.title or "", n = if step.quiet_since then math.max(1, math.floor((os.time() - step.quiet_since) / 60)) else 0 })
+			end
+		end
+		seen, seen_chat = now, chat
+		if c.total > 0 and c.done >= c.total then
+			said = locale.s("ds.pills.mission.finished")
+		elseif first then
+			said = if running > 0 then locale.s("ds.pills.mission.running", { n = running }) else ""
+		end
+		if said then
+			event:set(said)
+		end
+	end)
 	local clock = P.clock(function(): boolean
 		return Roster.working(runs:get().listed) > 0 or threads_working() > 0 or #shells:get() > 0
 	end)
@@ -1267,6 +1335,56 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			wrap = false,
 		},
 	}
+	local plan_pill = P.Pill {
+		id = "pills-plan",
+		class = "pills-pill",
+		label = function(): string
+			local c = mission()
+			return locale.s("ds.pills.mission.label", { done = if c then c.done else 0, total = if c then c.total else 0 })
+		end,
+		on_press = press_in,
+		on_click = function()
+			T.to_plan()
+		end,
+		gap = ui.raw(7, "the mockup's plan pill"),
+		ui.text { locale.t("ds.pills.mission.title"), weight = "$font.weight.medium", color = "$text.primary", wrap = false, shrink = 0 },
+		Steps.Roll {
+			id = "pills-plan-count",
+			value = function(): string
+				local c = mission()
+				return if c then `{c.done}/{c.total}` else ""
+			end,
+			font = "$font.mono",
+			text_size = ui.raw(12.5, "the mockup's plan pill"),
+		},
+		P.Segments {
+			states = function(): { string }
+				local c = mission()
+				local out: { string } = {}
+				for _, step in (if c then c.steps else {}) do
+					table.insert(out, if Steps.quiet(step) then "quiet" else step.state or "planned")
+				end
+				return out
+			end,
+			done = function(): number
+				local c = mission()
+				return if c then c.done else 0
+			end,
+		},
+		RollText {
+			function(): string
+				return event:get()
+			end,
+			literal = true,
+			wrap = false,
+			truncate = true,
+			min_w = 0,
+			max_w = ui.raw(160, "the plan pill's ticker"),
+			shrink = 1,
+			text_size = ui.raw(12, "the mockup's plan pill"),
+			color = "$text.tertiary",
+		},
+	}
 	local shells_pill = P.Pill {
 		id = "pills-shells-pill",
 		class = "pills-pill",
@@ -1343,9 +1461,9 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		end,
 		ref = row_ref,
 		pill_slot(function(): string
-			return if threads_working() > 0 then "threads" else ""
+			return if plan_live() then "plan" elseif threads_working() > 0 then "threads" else ""
 		end, function(): Node
-			return threads_pill
+			return if plan_live() then plan_pill else threads_pill
 		end),
 		pill_slot(function(): string
 			return if working() then "agents" else ""

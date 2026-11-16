@@ -521,6 +521,79 @@ do
 	ui.command { id = "threads_open", title = "Open chat-1's Threads tab", run = function()
 		Threads.open("chat-1")
 	end }
+	local function patch_rows(f: (r: any) -> any?)
+		local all = table.clone(published:peek())
+		local entry = table.clone(all["chat-1"])
+		local rows = {}
+		for _, r in entry.rows do
+			table.insert(rows, f(table.clone(r)) or r)
+		end
+		entry.rows = rows
+		all["chat-1"] = entry
+		published:set(all)
+	end
+	ui.command { id = "threads_move", title = "Step 5 starts; step 2 fails", run = function()
+		patch_rows(function(r: any): any?
+			if r.step == "s5" then
+				r.state = "working"
+				r.chat = "dg-five"
+				r.key = "owned:dg-five"
+				r.line = "Drafting the notes"
+				r.turn_started_at = os.time() - 3725
+				return r
+			elseif r.step == "s2" then
+				r.state = "failed"
+				r.line = "The limiter would not build"
+				return r
+			end
+			return nil
+		end)
+	end }
+	ui.command { id = "threads_new_turn", title = "Step 5's thread starts another turn", run = function()
+		patch_rows(function(r: any): any?
+			if r.step == "s5" then
+				r.turn_started_at = os.time() - 5
+				return r
+			end
+			return nil
+		end)
+	end }
+	ui.command { id = "threads_fixed", title = "The flaky test's thread is ready for review", run = function()
+		patch_rows(function(r: any): any?
+			if r.chat == "dg-fail" then
+				r.state = "readyForReview"
+				return r
+			end
+			return nil
+		end)
+	end }
+	ui.command { id = "threads_rerun", title = "Step 1 runs again on a new thread", run = function()
+		patch_rows(function(r: any): any?
+			if r.step == "s1" then
+				r.state = "working"
+				r.chat = "dg-review-2"
+				r.attempt = 2
+				r.earlier = { { id = "dg-review", title = "Add CSV export to orders" } }
+				r.line = "Second try"
+				return r
+			end
+			return nil
+		end)
+	end }
+	ui.command { id = "threads_extras", title = "Rows carry attempts, turn facts and a quiet spell", run = function()
+		patch_rows(function(r: any): any?
+			if r.step == "s1" then
+				r.attempt = 2
+				r.earlier = { { id = "dg-old", title = "Add CSV export, first try" } }
+				r.turn = { ms = 125000, tools = 3, failed = 1 }
+				return r
+			elseif r.chat == "dg-run" then
+				r.quiet_since = NOW - 360
+				return r
+			end
+			return nil
+		end)
+	end }
 end
 ui.command { id = "open_late", title = "Open a child not yet listed", run = function()
 	lanes.open_child("chat-1", "late-1")
@@ -546,7 +619,7 @@ ui.command { id = "show_plan", title = "A lead's plan in its transcript", run = 
 	plan_shown:set(true)
 end }
 local function plan_tool(id: string): any
-	return { id = id, kind = "mcp", verb = "Called", target = "zeron.plan", call = 'zeron · plan\n{\n  "action": "write"\n}' }
+	return { id = id, kind = "mcp", verb = "Wrote the plan", plan = "write", call = 'zeron · plan\n{\n  "action": "write"\n}' }
 end
 local plan_messages = ui.state("test_plan_messages", {
 	{ id = "lead-0", role = "assistant", text = "", blocks = {
@@ -557,6 +630,88 @@ local plan_messages = ui.state("test_plan_messages", {
 		{ id = "b2", kind = "tools", tools = { plan_tool("t-new") } },
 	} },
 } :: any)
+local function delegate_tool(id: string, ref: string, title: string, step: string?): any
+	local input = if step then `\n  "stepId": "{step}",` else ""
+	return { id = id, kind = "delegate", verb = "Delegated", target = title, call = `zeron · delegate_task\n\{{input}\n  "title": "{title}"\n\}`, delegate = { ref = ref, title = title } }
+end
+local RUN: { any } = {
+	{ id = "lead-2", role = "assistant", text = "", blocks = {
+		{ id = "b3", kind = "tools", tools = { delegate_tool("d-1", "dg-review", "Add CSV export to orders", "s1"), delegate_tool("d-2", "dg-ask", "Add rate limiting to checkout", "s2"), delegate_tool("d-3", "dg-fail", "Fix flaky cart total test", nil) } },
+	} },
+	{ id = "p-review", role = "user", from_chat = "dg-review", clock = "4:19 PM", text = "A note from the export thread." },
+	{ id = "h-review", role = "user", from_chat = "dg-review", steps = { "dg-review" }, clock = "4:20 PM", text = 'Step "Add CSV export to orders" (stepId s1) finished a turn on its thread dg-review.\nTurn: 2m 5s, 3 tool calls, 1 failed.\n\n> The export works for orders and refunds.\n\nRead it with read_thread, then mark the step done or skipped with the plan tool, action "step", or tell the thread what is still missing with send_message_to_thread.' },
+	{ id = "p-fail", role = "user", from_chat = "dg-fail", clock = "4:21 PM", text = "The suite would not start." },
+}
+ui.command { id = "plan_run", title = "The lead runs two steps and hears back", run = function()
+	local now = table.clone(plan_messages:peek())
+	for _, m in RUN do
+		table.insert(now, m)
+	end
+	plan_messages:set(now)
+end }
+ui.command { id = "plan_forget", title = "The plan write is compacted away", run = function()
+	local now = {}
+	for _, m in plan_messages:peek() do
+		if m.id ~= "lead-0" and m.id ~= "lead-1" then
+			table.insert(now, m)
+		end
+	end
+	plan_messages:set(now)
+end }
+local MORE: { any } = {
+	{ id = "h-many", role = "user", from_chat = "dg-ask", steps = { "dg-review", "dg-ask" }, clock = "4:30 PM", text = 'Step "Add CSV export to orders" (stepId s1) finished a turn on its thread dg-review.\nTurn: 1m 2s, 2 tool calls, 0 failed.\n\n> The CSV has a header row now.\n\nStep "Add rate \\"limiting\\"" (taskStepId s2) was cancelled on its thread dg-ask.\n\nRead them with read_thread, then mark each step done or skipped with the plan tool, action "step", or tell its thread what is still missing with send_message_to_thread.' },
+	{ id = "h-mixed", role = "user", from_chat = "dg-ask", steps = { "dg-ask" }, wake = { "dg-fail" }, clock = "4:31 PM", text = 'Step "Add rate limiting to checkout" (stepId s2) failed on its thread dg-ask.\n\n> Redis is not reachable.\n\nDelegated task dg-fail ("Fix flaky cart total test") completed.\n\n> The flaky test is fixed.\n\nRead it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with delegate_task and stepId s2, or mark it skipped with the plan tool. Use task_status with taskId dg-fail to read the result.' },
+}
+ui.command { id = "plan_retry", title = "The lead starts step 2 twice, then a start of step 5 fails", run = function()
+	local now = table.clone(plan_messages:peek())
+	local failed = delegate_tool("d-6", "", "Write the release notes", "s5")
+	failed.delegate = nil
+	failed.failed = true
+	table.insert(now, { id = "lead-3", role = "assistant", text = "", blocks = {
+		{ id = "b4", kind = "tools", tools = { delegate_tool("d-4", "dg-ask", "Add rate limiting to checkout", "s2"), delegate_tool("d-5", "dg-ask", "Add rate limiting to checkout", "s2") } },
+		{ id = "b5", kind = "text", text = "Step 5 next." },
+		{ id = "b6", kind = "tools", tools = { failed } },
+		{ id = "b7", kind = "tools", summary = "Called 1 tool", tools = { { id = "m-1", kind = "mcp", verb = "Marked step done", step = "s2", step_state = "done" } } },
+	} })
+	plan_messages:set(now)
+end }
+ui.command { id = "plan_long", title = "The plan's reply says a lot before the plan, and the chat goes on after it", run = function()
+	local words = {}
+	for i = 1, 40 do
+		table.insert(words, `Paragraph {i} of why the plan is shaped this way.`)
+	end
+	local now = {}
+	for _, m in plan_messages:peek() do
+		if m.id == "lead-1" then
+			m = table.clone(m)
+			m.blocks = table.clone(m.blocks)
+			m.blocks[1] = { id = "b1", kind = "text", text = table.concat(words, "\n\n") }
+		end
+		table.insert(now, m)
+	end
+	for i = 1, 12 do
+		table.insert(now, { id = `after-{i}`, role = "assistant", text = "", blocks = { { id = `a{i}`, kind = "text", text = `Later reply {i}.` } } })
+	end
+	plan_messages:set(now)
+end }
+local plan_find = require("@app/screens/chat/find").bind("fixture.plan.find", plan_messages, function(): boolean
+	return true
+end, "plan-find", function(): string?
+	return "chat-1"
+end)
+ui.command { id = "plan_find_open", title = "Find in the plan's transcript", run = function()
+	plan_find.open()
+end }
+ui.command { id = "go_plan", title = "The Plan pill's click", run = function()
+	require("@ds/transcript").to_plan()
+end }
+ui.command { id = "plan_more", title = "Two steps hear back in one message; a wake mixes a step and a plain task", run = function()
+	local now = table.clone(plan_messages:peek())
+	for _, m in MORE do
+		table.insert(now, m)
+	end
+	plan_messages:set(now)
+end }
 
 -- The spawns as a transcript shows them (cards, with their open state).
 local cards_shown = ui.state("test_lanes_cards", false)
@@ -714,11 +869,13 @@ return ui.row {
 		end
 		return ui.column {
 			id = "fixture-plan",
+			relative = true,
 			w = 420,
-			h = 600,
+			h = 860,
 			ui.component(function(): Node
 				return require("@ds/transcript").Transcript {
 					messages = plan_messages,
+					find = plan_find.marks(),
 					threads = require("@app/screens/chat/shared").threads_for(function(): string?
 						return "chat-1"
 					end, function(): string?
@@ -728,6 +885,7 @@ return ui.row {
 					end),
 				}
 			end)({}),
+			plan_find.Bar(),
 		}
 	end),
 	ui.button { id = "outside-panel", "Outside the panel" },

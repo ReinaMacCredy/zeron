@@ -243,6 +243,13 @@ pub fn roster_summary(runs: &[AgentRun], shells: usize) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
+pub fn task_label(task: &BackgroundTask) -> &str {
+    task.description
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(&task.command)
+}
+
 pub fn shell_line(task: &BackgroundTask, now_ms: i64) -> String {
     format!(
         "{} · {}",

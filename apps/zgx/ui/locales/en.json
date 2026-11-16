@@ -840,7 +840,8 @@
       "show_all_lines": "Show all {n} lines",
       "open_subagent": "Open subagent {title}",
       "subagent": "Subagent",
-      "worked_for": "Worked for {secs}s · {summary}"
+      "worked_for": "Worked for {secs}s · {summary}",
+      "step_marked": "{state, select, done {Marked step {n} done} skipped {Marked step {n} skipped} open {Reopened step {n}} other {Marked step {n}}}"
     },
     "message_rail": {
       "attached_image": "Attached image",
@@ -1408,7 +1409,22 @@
       "fan_asking": "{n, plural, one {# agent} other {# agents}}, {k} asking",
       "answer_failed": "Answer failed: {err}",
       "working_count": "{n} Working",
-      "approve_plan": "Approve the plan"
+      "approve_plan": "Approve the plan",
+      "mission": {
+        "title": "Plan",
+        "label": "Plan, {done} of {total} done",
+        "started": "{title} started",
+        "ready": "{title} ready for review",
+        "done": "{title} done",
+        "failed": "{title} failed",
+        "waiting": "{title} needs you",
+        "stopped": "{title} stopped",
+        "skipped": "{title} skipped",
+        "quiet": "{title} quiet {n}m",
+        "background": "{title} waits on a background command",
+        "running": "{n} running",
+        "finished": "Finished"
+      }
     },
     "profiles": {
       "title": "Profiles",
@@ -1543,12 +1559,32 @@
         "head": "{n, plural, one {Plan · # step} other {Plan · # steps}}",
         "edit": "Edit plan",
         "approve": "Approve and run",
-        "approved": "Approved"
+        "approved": "Approved",
+        "finished": "{n, plural, one {Plan · # step done} other {Plan · # steps done}}",
+        "open_thread": "Open thread {title}",
+        "earlier": "Attempt {n}: {title}",
+        "from_attempt": "From attempt {n}"
       },
       "card": {
         "messages": "{n, plural, one {# message} other {# messages}}",
         "toggle": "Messages from {title}"
-      }
+      },
+      "chip": {
+        "attempt": "attempt {n}",
+        "background": "background",
+        "quiet": "quiet {n}m"
+      },
+      "line": {
+        "turn": "{time} · {tools, plural, one {# tool call} other {# tool calls}} · {failed} failed",
+        "background": "Its turn ended; still running: {what}",
+        "quiet": "Only reasoning: no tool call and no text for {n, plural, one {# minute} other {# minutes}}"
+      },
+      "started": {
+        "one": "Started step {n}",
+        "many": "Started {n} steps",
+        "range": "{from} to {to}"
+      },
+      "handback": "{title} · {state, select, finished {finished} failed {failed} cancelled {cancelled} interrupted {interrupted} other {ended}}"
     },
     "annotation": {
       "add_to_chat": "Add to chat",
