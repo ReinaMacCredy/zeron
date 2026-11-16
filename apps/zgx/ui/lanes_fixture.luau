@@ -558,6 +558,19 @@ do
 			return nil
 		end)
 	end }
+	ui.command { id = "threads_rerun", title = "Step 1 runs again on a new thread", run = function()
+		patch_rows(function(r: any): any?
+			if r.step == "s1" then
+				r.state = "working"
+				r.chat = "dg-review-2"
+				r.attempt = 2
+				r.earlier = { { id = "dg-review", title = "Add CSV export to orders" } }
+				r.line = "Second try"
+				return r
+			end
+			return nil
+		end)
+	end }
 	ui.command { id = "threads_extras", title = "Rows carry attempts, turn facts and a quiet spell", run = function()
 		patch_rows(function(r: any): any?
 			if r.step == "s1" then
@@ -628,7 +641,24 @@ ui.command { id = "plan_run", title = "The lead runs two steps and hears back", 
 	plan_messages:set(now)
 end }
 ui.command { id = "plan_forget", title = "The plan write is compacted away", run = function()
-	plan_messages:set(RUN)
+	local now = {}
+	for _, m in plan_messages:peek() do
+		if m.id ~= "lead-0" and m.id ~= "lead-1" then
+			table.insert(now, m)
+		end
+	end
+	plan_messages:set(now)
+end }
+local MORE: { any } = {
+	{ id = "h-many", role = "user", from_chat = "dg-ask", steps = { "dg-review", "dg-ask" }, clock = "4:30 PM", text = 'Step "Add CSV export to orders" (stepId s1) finished a turn on its thread dg-review.\nTurn: 1m 2s, 2 tool calls, 0 failed.\n\n> The CSV has a header row now.\n\nStep "Add rate \\"limiting\\"" (taskStepId s2) was cancelled on its thread dg-ask.\n\nRead them with read_thread, then mark each step done or skipped with the plan tool, action "step", or tell its thread what is still missing with send_message_to_thread.' },
+	{ id = "h-mixed", role = "user", from_chat = "dg-ask", steps = { "dg-ask" }, wake = { "dg-fail" }, clock = "4:31 PM", text = 'Step "Add rate limiting to checkout" (stepId s2) failed on its thread dg-ask.\n\n> Redis is not reachable.\n\nDelegated task dg-fail ("Fix flaky cart total test") completed.\n\n> The flaky test is fixed.\n\nRead it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with delegate_task and stepId s2, or mark it skipped with the plan tool. Use task_status with taskId dg-fail to read the result.' },
+}
+ui.command { id = "plan_more", title = "Two steps hear back in one message; a wake mixes a step and a plain task", run = function()
+	local now = table.clone(plan_messages:peek())
+	for _, m in MORE do
+		table.insert(now, m)
+	end
+	plan_messages:set(now)
 end }
 
 -- The spawns as a transcript shows them (cards, with their open state).

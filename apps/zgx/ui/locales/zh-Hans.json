@@ -1542,7 +1542,8 @@
         "approved": "已批准",
         "finished": "{n, plural, one {Plan · # step done} other {Plan · # steps done}}",
         "open_thread": "Open thread {title}",
-        "earlier": "Attempt {n}: {title}"
+        "earlier": "Attempt {n}: {title}",
+        "from_attempt": "From attempt {n}"
       },
       "card": {
         "messages": "{n, plural, other {# 条消息}}",
@@ -1562,7 +1563,8 @@
         "one": "Started step {n}",
         "many": "Started {n} steps",
         "range": "{from} to {to}"
-      }
+      },
+      "handback": "{title} · {state, select, finished {finished} failed {failed} cancelled {cancelled} interrupted {interrupted} other {ended}}"
     },
     "annotation": {
       "add_to_chat": "添加到聊天",

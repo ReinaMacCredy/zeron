@@ -1810,6 +1810,14 @@ local function next_line(l: string): boolean
 	return string.match(l, "^Read it with read_thread") ~= nil or string.match(l, "^Read them with read_thread") ~= nil
 end
 
+local STEP_LINE = '^Step "(.*)" %(%a*[Ss]tepId [^)]*%) (.-) on its thread (%S+)%.$'
+local TASK_LINE = '^Delegated task %S+ %(".*"%) .-%.$'
+local ENDED_AS = { ["finished a turn"] = "finished", failed = "failed", ["was cancelled"] = "cancelled", ["was interrupted"] = "interrupted" }
+
+local function step_status(title: string, what: string): string
+	return locale.s("ds.threads.handback", { title = (string.gsub(title, '\\"', '"')), state = ENDED_AS[what] or "other" })
+end
+
 -- (The engine parses the stored text: only what a person reads loses its lines.)
 function M.handback_text(text: string, thread: string?): string
 	local paras: { { string } } = {}
@@ -1836,10 +1844,17 @@ function M.handback_text(text: string, thread: string?): string
 		local kept: { string } = {}
 		local machine = false
 		for _, l in p do
-			local of = string.match(l, '^Step ".-" %(stepId [^)]*%) .- on its thread (%S+)%.$')
+			local title, what, of = string.match(l, STEP_LINE)
 			if of then
 				machine = true
 				owner = of
+				if thread == nil then
+					table.insert(kept, step_status(title :: string, what :: string))
+				end
+			elseif string.match(l, TASK_LINE) then
+				machine = false
+				owner = ""
+				table.insert(kept, l)
 			elseif not (machine and string.match(l, "^Turn: .+%.$")) then
 				table.insert(kept, l)
 			end
@@ -1861,6 +1876,44 @@ local function first_lines(text: string, n: number): string
 		table.insert(out, line)
 	end
 	return table.concat(out, "\n")
+end
+
+-- (`attempt`: set when the text is an earlier attempt's, the current one having none yet.)
+export type Handback = { id: string, text: string, thread: string, attempt: number? }
+
+function M.step_handbacks(messages: { any }, card: any): { [string]: Handback }
+	local of: { [string]: { step: string, attempt: number? } } = {}
+	for _, s in card.steps do
+		if s.chat then
+			of[s.chat] = { step = s.id }
+		end
+		for i, e in (if type(s.earlier) == "table" then s.earlier else {}) do
+			if type(e) == "table" and e.id and not of[e.id] then
+				of[e.id] = { step = s.id, attempt = i }
+			end
+		end
+	end
+	local out: { [string]: Handback } = {}
+	for _, x in messages do
+		if x.role == "user" and x.from_chat and x.continued_on == nil and x.steps then
+			for _, thread in x.steps do
+				local o = of[thread]
+				local had = if o then out[o.step] else nil
+				if o and (o.attempt == nil or had == nil or had.attempt ~= nil) then
+					out[o.step] = { id = x.id, text = x.text or "", thread = thread, attempt = o.attempt }
+				end
+			end
+		end
+	end
+	return out
+end
+
+function M.step_said(s: any, hb: Handback?): string?
+	if not hb or (s.state == "working" and hb.attempt == nil) then
+		return nil
+	end
+	local text = M.handback_text(hb.text, hb.thread)
+	return if text ~= "" then first_lines(text, 6) else nil
 end
 
 local function clock_text(secs: number): string
@@ -1957,11 +2010,10 @@ function M.StepMark(props: { kind: () -> string, class: ((kind: string) -> strin
 	})
 end
 
-export type Handback = { id: string, text: string }
 export type PlanProps = {
 	id: string,
 	threads: Threads,
-	handback: ((thread: string) -> Handback?)?,
+	handback: ((step: string) -> Handback?)?,
 	body: ((text: string, key: string?) -> Node)?,
 	found: ((key: string) -> boolean)?,
 }
@@ -1984,16 +2036,14 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 		return if c then threads.child(c) else nil
 	end
 	local function handback(): Handback?
-		local c = s().chat
-		return if c and plan.handback then plan.handback(c) else nil
+		return if plan.handback then plan.handback(id) else nil
 	end
-	local function said(): string
-		local hb = handback()
-		return if hb then M.handback_text(hb.text, s().chat) else ""
+	local function said(): string?
+		return M.step_said(s(), handback())
 	end
 	local function has_result(): boolean
 		local x = s()
-		return M.working_line(x) ~= nil or M.facts(x.turn) ~= nil or said() ~= "" or (type(x.earlier) == "table" and #x.earlier > 0)
+		return M.working_line(x) ~= nil or M.facts(x.turn) ~= nil or said() ~= nil or (type(x.earlier) == "table" and #x.earlier > 0)
 	end
 	local function found(): boolean
 		local hb = handback()
@@ -2226,15 +2276,21 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 			children,
 			ui.presence(function(): string?
 				local hb = handback()
-				return if hb and s().state ~= "working" and said() ~= "" then hb.id else nil
+				return if hb and said() then hb.id else nil
 			end, function(msg: string): Node
 				local function text(): string
-					return first_lines(said(), 6)
+					return said() or ""
 				end
+				local hb = handback()
+				local attempt = if hb then hb.attempt else nil
 				return ui.column {
 					id = `{base}-said`,
 					w_full = true,
 					min_w = 0,
+					gap = ui.raw(2, "the mockup's result line"),
+					if attempt
+						then ui.text { locale.s("ds.threads.plan.from_attempt", { n = attempt }), id = `{base}-said-attempt`, wrap = false, text_size = ui.raw(11.5, "the mockup's result line"), color = "$text.tertiary" }
+						else nil,
 					if plan.body
 						then plan.body(text(), `{msg}:u`)
 						else ui.text { text, literal = true, wrap = true, text_size = ui.raw(12.5, "the mockup's result line"), color = "$text.secondary" },

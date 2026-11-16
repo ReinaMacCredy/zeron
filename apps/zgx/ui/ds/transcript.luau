@@ -797,7 +797,7 @@ type View = {
 	threads: Threads.Threads?,
 	plan_call: (() -> string?)?,
 	plan: (() -> any?)?,
-	handback: ((thread: string) -> Threads.Handback?)?,
+	handback: ((step: string) -> Threads.Handback?)?,
 	plan_body: ((text: string, key: string?) -> Node)?,
 	plan_found: ((key: string) -> boolean)?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
@@ -1295,21 +1295,8 @@ local function Transcript(props: Props): Node
 		return if plan_call and plan_call() and threads and threads.plan then (threads.plan :: any)() else nil
 	end
 	local handbacks = ui.computed(function(): { [string]: Threads.Handback }
-		local out: { [string]: Threads.Handback } = {}
 		local p = plan_card()
-		if not p then
-			return out
-		end
-		for _, x in messages:get() do
-			if x.role == "user" and x.from_chat and x.continued_on == nil and x.steps and #x.steps > 0 then
-				for _, id in x.steps do
-					if p.threads[id] then
-						out[id] = { id = x.id, text = x.text or "" }
-					end
-				end
-			end
-		end
-		return out
+		return if p then Threads.step_handbacks(messages:get(), p) else {}
 	end)
 	local function step_back(x: Message): boolean
 		if x.role ~= "user" or not x.from_chat or x.continued_on ~= nil or x.wake or not x.steps or #x.steps == 0 then
@@ -3085,8 +3072,8 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state),
 					})
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, handback = function(thread: string): Threads.Handback?
-							return handbacks:get()[thread]
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, handback = function(step: string): Threads.Handback?
+							return handbacks:get()[step]
 						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
