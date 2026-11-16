@@ -5,8 +5,9 @@
 -- label that has more to say opens a panel under it: what the agent was
 -- asked to keep and the summary it wrote. Tokens, never dollars.
 --
---   Divider { m = fn, id }         a compaction's row
---   Wait { wait = fn }             the wait in the trailer's place
+--   Divider { m = fn, id, from }   a compaction's row (`from`: the wait it
+--                                  takes over as it lands)
+--   Wait { wait = fn, since = fn } the wait in the trailer's place
 --   Chip { label = fn }            the composer's line while it compacts
 --   Resume { offer = fn, ... }     "Resume with less context", over the
 --                                  composer of a large idle Claude chat
@@ -30,6 +31,7 @@ local M = {}
 
 export type Kept = { pre: number?, post: number?, ms: number?, summary: string?, focus: string? }
 export type Wait = { phase: "queued" | "compacting" }
+export type Handoff = { phase: "queued" | "compacting", since: number, held: () -> boolean, landed: () -> () }
 export type Continued = { note: string?, limit: boolean?, at: string? }
 export type Head = {
 	icon: "spinner" | "done" | "queued",
@@ -420,7 +422,6 @@ end
 -- Kept across remounts: which panels are open and their heights, so a row built again opens at its height.
 local opened = ui.state("compaction_opened", {} :: { [string]: boolean })
 local heights = ui.state("compaction_panel_h", {} :: { [string]: number })
-local wait_went = ui.state("compaction_wait_went", 0)
 
 local function panel(id: string, m: () -> any, open: () -> boolean): Node
 	-- Laid out only from opening until folded away, so a closed one isn't read or found.
@@ -488,8 +489,7 @@ end
 M.clocks = 0
 
 -- A seconds clock that ticks while it shows.
-local function ticking(since: () -> number): () -> number
-	local now = ui.use_state(ui.now())
+local function ticking(now: State<number>)
 	M.clocks += 1
 	ui.on_cleanup(function()
 		M.clocks -= 1
@@ -497,25 +497,20 @@ local function ticking(since: () -> number): () -> number
 	ui.every(1000, function()
 		now:set(ui.now())
 	end)
-	return function(): number
-		return math.max(0, (now:get() - since()) / 1000)
-	end
 end
 
 local function never(): boolean
 	return false
 end
 
-M.Divider = ui.component(function(props: { m: () -> any, id: string }): Node
-	local id = props.id
+M.Divider = ui.component(function(props: { m: () -> any, id: string, from: Handoff? }): Node
+	local id, from = props.id, props.from
 	local fill = ui.use_state(0)
 	local fading = ui.use_state(false)
-	local filled = false
 	local function settle()
-		if filled or motion.reduced_now() then
+		if motion.reduced_now() then
 			return
 		end
-		filled = true
 		fill:set(1)
 		ui.after(450, function()
 			fading:set(true)
@@ -525,24 +520,31 @@ M.Divider = ui.component(function(props: { m: () -> any, id: string }): Node
 			fading:set(false)
 		end)
 	end
-	-- A compaction landing as its wait goes fills its rules once, whichever
-	-- the host says first: the row (its wait goes after) or the wait's end.
-	local born = ui.now()
-	local seen = wait_went:peek()
-	if born - seen < 5000 then
-		ui.after(0, settle)
-	end
-	ui.effect(function()
-		local went = wait_went:get()
-		if went ~= seen then
-			seen = went
-			if went - born < 5000 then
+	-- (Landed after its wait went, it still shows the wait's words a frame, so they roll.)
+	local waiting = ui.use_state(from ~= nil)
+	local now = ui.use_state(ui.now())
+	if from then
+		local function land()
+			if waiting:peek() then
+				waiting:set(false)
 				settle()
+				from.landed()
 			end
 		end
-	end)
+		ui.effect(function()
+			if not from.held() then
+				ui.after(0, land)
+			end
+		end)
+	end
 	local function head(): Head
+		if from and waiting:get() then
+			return M.wait_head({ phase = from.phase }, (now:get() - from.since) / 1000)
+		end
 		return M.head(props.m())
+	end
+	local function live(): boolean
+		return from ~= nil and from.phase == "compacting" and waiting:get()
 	end
 	local function is_open(): boolean
 		return opened:get()[id] == true and head().chevron
@@ -561,19 +563,20 @@ M.Divider = ui.component(function(props: { m: () -> any, id: string }): Node
 	end
 	return ui.column {
 		w_full = true,
-		line(head, never, fill, fading, is_open, toggle, `{id}-head`, still),
+		ui.show(live, ui.component(function(): Node
+			ticking(now)
+			return ui.div {}
+		end)()),
+		line(head, if from then live else never, fill, fading, is_open, toggle, `{id}-head`, still),
 		panel(id, props.m, is_open),
 	}
 end)
 
 -- The wait in the trailer's place: queued after the agent's turn (still,
--- no clock), compacting (the rules sweep, the clock ticks).
-M.Wait = ui.component(function(props: { wait: () -> Wait? }): Node
+-- no clock), compacting (the rules sweep, the clock ticks from `since`).
+M.Wait = ui.component(function(props: { wait: () -> Wait?, since: () -> number }): Node
 	local fill = ui.use_state(0)
 	local fading = ui.use_state(false)
-	ui.on_cleanup(function()
-		wait_went:set(ui.now())
-	end)
 	-- (Going, it keeps the phase it showed.)
 	local shown = "queued"
 	local function phase(): string
@@ -586,15 +589,6 @@ M.Wait = ui.component(function(props: { wait: () -> Wait? }): Node
 	local function live(): boolean
 		return phase() == "compacting"
 	end
-	local since = ui.use_state(ui.now())
-	local last_phase = phase()
-	ui.effect(function()
-		local p = phase()
-		if p ~= last_phase then
-			last_phase = p
-			since:set(ui.now())
-		end
-	end)
 	return ui.column {
 		id = "compaction-wait",
 		w_full = true,
@@ -608,11 +602,10 @@ M.Wait = ui.component(function(props: { wait: () -> Wait? }): Node
 				end, live, fill, fading)
 			end
 			return ui.component(function(): Node
-				local seconds = ticking(function(): number
-					return since:get()
-				end)
+				local now = ui.use_state(ui.now())
+				ticking(now)
 				return line(function(): Head
-					return M.wait_head({ phase = "compacting" }, seconds())
+					return M.wait_head({ phase = "compacting" }, (now:get() - props.since()) / 1000)
 				end, live, fill, fading)
 			end)()
 		end),
@@ -625,32 +618,48 @@ function M.chip_label(w: Wait?): string?
 	return if w and w.phase == "compacting" then s("compacting") else nil
 end
 
-function M.Chip(props: { label: () -> string? }): Node
-	return ui.presence(function(): string?
-		return if props.label() then "chip" else nil
-	end, function(): Node
-		local last = props.label() or ""
-		return ui.row {
-			id = "composer-compacting",
-			role = "status",
-			mx = ui.raw(8, "gpui's compaction card"),
-			-- (Padding, not margins: a sized presence holds its content at its border box, so a margin squeezed the line under the frame.)
-			pt = ui.raw(6, "gpui's compaction card"),
-			pb = ui.raw(8, "gpui's composer gap under it (composer.rs SPACE_SM)"),
-			gap = ui.raw(6, "gpui's compaction card"),
-			items = "center",
-			text_size = "$font.size.sm",
-			color = "$text.secondary",
-			status.Spinner { size = 12, ink = "$text.secondary" },
-			RollText {
-				function(): string
-					last = props.label() or last
-					return last
+M.Chip = ui.component(function(props: { label: () -> string? }): Node
+	-- (Its room eases, not its content alone: the transcript over the composer follows that room.)
+	local natural = ui.use_state(0)
+	return ui.column {
+		w_full = true,
+		shrink = 0,
+		overflow = "hidden",
+		h = motion.tween(ui.computed(function(): number
+			return if props.label() then natural:get() else 0
+		end), { duration = 180, ease = motion.EASE }),
+		ui.presence(function(): string?
+			return if props.label() then "chip" else nil
+		end, function(): Node
+			local last = props.label() or ""
+			return ui.row {
+				id = "composer-compacting",
+				role = "status",
+				shrink = 0,
+				on_resize = function(size: { w: number, h: number })
+					if size.h > 0 then
+						natural:set(size.h)
+					end
 				end,
-			},
-		}
-	end, { w_full = true, enter = motion.transition { opacity = { 0, 1 }, duration = 150 }, exit = { opacity = 0, duration = 120 } })
-end
+				mx = ui.raw(8, "gpui's compaction card"),
+				-- (Padding, not margins: a sized presence holds its content at its border box, so a margin squeezed the line under the frame.)
+				pt = ui.raw(6, "gpui's compaction card"),
+				pb = ui.raw(8, "gpui's composer gap under it (composer.rs SPACE_SM)"),
+				gap = ui.raw(6, "gpui's compaction card"),
+				items = "center",
+				text_size = "$font.size.sm",
+				color = "$text.secondary",
+				status.Spinner { size = 12, ink = "$text.secondary" },
+				RollText {
+					function(): string
+						last = props.label() or last
+						return last
+					end,
+				},
+			}
+		end, { w_full = true, shrink = 0, enter = motion.transition { opacity = { 0, 1 }, duration = 150 }, exit = { opacity = 0, duration = 120 } }),
+	}
+end)
 
 export type Offer = { tokens: string, idle: string, at: string }
 
