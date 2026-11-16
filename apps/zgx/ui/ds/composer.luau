@@ -415,7 +415,7 @@ local function head_gap(): number
 	return if type(v) == "number" then v else 12
 end
 local MISSION = { same_agents = false, approve = true, size = "medium" }
-local SIZES = { { value = "small", n = 5, ink = "$success" }, { value = "medium", n = 10, ink = "$info" }, { value = "large", n = 50, ink = "$warning" }, { value = "unlimited", ink = "$danger" } }
+local SIZES = { { value = "small", n = 5, ink = "$zeron.tone.success.ink" }, { value = "medium", n = 10, ink = "$zeron.tone.info.ink" }, { value = "large", n = 50, ink = "$zeron.tone.warning.ink" }, { value = "unlimited", ink = "$zeron.tone.danger.ink" } }
 local SIZE_KEYS = "alt+tab"
 local OPTIONS, OPTION_H, SEND_LABEL_PAD = 32, 24, 7
 local MISSION_EASE = "cubicBezier(.2,.8,.2,1)"

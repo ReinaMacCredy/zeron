@@ -93,7 +93,7 @@ local function set_default(key: string, value: any)
 	prefs.mission_defaults:set_key({ key }, value)
 end
 local STEPS = { small = 5, medium = 10, large = 50 }
-local SIZE_INK = { small = "$success", medium = "$info", large = "$warning", unlimited = "$danger" }
+local SIZE_INK = { small = "$zeron.tone.success.ink", medium = "$zeron.tone.info.ink", large = "$zeron.tone.warning.ink", unlimited = "$zeron.tone.danger.ink" }
 M.ZERON_ROWS = {
 	{
 		id = "mission.size",
