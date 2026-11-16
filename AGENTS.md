@@ -28,17 +28,27 @@ worktree.
   - Build with its own `CARGO_TARGET_DIR=$PWD/target`, never into the main
     checkout's `target/`.
   - Right after `git worktree add`, run `scripts/seed-worktree-target.sh`
-    from the new worktree, before its first build: it APFS-clones the main
-    checkout's `target/debug` and `apps/zgx/target` (about 2-3 min, no extra
-    disk) so only workspace crates rebuild, writes a git-ignored
-    `.cargo/config.toml` that turns incremental compilation off (24G a
-    worktree), and runs `scripts/sweep-cold-targets.sh`, which moves any
-    worktree's `target/` idle over 3 days to `~/.Trash`. Worktrees Zeron
+    from the new worktree, before its first build: it links `target/` and
+    `apps/zgx/target` to a 24G RAM disk (`/Volumes/ZeronBuild`, mounted by
+    `scripts/ram-target.sh`), so checks and narrow tests write nothing to
+    the SSD, writes a git-ignored `.cargo/config.toml` that turns
+    incremental compilation off, and runs `scripts/sweep-cold-targets.sh`,
+    which moves any on-disk worktree `target/` idle over 3 days to
+    `~/.Trash`. The first check there is cold (about 4 min). Worktrees Zeron
     creates get this from the project's setup Action.
-  - Verify with `cargo check -p <crate>` only. `cargo build` and
-    `cargo test` run once, on `main`, in the merge gate: a worktree that
-    builds and tests grows past 100G. Build here only for a visual proof
-    that has to precede the merge.
+  - A restart empties the RAM disk: when cargo cannot create `target/`, run
+    `scripts/ram-target.sh` and build again. It also empties a RAM target
+    idle over a day and removes those of deleted worktrees.
+  - On the RAM disk run only `cargo check -p <crate>` and narrow tests
+    (`cargo test -p <crate> --lib <filter>`, `--test <file>`, a small
+    crate): up to 8G a worktree, so three busy ones fit. Never
+    `cargo test -p zeron-engine` without `--lib` or `--test` (72 test
+    binaries, 18G), `cargo build -p zeron`, or a `Zeron Dev <N>` bundle
+    there: they fill the disk for every worktree.
+    For a visual proof that has to precede the merge, first run
+    `scripts/seed-worktree-target.sh --ssd`, which replaces the links with
+    clones of the main checkout's targets on disk. Whole suites and the app
+    build run once, on `main`, in the merge gate.
 - Visual proofs run in an isolated `target/macos-dev<N>/Zeron Dev <N>.app`
   (see `scripts/run-macos-dev.sh`), never in `/Applications/Zeron.app`, which
   hosts the running sessions. Pick an `N` no other bundle uses and set

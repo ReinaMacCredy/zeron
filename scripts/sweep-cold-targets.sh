@@ -14,7 +14,7 @@ git -C "$SCRIPTS" worktree list --porcelain | sed -n 's/^worktree //p' | sed 1d 
   while IFS= read -r worktree; do
     for rel in target apps/zgx/target; do
       target="$worktree/$rel"
-      [ -d "$target" ] || continue
+      [ -d "$target" ] && [ ! -L "$target" ] || continue
       if [ -n "$(find "$target" -maxdepth 3 -mtime "-$DAYS" -print -quit)" ]; then
         continue
       fi
