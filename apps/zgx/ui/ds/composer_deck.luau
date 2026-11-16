@@ -37,6 +37,7 @@ local material = require("@self/material")
 local control = require("@self/control")
 local locale = require("@self/locale")
 local dock = require("@self/composer_dock")
+local HtmlPicks = require("@self/html_picks")
 local Grid = require("@self/grid")
 
 local M = {}
@@ -1382,7 +1383,7 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			end,
 			summary = function(): string
 				local first = queue:get()[1]
-				return if first then (string.gsub(first.text, "%s+", " ")) else ""
+				return if first then (string.gsub(HtmlPicks.shown(first.text), "%s+", " ")) else ""
 			end,
 			trail = if steer_all then { steer_all } else nil,
 			body = body,
