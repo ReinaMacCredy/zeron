@@ -279,6 +279,8 @@ struct DocHostInner {
     config: DocHostConfig,
     delegation_lock: tokio::sync::Mutex<()>,
     starting_peers: Mutex<HashSet<String>>,
+    /// `None` while a child's background work runs, then when it drained: its wake turn has a grace to start.
+    background_held: Mutex<HashMap<String, Option<chrono::DateTime<chrono::Utc>>>>,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
     /// doc-host reference each other through Arcs, so a retired runtime's
     /// graph only drops once this back-edge is severed.
@@ -1474,6 +1476,7 @@ impl DocHost {
                 config,
                 delegation_lock: tokio::sync::Mutex::new(()),
                 starting_peers: Mutex::default(),
+                background_held: Mutex::default(),
                 sessions: Mutex::new(None),
                 quiesced: AtomicBool::new(false),
                 boot_recovery_finished: AtomicBool::new(false),

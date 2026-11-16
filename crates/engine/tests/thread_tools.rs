@@ -2258,6 +2258,217 @@ async fn a_never_wake_child_finishes_without_waking_its_idle_owner() {
     rig.core.shutdown().await;
 }
 
+const LEAVE_RUNNING: &str = "LEAVE IT RUNNING: ";
+
+/// A prompt starting with [`LEAVE_RUNNING`] ends its turn with one background
+/// process named by the rest; the test ends it through the captured turn.
+struct BackgroundHarness {
+    prompts: Arc<Mutex<Vec<String>>>,
+    turns: Arc<Mutex<Vec<zeron_harness::TurnControl>>>,
+}
+
+#[async_trait]
+impl Harness for BackgroundHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Background"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::StepBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    fn compaction(&self) -> Compaction {
+        Compaction::SlashText("/compact".into())
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.prompts.lock().unwrap().push(request.prompt.clone());
+        let left = request
+            .prompt
+            .strip_prefix(LEAVE_RUNNING)
+            .map(str::to_owned);
+        if left.is_some() {
+            self.turns.lock().unwrap().push(controls.turn.clone());
+        }
+        let RunControls {
+            mut steering,
+            interrupt,
+            turn,
+            ..
+        } = controls;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let done = || AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("hs-bg".into()),
+        };
+        tokio::spawn(async move {
+            let _ = tx.send(AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "bg-1".into(),
+                tools: vec![],
+                cwd: "/tmp".into(),
+                session_id: "hs-bg".into(),
+                assistant_message_id: "a-bg".into(),
+            });
+            let _ = tx.send(AgentEvent::TextDelta {
+                text: "ending the turn; it keeps running".into(),
+            });
+            if let Some(label) = &left {
+                turn.set_background_processes(vec![zeron_proto::BackgroundTask {
+                    id: "bg-1".into(),
+                    command: "node job.js".into(),
+                    description: Some(label.clone()),
+                    ..Default::default()
+                }]);
+                turn.set_background(1);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let _ = tx.send(done());
+            loop {
+                tokio::select! {
+                    () = interrupt.cancelled() => break,
+                    message = steering.recv() => {
+                        let Some(_) = message else { break };
+                        let _ = tx.send(AgentEvent::Steered {
+                            assistant_message_id: None,
+                            next_assistant_message_id: None,
+                        });
+                        let _ = tx.send(AgentEvent::TextDelta { text: "noted".into() });
+                        let _ = tx.send(done());
+                    }
+                }
+            }
+            turn.set_background_processes(Vec::new());
+            turn.set_background(0);
+            if interrupt.is_cancelled() {
+                let _ = tx.send(AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: Some("hs-bg".into()),
+                });
+            }
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (Ok(event), rx))
+        })
+        .boxed())
+    }
+}
+
+#[tokio::test]
+async fn a_child_idle_with_a_live_background_command_hands_back_only_when_it_ends_or_at_the_cap() {
+    // SAFETY: only the background children of this test hold on either knob.
+    unsafe {
+        std::env::set_var("ZERON_BACKGROUND_HOLD_MS", "1500");
+        std::env::set_var("ZERON_WAKE_GRACE_MS", "200");
+    }
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let turns = Arc::new(Mutex::new(Vec::new()));
+    let rig = rig_on(Arc::new(BackgroundHarness {
+        prompts: prompts.clone(),
+        turns: turns.clone(),
+    }));
+    let woke = |child: &str| {
+        entries(&rig.core, "lead")
+            .iter()
+            .filter(|e| e.from_chat_id.as_deref() == Some(child))
+            .count()
+    };
+    let battery = rig
+        .core
+        .doc_host
+        .delegate_task(
+            delegate(&format!("{LEAVE_RUNNING}Run the stuck-enemy battery")),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(
+        || turns.lock().unwrap().len() == 1 && idle(&rig.core, &battery),
+        "the battery's turn to end",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        delegation(&rig.core, &battery).is_running(),
+        "a turn that left its battery running is not the task's end"
+    );
+    assert_eq!(woke(&battery), 0, "no handback while the battery runs");
+
+    let ended = turns.lock().unwrap()[0].clone();
+    ended.set_background_processes(Vec::new());
+    ended.set_background(0);
+    wait_for(
+        || woke(&battery) == 1,
+        "the handback once the battery ended",
+    )
+    .await;
+    assert_eq!(
+        delegation(&rig.core, &battery).status,
+        zeron_proto::DelegationStatus::Completed
+    );
+    assert!(
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.contains(&format!("Delegated task {battery} ")))
+            .all(|p| !p.contains("background command still running")),
+        "an ordinary finish"
+    );
+
+    let server = rig
+        .core
+        .doc_host
+        .delegate_task(
+            delegate(&format!("{LEAVE_RUNNING}Start the dev server")),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .task_id;
+    wait_for(
+        || turns.lock().unwrap().len() == 2 && idle(&rig.core, &server),
+        "the server's turn to end",
+    )
+    .await;
+    assert!(delegation(&rig.core, &server).is_running());
+    wait_for(|| woke(&server) == 1, "the handback at the cap").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(woke(&server), 1, "the capped handback goes out once");
+    let told: Vec<String> = prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.contains(&format!("Delegated task {server} ")))
+        .cloned()
+        .collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].contains("ago; background command still running: Start the dev server."),
+        "{}",
+        told[0]
+    );
+    rig.core.shutdown().await;
+}
+
 const FOLLOW_UP_REPLY: &str = "Because the handle outlives the request.";
 
 fn completed_wake(child: &str, title: &str, reply: &str) -> String {

@@ -8039,7 +8039,7 @@ struct ParkedWait {
 /// stands. The runtime normally starts its wake turn at once (Claude Code:
 /// 0.1 s after the roster drains, live-verified 2.1.319), so this only ever
 /// runs out when no wake comes. `ZERON_WAKE_GRACE_MS` overrides it (tests).
-fn wake_grace() -> std::time::Duration {
+pub(crate) fn wake_grace() -> std::time::Duration {
     std::env::var("ZERON_WAKE_GRACE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())

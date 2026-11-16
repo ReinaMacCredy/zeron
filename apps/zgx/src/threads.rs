@@ -64,6 +64,7 @@ struct Row {
     spec: Option<String>,
     locked: bool,
     updated: Option<i64>,
+    background: Vec<String>,
 }
 
 struct Inputs<'a> {
@@ -104,7 +105,17 @@ fn thread_row(chat: &Chat, kind: &'static str, state: ThreadState, step: Option<
         spec: step.map(|(s, _)| s.notes.clone()),
         locked: step.is_some(),
         updated: Some(chat.last_message_at.unwrap_or(chat.created_at).timestamp()),
+        background: Vec::new(),
     }
+}
+
+fn background(chat: &Chat, session: Option<&Session>, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+    let held = chat.delegation.as_ref().is_some_and(|d| d.is_running())
+        && session.is_some_and(|s| s.status == zeron_proto::SessionStatus::Idle && zeron_proto::view::waiting(Some(s), now).is_none());
+    if !held {
+        return Vec::new();
+    }
+    zeron_proto::view::background_tasks(session, now).iter().map(|t| zeron_proto::background::task_label(t).lines().next().unwrap_or_default().to_owned()).collect()
 }
 
 fn join(i: &Inputs) -> HashMap<String, Lead> {
@@ -169,7 +180,10 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
         let mut rows = Vec::new();
         for (ix, s) in plan.iter().enumerate() {
             match thread_of(s) {
-                Some(t) if shows.get(t.id.as_str()) == Some(&ix) => rows.push(thread_row(t, "owned", states[ix], Some((s, ix + 1)))),
+                Some(t) if shows.get(t.id.as_str()) == Some(&ix) => rows.push(Row {
+                    background: background(t, (i.live)(&t.id).as_ref(), i.now),
+                    ..thread_row(t, "owned", states[ix], Some((s, ix + 1)))
+                }),
                 Some(_) => {}
                 None => {
                     let routed = targets.next().flatten();
@@ -194,6 +208,7 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                         spec: Some(s.notes.clone()),
                         locked: s.outcome.is_some(),
                         updated: None,
+                        background: Vec::new(),
                     });
                 }
             }
@@ -245,7 +260,15 @@ fn row_value(r: &Row) -> Value {
         ("spec", opt(&r.spec)),
         ("locked", Value::Bool(r.locked)),
         ("updated", r.updated.map_or(Value::Nil, |at| Value::from(at as f64))),
+        ("background", strings_value(&r.background)),
     ])
+}
+
+fn strings_value(list: &[String]) -> Value {
+    if list.is_empty() {
+        return Value::Nil;
+    }
+    Value::List(list.iter().map(|s| Value::from(s.as_str())).collect())
 }
 
 fn target_value(t: &RouteTarget) -> Value {
