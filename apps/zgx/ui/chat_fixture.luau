@@ -112,6 +112,13 @@ do
 		note(`switch_on:{key}:{id}:{account}`)
 		return { after = function(_: any, done: (any) -> ()) done(nil) end }
 	end
+	-- (An Account row adding one of its provider's accounts.)
+	stub_agents.target = function(device: string?)
+		note(`target:{device or ""}`)
+	end
+	stub_agents.sign_in_to = function(id: string, provider: string)
+		note(`sign_in_to:{id}:{provider}`)
+	end
 end
 
 local function publish(id: string, patch: { [string]: any }?)
@@ -1164,6 +1171,16 @@ ui.command {
 				},
 			})
 		end
+	end,
+}
+
+-- A settled reply the host gave no time (as Windows did before it could
+-- read one): its Copy shows all the same (tests/chat_in_place).
+ui.command {
+	id = "reply_without_time",
+	title = "A reply with no time",
+	run = function()
+		store.messages:push { id = "notime1", role = "assistant", text = "Answered with no clock.", copy = "Answered with no clock." }
 	end,
 }
 
@@ -2384,6 +2401,29 @@ ui.effect(function()
 	plugin_comments:set(table.concat(keys, ","))
 	plugin_notes:set(table.concat(notes, ","))
 end)
+-- The draft lifted out whole and laid back (a plugin's `zeron.take_draft`
+-- and `put_draft`; screens/plugins keeps it between the two, as this
+-- does). `test_lifted` says what was lifted: its words and how many chips.
+local lifted: any = nil
+local lifted_said = ui.state("test_lifted", "")
+ui.command {
+	id = "draft_lift",
+	title = "A plugin takes the draft",
+	run = function()
+		lifted = require("@app/screens/chat/shared").lift()
+		lifted_said:set(if lifted then `{lifted.text}|{#lifted.cargo}` else "nothing")
+	end,
+}
+ui.command {
+	id = "draft_lay",
+	title = "A plugin puts the draft back",
+	run = function()
+		if lifted then
+			require("@app/screens/chat/shared").lay(lifted)
+			lifted = nil
+		end
+	end,
+}
 ui.command {
 	id = "comment_moves",
 	title = "The comment is carried two lines down",

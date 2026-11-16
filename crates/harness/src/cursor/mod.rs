@@ -644,6 +644,7 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 default: false,
                 id,
                 label,
+                provider: None,
                 description: str_of(item, "description"),
                 reasoning_levels: Vec::new(),
                 options,

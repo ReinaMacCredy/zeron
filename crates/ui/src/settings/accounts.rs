@@ -2025,7 +2025,7 @@ mod tests {
             .iter()
             .map(|o| o.provider.unwrap())
             .collect();
-        assert_eq!(providers, ["openai-codex", "nous"]);
+        assert_eq!(providers, ["openai-codex", "nous", "xai-oauth"]);
         let flow = LoginFlow {
             provider: Some("openai-codex"),
             ..waiting(HarnessId::Pi, 1)
