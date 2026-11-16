@@ -15,7 +15,8 @@ export type Group = { code: string, name: string }
 export type Card = { card: string, picks: { Pick }, missing: { Group } }
 
 local function one_line(s: string): string
-	return string.match((string.gsub(s, "%s+", " ")), "^ ?(.-) ?$") or s
+	-- (Not %s: in the app's locale it takes bytes of UTF-8 letters, à's second among them, for spaces.)
+	return string.match((string.gsub(s, "[ \t\r\n\f\v]+", " ")), "^ ?(.-) ?$") or s
 end
 
 function M.block(card: string, picks: { Pick }, missing: { Group }): string
