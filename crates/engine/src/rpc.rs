@@ -1330,6 +1330,8 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     RetryStep { step_id: String },
     #[serde(rename_all = "camelCase")]
+    CarryStep { step_id: String },
+    #[serde(rename_all = "camelCase")]
     EditPlan {
         chat_id: String,
         #[serde(default)]
@@ -3709,6 +3711,7 @@ impl EngineRpc {
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
             MutateParams::ApprovePlan { chat_id } => self.approve_plan(&chat_id).await.map(drop),
             MutateParams::RetryStep { step_id } => self.retry_step(&step_id).await,
+            MutateParams::CarryStep { step_id } => self.carry_step(&step_id).await.map(drop),
             MutateParams::EditPlan {
                 chat_id,
                 overview,

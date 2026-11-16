@@ -285,6 +285,25 @@ fn reorder_keys(
     Ok(moves)
 }
 
+fn closes(steps: &[(ThreadState, bool)]) -> bool {
+    !steps.iter().any(|(state, _)| *state == ThreadState::Working)
+        && steps
+            .iter()
+            .any(|(state, started)| *state != ThreadState::Planned || *started)
+}
+
+fn edit_text(changes: &[String], pending: bool) -> String {
+    let next = if pending {
+        "The plan still waits for the person's approval: do not run any step until the approval message comes."
+    } else {
+        "Run the new and changed steps from this plan, and send a step whose thread is already running what changed with send_message_to_thread."
+    };
+    format!(
+        "The person edited your plan:\n- {}\n\nRead the whole plan with the plan tool, action \"read\". {next}",
+        changes.join("\n- ")
+    )
+}
+
 fn too_long(text: &str, max: usize) -> bool {
     text.chars().count() > max
 }
@@ -390,13 +409,12 @@ impl EngineRpc {
         let goal = self.sessions.mission_turn(chat_id);
         let mission_turn = !steps.is_empty() && goal.is_some();
         let mut plan = chat.plan.clone().unwrap_or_default();
-        let settled = |step: &TaskStep| {
-            !matches!(
-                self.step_state(step),
-                ThreadState::Planned | ThreadState::Working
-            )
-        };
-        if goal.is_some() && !before.is_empty() && before.iter().all(settled) {
+        let states: Vec<(ThreadState, bool)> = before
+            .iter()
+            .map(|step| (self.step_state(step), self.workspace.step_started(step)))
+            .collect();
+        let closing = goal.is_some() && closes(&states);
+        if closing {
             plan.closed.push(ClosedPlan {
                 number: plan.number(),
                 overview: std::mem::take(&mut plan.overview),
@@ -438,8 +456,9 @@ impl EngineRpc {
             })
             .collect();
         carry_choices(&before, &mut steps);
+        let replaced: &[TaskStep] = if closing { &[] } else { &before };
         let (moved, orphans) = carry_images(
-            &before,
+            replaced,
             |step| self.workspace.step_started(step),
             &mut steps,
         );
@@ -841,16 +860,24 @@ impl EngineRpc {
         if changes.is_empty() {
             return Ok(None);
         }
-        let next = if chat.plan_pending {
-            "The plan still waits for the person's approval: do not run any step until the approval message comes."
-        } else {
-            "Run the new and changed steps from this plan, and send a step whose thread is already running what changed with send_message_to_thread."
+        Ok(Some((edit_text(&changes, chat.plan_pending), attached)))
+    }
+
+    pub(super) async fn carry_step(&self, step_id: &str) -> Result<String, RpcError> {
+        let (lead, text) = {
+            let _plans = self.plan_writes();
+            let step = self
+                .workspace
+                .carry_step(step_id)
+                .map_err(written)?;
+            let lead = self.chat_or_refuse(&step.owner_chat_id)?;
+            let change = format!(
+                "New step \"{}\" (stepId {}), from Plan {} where it never ran.",
+                step.title, step.id, step.plan
+            );
+            (lead.id, edit_text(&[change], lead.plan_pending))
         };
-        let text = format!(
-            "The person edited your plan:\n- {}\n\nRead the whole plan with the plan tool, action \"read\". {next}",
-            changes.join("\n- ")
-        );
-        Ok(Some((text, attached)))
+        self.tell_lead(&lead, &text, Vec::new()).await
     }
 }
 
@@ -914,6 +941,23 @@ mod tests {
             "the new keys sort into the new order"
         );
         Ok(moves.into_iter().map(|(id, _)| id).collect())
+    }
+
+    #[test]
+    fn a_new_goal_closes_a_plan_that_started_and_works_no_more() {
+        use ThreadState::*;
+        assert!(closes(&[(ReadyForReview, true), (Planned, false)]));
+        assert!(closes(&[(Done, true), (Skipped, true)]));
+        assert!(
+            closes(&[(Planned, true), (Planned, false)]),
+            "a step whose thread was bound has started"
+        );
+        assert!(!closes(&[(Working, true), (Done, true), (Planned, false)]));
+        assert!(
+            !closes(&[(Planned, false), (Planned, false)]),
+            "a plan nothing ran is replaced"
+        );
+        assert!(!closes(&[]));
     }
 
     #[test]
