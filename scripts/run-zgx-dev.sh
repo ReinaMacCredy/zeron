@@ -37,7 +37,7 @@ cp -c "$TARGET/debug/zeron-engine" "$DEV_ROOT/zeron-engine"
 
 MOCK=()
 if [[ "${ZERON_HARNESS:-}" == mock ]]; then
-  MOCK=(ZERON_ZGX_MOCK=1 ZERON_MOCK_DELAY_MS=300)
+  MOCK=(ZERON_ZGX_MOCK=1 ZERON_MOCK_DELAY_MS="${ZERON_MOCK_DELAY_MS:-300}")
 fi
 [[ $# -gt 0 ]] || set -- main
 
