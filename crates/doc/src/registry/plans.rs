@@ -73,13 +73,17 @@ impl RegistryDoc {
         plan: Option<&ChatPlan>,
         pending: bool,
     ) -> Result<(), DocError> {
-        if let Some(plan) = plan {
-            check_plan(plan)?;
+        let mut plan = plan.cloned();
+        if let Some(plan) = plan.as_mut().filter(|plan| plan.closed.is_empty()) {
+            plan.closed = self
+                .chat_plan(chat_id)?
+                .map(|old| old.closed)
+                .unwrap_or_default();
         }
-        let op = self.chat_op(
-            chat_id,
-            fields([("plan", plan_value(plan)?), ("planPending", json!(pending))]),
-        )?;
+        let mut op = self.plan_op(chat_id, plan.as_ref())?;
+        if let Some(set) = op.set.as_mut() {
+            set.insert("planPending".into(), json!(pending));
+        }
         self.enqueue_ops(vec![op]);
         Ok(())
     }

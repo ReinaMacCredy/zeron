@@ -3117,6 +3117,12 @@ fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
         [closed("")],
         "a closed plan's overview gives way before a write is refused"
     );
+    doc.set_chat_plan("lead", Some(&first), true).unwrap();
+    assert_eq!(
+        doc.chat("lead").unwrap().unwrap().plan.unwrap().closed,
+        [closed("")],
+        "a plan set from a to-do keeps the closed plans"
+    );
 }
 
 #[test]
