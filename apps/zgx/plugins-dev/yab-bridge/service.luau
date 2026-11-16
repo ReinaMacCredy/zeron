@@ -77,9 +77,9 @@ local function clone(repo: string, given: string?): string
 	local target = `{root}/{name}`
 	local url = `https://github.com/{owner}/{name}`
 	local ok, probe = pcall(function()
-		return zeron.run("git", { "-C", target, "rev-parse", "--show-toplevel" }, { cwd = root, timeout = 20 }):await()
+		return zeron.run("git", { "-C", target, "rev-parse", "--show-prefix" }, { cwd = root, timeout = 20 }):await()
 	end)
-	if ok and probe.status == 0 and string.match(probe.stdout, "^%s*(.-)%s*$") == target then
+	if ok and probe.status == 0 and string.match(probe.stdout, "^%s*$") then
 		error(`{target} already exists, so nothing was cloned. Ask the person whether to use it as a project instead`, 0)
 	end
 	local ran = zeron.run("git", { "clone", "--", url, target }, { cwd = root, timeout = 240, env = { GIT_TERMINAL_PROMPT = "0" } }):await()
