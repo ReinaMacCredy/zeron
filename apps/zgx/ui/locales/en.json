@@ -775,7 +775,16 @@
         "approve_before": "before it runs",
         "approve_not_needed": "not needed",
         "tip": "Mission ({keys})",
-        "off": "Turn Mission off"
+        "off": "Turn Mission off",
+        "size": "Size",
+        "size_label": "Size: {value}",
+        "size_small": "Small",
+        "size_medium": "Medium",
+        "size_large": "Large",
+        "size_unlimited": "Unlimited",
+        "size_steps": "up to {n} steps",
+        "size_no_limit": "no limit",
+        "size_next": "next size"
       }
     },
     "markdown": {
@@ -4961,7 +4970,8 @@
       "zeron": {
         "agents": "Agents",
         "approve": "Approve before it runs",
-        "footnote": "What a new mission starts with, on every agent. The composer's Mission options change them for that mission alone."
+        "footnote": "What a new mission starts with, on every agent. The composer's Mission options change them for that mission alone.",
+        "size": "Plan size"
       },
       "hint": {
         "select": "select",

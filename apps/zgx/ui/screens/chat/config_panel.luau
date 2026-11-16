@@ -89,7 +89,27 @@ end
 local function set_default(key: string, value: any)
 	prefs.mission_defaults:set_key({ key }, value)
 end
+local STEPS = { small = 5, medium = 10, large = 50 }
 M.ZERON_ROWS = {
+	{
+		id = "mission.size",
+		label = "chat.config_panel.zeron.size",
+		kind = "enum",
+		options = { "small", "medium", "large", "unlimited" },
+		option_label = function(o: string): string
+			return ui.t(`ds.composer.mission.size_{o}`):get()
+		end,
+		option_detail = function(o: string): string
+			local n = STEPS[o]
+			return if n then ui.t("ds.composer.mission.size_steps", { n = n }):get() else ui.t("ds.composer.mission.size_no_limit"):get()
+		end,
+		get = function(): string
+			return defaults().size or "medium"
+		end,
+		set = function(v: string)
+			set_default("size", v)
+		end,
+	},
 	{
 		id = "mission.agents",
 		label = "chat.config_panel.zeron.agents",
@@ -412,6 +432,7 @@ local function options_list(r: any, current: string, hot: number, on_pick: (i: n
 				bg = if cur then "$accent" else nil,
 			},
 			ui.text { if r.option_label then r.option_label(o) else o, wrap = false },
+			if r.option_detail then ui.text { r.option_detail(o), color = "$text.tertiary", wrap = false } else nil,
 		})
 	end
 	return ui.column(items)
@@ -468,6 +489,7 @@ function M.Panel(props: Props): Node
 		local out = {}
 		local was = zeron_was:get()
 		local sel = zeron_sel:get()
+		local open, hot = expanded:get(), option_sel:get()
 		for i, z in M.ZERON_ROWS do
 			local v = z.get()
 			table.insert(out, {
@@ -481,6 +503,8 @@ function M.Panel(props: Props): Node
 				changed = was[z.id] ~= nil and was[z.id] ~= v,
 				i = i,
 				on = i == sel,
+				open = open == z.id,
+				hot = if open == z.id then hot else 0,
 			})
 		end
 		return out
@@ -602,7 +626,24 @@ function M.Panel(props: Props): Node
 		zeron_sel:set(i)
 		local v = z.get()
 		local at = table.find(z.options, v) or 1
-		z.set(z.options[at % #z.options + 1])
+		if #z.options <= 2 then
+			expanded:set(nil)
+			z.set(z.options[at % #z.options + 1])
+		elseif expanded:peek() == z.id then
+			expanded:set(nil)
+		else
+			expanded:set(z.id)
+			option_sel:set(at)
+		end
+	end
+	local function pick_zeron(o: number)
+		for _, z in M.ZERON_ROWS do
+			if z.id == expanded:peek() and z.options[o] then
+				z.set(z.options[o])
+			end
+		end
+		expanded:set(nil)
+		refocus()
 	end
 	local function select_tab(t: string)
 		ui.batch(function()
@@ -647,11 +688,22 @@ function M.Panel(props: Props): Node
 			return false
 		elseif t == "zeron" then
 			local n = #M.ZERON_ROWS
+			local open = expanded:peek()
 			if k == "ArrowDown" or k == "ArrowUp" then
-				zeron_sel:set(math.clamp(zeron_sel:peek() + (if k == "ArrowDown" then 1 else -1), 1, n))
+				local by = if k == "ArrowDown" then 1 else -1
+				local z = M.ZERON_ROWS[zeron_sel:peek()]
+				if open and z and z.id == open then
+					option_sel:set(math.clamp(option_sel:peek() + by, 1, #z.options))
+				else
+					zeron_sel:set(math.clamp(zeron_sel:peek() + by, 1, n))
+				end
 				return true
 			elseif k == "Enter" or k == " " then
-				activate_zeron(zeron_sel:peek())
+				if open then
+					pick_zeron(option_sel:peek())
+				else
+					activate_zeron(zeron_sel:peek())
+				end
 				return true
 			end
 			return false
@@ -1125,16 +1177,21 @@ function M.Panel(props: Props): Node
 			px = g(6),
 			pt = g(8),
 			ui.each(zeron_rows, function(r: any): Node
-				return line(r, r.on, "", function()
-					if zeron_sel:peek() == r.i then
+				return ui.column {
+					w_full = true,
+					line(r, r.on, "", function()
+						if zeron_sel:peek() == r.i then
+							activate_zeron(r.i)
+						else
+							zeron_sel:set(r.i)
+							expanded:set(nil)
+							refocus()
+						end
+					end, function()
 						activate_zeron(r.i)
-					else
-						zeron_sel:set(r.i)
-						refocus()
-					end
-				end, function()
-					activate_zeron(r.i)
-				end)
+					end),
+					if r.open then options_list(M.ZERON_ROWS[r.i], r.value, r.hot, pick_zeron) else nil,
+				}
 			end, { key = function(r: any): string
 				return r.id
 			end }),

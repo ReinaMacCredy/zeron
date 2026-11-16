@@ -96,7 +96,8 @@ local function mission_word(m: any): string
 	if type(m) ~= "table" then
 		return "off"
 	end
-	return `{if m.same_agents then "same" else "by_role"}/{if m.approve == false then "runs" else "asks"}`
+	local size = if m.size and m.size ~= "medium" then `/{m.size}` else ""
+	return `{if m.same_agents then "same" else "by_role"}/{if m.approve == false then "runs" else "asks"}{size}`
 end
 -- (The composer's accounts: `agents.on_device` set by a test, what's asked of
 -- the host noted.)
