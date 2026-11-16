@@ -292,7 +292,7 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     .await;
     mutate(json!({
         "op": "startTask", "taskId": "t2", "chatId": "lead-2",
-        "orchestrate": true, "approvePlan": false, "sameAgents": true,
+        "orchestrate": true, "approvePlan": false, "sameAgents": true, "size": "unlimited",
     }))
     .await
     .unwrap();
@@ -312,9 +312,9 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
         prompts.lock().unwrap().as_slice(),
         [
             format!(
-                "{}2. Then stop. The person reviews the plan and approves it; you get a message when it is approved.\n3. {run}\n4. Give each step a role (worker, validator, research, design or general). Choose each step's model and effort from the notes in orchestrator_capabilities, the cheapest that is enough, and write it as the step's target in the plan, with a one-line reason in its notes; a step with no target runs on its role's route in Settings > Routing.\n5. {}",
+                "{}2. Plan at most 10 steps. Merge small steps instead of going over.\n3. Then stop. The person reviews the plan and approves it; you get a message when it is approved.\n4. {run}\n5. Give each step a role (worker, validator, research, design or general). Choose each step's model and effort from the notes in orchestrator_capabilities, the cheapest that is enough, and write it as the step's target in the plan, with a one-line reason in its notes; a step with no target runs on its role's route in Settings > Routing.\n6. {}",
                 header("t1"),
-                tail.replace("{n}", "6")
+                tail.replace("{n}", "7")
             ),
             format!(
                 "{}2. {run}\n3. Run every step on your own harness and model: do not pass target or profile to delegate_task.\n4. {}",
@@ -467,7 +467,9 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     assert_eq!(core.workspace.task("t8").unwrap().chat_id, None);
 
     let unapproved = lead("lead-2");
-    assert!(unapproved.plan.unwrap().same_agents);
+    let plan = unapproved.plan.unwrap();
+    assert!(plan.same_agents);
+    assert_eq!(plan.size, Some(zeron_proto::PlanSize::Unlimited));
     assert!(!unapproved.plan_pending);
     assert!(
         mutate(json!({ "op": "approvePlan", "chatId": "lead-1" }))

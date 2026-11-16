@@ -1,6 +1,6 @@
 use super::plan::written;
 use super::*;
-use zeron_proto::{ChatPlan, Task, TaskPatch};
+use zeron_proto::{ChatPlan, PlanSize, Task, TaskPatch};
 
 pub(super) fn refused(message: &str) -> RpcError {
     RpcError::Failed(message.into())
@@ -76,6 +76,7 @@ pub(super) struct Lead {
     pub same_agents: bool,
     pub plan_doc: bool,
     pub attach: bool,
+    pub size: PlanSize,
 }
 
 impl Lead {
@@ -83,6 +84,7 @@ impl Lead {
         ChatPlan {
             plan_doc: self.plan_doc,
             same_agents: self.same_agents,
+            size: Some(self.size),
             images: task.images.clone(),
             ..Default::default()
         }
@@ -95,6 +97,7 @@ pub(crate) fn mission_brief(mission: zeron_proto::ChatMission) -> String {
         same_agents: mission.same_agents,
         plan_doc: false,
         attach: false,
+        size: mission.size,
     };
     lead_brief(None, lead, false)
 }
@@ -105,6 +108,13 @@ fn lead_brief(task_id: Option<&str>, lead: Lead, reads: bool) -> String {
     } else {
         "Write the plan with the plan tool: action \"write\", steps [{title, notes, role, target}]. Keep each step small enough for one agent."
     }];
+    let sized = lead
+        .size
+        .cap()
+        .map(|cap| format!("Plan at most {cap} steps. Merge small steps instead of going over."));
+    if let Some(sized) = &sized {
+        lines.push(sized);
+    }
     if lead.attach {
         lines.push(
             "When a thread you already started with delegate_task does a step's work, set that step's threadId to the thread's id so the thread runs the step.",

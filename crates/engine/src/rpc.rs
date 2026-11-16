@@ -1273,6 +1273,8 @@ enum MutateParams {
         same_agents: bool,
         #[serde(default)]
         plan_doc: bool,
+        #[serde(default)]
+        size: zeron_proto::PlanSize,
     },
     #[serde(rename_all = "camelCase")]
     AssignTask {
@@ -1290,6 +1292,8 @@ enum MutateParams {
         same_agents: bool,
         #[serde(default)]
         plan_doc: bool,
+        #[serde(default)]
+        size: zeron_proto::PlanSize,
         #[serde(default)]
         attach_plan: bool,
         #[serde(default)]
@@ -3653,12 +3657,14 @@ impl EngineRpc {
                 approve_plan,
                 same_agents,
                 plan_doc,
+                size,
             } => {
                 let lead = orchestrate.then_some(tasks::Lead {
                     approve_plan,
                     same_agents,
                     plan_doc,
                     attach: false,
+                    size,
                 });
                 self.start_task(&task_id, &chat_id, space_id, config, lead)
                     .await
@@ -3673,6 +3679,7 @@ impl EngineRpc {
                 approve_plan,
                 same_agents,
                 plan_doc,
+                size,
                 attach_plan,
                 claim,
             } => {
@@ -3683,6 +3690,7 @@ impl EngineRpc {
                     same_agents,
                     plan_doc,
                     attach: attach_plan,
+                    size,
                 });
                 self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead, claim)
                     .await

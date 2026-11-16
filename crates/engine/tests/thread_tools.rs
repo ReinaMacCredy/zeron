@@ -5725,6 +5725,7 @@ async fn a_mission_chat_waits_for_approval_only_on_a_plan_from_the_persons_messa
         mission: Some(zeron_proto::ChatMission {
             same_agents: false,
             approve,
+            size: zeron_proto::PlanSize::Medium,
         }),
     };
     let stored: zeron_proto::ChatConfig =
@@ -5750,12 +5751,34 @@ async fn a_mission_chat_waits_for_approval_only_on_a_plan_from_the_persons_messa
     let brief = prompts_with(&rig, zeron_proto::MISSION_BRIEF_OPENING).remove(0);
     assert!(brief.contains("build the shop"), "{brief}");
     assert!(brief.contains("Then stop."), "{brief}");
+    assert!(brief.contains("Plan at most 10 steps."), "{brief}");
     assert!(
         !lead(&rig).plan_pending,
         "nothing waits before a step exists"
     );
+    let eleven: Vec<_> = (0..11)
+        .map(|n| serde_json::json!({ "title": format!("Step {n}") }))
+        .collect();
+    let Err(err) = mutate(serde_json::json!({
+        "op": "planSteps", "chatId": "lead", "fromChatId": "lead", "steps": eleven,
+    }))
+    .await
+    else {
+        panic!("an eleven-step plan is over Medium");
+    };
+    let err = err.to_string();
+    assert!(
+        err.contains("This mission is Medium: a plan holds up to 10 steps. Merge steps and write again."),
+        "{err}"
+    );
+    assert!(!lead(&rig).plan_pending, "the refused write leaves nothing");
     mutate(plan("Build the API")).await.unwrap();
     assert!(lead(&rig).plan_pending, "the plan waits for the person");
+    assert_eq!(
+        lead(&rig).plan.and_then(|plan| plan.size),
+        Some(zeron_proto::PlanSize::Medium),
+        "the mission's size goes on the plan its turn writes"
+    );
     let Err(err) = call(
         zeron_rpc::methods::DELEGATE_TASK,
         serde_json::json!({ "ownerChatId": "lead", "task": "anything" }),
@@ -5948,6 +5971,7 @@ async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_
         mission: Some(zeron_proto::ChatMission {
             same_agents: false,
             approve: false,
+            size: zeron_proto::PlanSize::Medium,
         }),
     };
     rig.core.workspace.set_chat_config("lead", &config).unwrap();
