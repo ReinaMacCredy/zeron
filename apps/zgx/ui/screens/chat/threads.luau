@@ -1477,7 +1477,7 @@ local function history_word(r: any): string?
 	elseif st == "working" then
 		return locale.s("chat.threads.group.working")
 	elseif st == "planned" then
-		return locale.s("chat.threads.group.planned")
+		return locale.s("ds.threads.plan.not_run")
 	elseif st == "failed" then
 		return locale.s("ds.status.failed")
 	end
@@ -1579,6 +1579,30 @@ local HistoryRow = ui.component(function(props: { ctx: Ctx, now: () -> any }): N
 								call("threads.mark", { step = now().id, state = "done" })
 							end,
 							ui.text { locale.t("chat.threads.menu.done"), wrap = false },
+						},
+					}
+				),
+				ui.show(
+					function(): boolean
+						return now().state == "planned"
+					end,
+					ui.row {
+						gap = ui.raw(4, "the mockup's history row"),
+						items = "center",
+						ui.text { "·", literal = true, wrap = false },
+						ui.button {
+							id = `threads-history-carry-{dk}`,
+							label = function(): string
+								return locale.s("chat.threads.history.carry_label", { title = now().title or "" })
+							end,
+							p = 0,
+							bg = "#00000000",
+							color = "$text.secondary",
+							hover = { color = "$text.primary", underline = true },
+							on_click = function()
+								call("threads.carry", { step = now().id })
+							end,
+							ui.text { locale.t("chat.threads.history.carry"), wrap = false },
 						},
 					}
 				),

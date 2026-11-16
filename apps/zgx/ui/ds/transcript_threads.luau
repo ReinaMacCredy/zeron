@@ -2110,6 +2110,7 @@ export type PlanProps = {
 	find: Rows.Find?,
 	body: ((text: string, key: string?) -> Node)?,
 	found: ((key: string) -> boolean)?,
+	closed: boolean?,
 }
 
 local RESULTS = ui.state("plan_card_results", {} :: { [string]: boolean })
@@ -2273,22 +2274,31 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 		},
 		ui.presence(function(): string?
 			local x = s()
-			return if x.state == "planned" then x.mark else nil
+			return if x.state == "planned" and not plan.closed then x.mark else nil
 		end, function(mark: string): Node
 			return AgentMark.Mark { label = mark, mark = mark, size = 12, bare = true }
 		end, { shrink = 0 }),
 		ui.show(function(): boolean
 			return s().state == "planned"
-		end, ui.text {
-			function(): string
-				return model() or ""
-			end,
-			literal = true,
-			shrink = 0,
-			wrap = false,
-			text_size = ui.raw(12, "the mockup's model"),
-			color = "$text.tertiary",
-		}, ui.text {
+		end, if plan.closed
+			then ui.text {
+				locale.t("ds.threads.plan.not_run"),
+				id = `{base}-not-run`,
+				shrink = 0,
+				wrap = false,
+				text_size = ui.raw(12, "the mockup's model"),
+				color = "$text.tertiary",
+			}
+			else ui.text {
+				function(): string
+					return model() or ""
+				end,
+				literal = true,
+				shrink = 0,
+				wrap = false,
+				text_size = ui.raw(12, "the mockup's model"),
+				color = "$text.tertiary",
+			}, ui.text {
 			corner,
 			id = `{base}-clock`,
 			literal = true,
@@ -2737,7 +2747,7 @@ function M.ClosedPlan(props: { id: string, key: string, plan: () -> any?, thread
 		return now().steps or {}
 	end)
 	local tick = ticker(steps)
-	local rows: PlanProps = { id = props.id, threads = props.threads, handback = props.handback, body = function(text: string): Node
+	local rows: PlanProps = { id = props.id, threads = props.threads, handback = props.handback, closed = true, body = function(text: string): Node
 		return if props.body then props.body(text, nil) else ui.text { text, literal = true, wrap = true }
 	end }
 	local reduced = motion.reduced_now()

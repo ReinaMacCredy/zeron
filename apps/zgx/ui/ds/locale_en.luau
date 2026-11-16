@@ -1286,6 +1286,7 @@ return {
 	["ds.threads.plan.head_n"] = "{n, plural, one {Plan {number} · # step} other {Plan {number} · # steps}}",
 	["ds.threads.plan.finished_n"] = "{n, plural, one {Plan {number} · # step done} other {Plan {number} · # steps done}}",
 	["ds.threads.plan.closed_line"] = "Plan {number} · {done}/{total} · closed",
+	["ds.threads.plan.not_run"] = "Not run",
 	["ds.threads.card.messages"] = "{n, plural, one {# message} other {# messages}}",
 	["ds.threads.card.toggle"] = "Messages from {title}",
 	["ds.threads.chip.attempt"] = "attempt {n}",

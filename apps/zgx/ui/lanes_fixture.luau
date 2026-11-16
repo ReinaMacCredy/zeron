@@ -591,9 +591,10 @@ do
 		entry.plan.number = 2
 		entry.plan.review = 1
 		entry.plan.closed = {
-			{ number = 1, done = 1, total = 2, review = 1, overview = "Port the parser first", written = NOW - 7200, closed = NOW - 1200, ran = 6120, ["until"] = "u-goal2", order = { "c1", "c2" }, rows = {
+			{ number = 1, done = 1, total = 3, review = 1, overview = "Port the parser first", written = NOW - 7200, closed = NOW - 1200, ran = 6120, ["until"] = "u-goal2", order = { "c1", "c2", "c3" }, rows = {
 				{ key = "step:c1", kind = "owned", read_only = false, chat = "dg-old1", step = "c1", plan = 1, number = 1, title = "Port the old parser", state = "readyForReview", line = "Ready to look at", mark = "claude", updated = NOW - 3000 },
 				{ key = "step:c2", kind = "owned", read_only = false, chat = "dg-old2", step = "c2", plan = 1, number = 2, title = "Retire the old docs", state = "done", mark = "claude", updated = NOW - 2000 },
+				{ key = "step:c3", kind = "step", read_only = false, step = "c3", plan = 1, number = 3, title = "Bench the new parser", spec = "", state = "planned", mark = "claude", model = "claude-opus-5-5" },
 			} },
 		}
 		all["chat-1"] = entry

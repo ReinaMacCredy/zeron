@@ -1547,7 +1547,8 @@
         "from_attempt": "From attempt {n}",
         "head_n": "{n, plural, one {Plan {number} · # step} other {Plan {number} · # steps}}",
         "finished_n": "{n, plural, one {Plan {number} · # step done} other {Plan {number} · # steps done}}",
-        "closed_line": "Plan {number} · {done}/{total} · closed"
+        "closed_line": "Plan {number} · {done}/{total} · closed",
+        "not_run": "未运行"
       },
       "card": {
         "messages": "{n, plural, other {# 条消息}}",
@@ -4901,7 +4902,9 @@
         "head": "History",
         "review": "{n} to review",
         "when": "{date}, {ran}",
-        "card": "Plan {number}, {done} of {total} done"
+        "card": "Plan {number}, {done} of {total} done",
+        "carry": "添加到当前计划",
+        "carry_label": "将 {title} 添加到当前计划"
       }
     }
   },

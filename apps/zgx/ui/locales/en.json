@@ -1547,7 +1547,8 @@
         "from_attempt": "From attempt {n}",
         "head_n": "{n, plural, one {Plan {number} · # step} other {Plan {number} · # steps}}",
         "finished_n": "{n, plural, one {Plan {number} · # step done} other {Plan {number} · # steps done}}",
-        "closed_line": "Plan {number} · {done}/{total} · closed"
+        "closed_line": "Plan {number} · {done}/{total} · closed",
+        "not_run": "Not run"
       },
       "card": {
         "messages": "{n, plural, one {# message} other {# messages}}",
@@ -4901,7 +4902,9 @@
         "head": "History",
         "review": "{n} to review",
         "when": "{date}, {ran}",
-        "card": "Plan {number}, {done} of {total} done"
+        "card": "Plan {number}, {done} of {total} done",
+        "carry": "Add to current plan",
+        "carry_label": "Add {title} to the current plan"
       }
     }
   },
