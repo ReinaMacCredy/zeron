@@ -262,10 +262,42 @@ pub struct ChatMission {
     pub same_agents: bool,
     #[serde(default = "approve_by_default")]
     pub approve: bool,
+    #[serde(default)]
+    pub size: PlanSize,
 }
 
 fn approve_by_default() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+    Unlimited,
+}
+
+impl PlanSize {
+    pub fn cap(self) -> Option<usize> {
+        match self {
+            PlanSize::Small => Some(5),
+            PlanSize::Medium => Some(10),
+            PlanSize::Large => Some(50),
+            PlanSize::Unlimited => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlanSize::Small => "Small",
+            PlanSize::Medium => "Medium",
+            PlanSize::Large => "Large",
+            PlanSize::Unlimited => "Unlimited",
+        }
+    }
 }
 
 impl Serialize for ChatConfig {
@@ -420,6 +452,9 @@ pub struct ChatPlan {
     pub plan_doc: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub same_agents: bool,
+    /// Absent on plans written before sizes: those keep only the 50-step ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<PlanSize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3446,16 +3481,21 @@ mod tests {
             on.mission,
             Some(ChatMission {
                 same_agents: false,
-                approve: true
+                approve: true,
+                size: PlanSize::Medium
             })
         );
         assert!(!on.plan);
         let written = serde_json::to_value(&on).unwrap();
         assert_eq!(
             written["mission"],
-            serde_json::json!({ "sameAgents": false, "approve": true })
+            serde_json::json!({ "sameAgents": false, "approve": true, "size": "medium" })
         );
         assert!(written.get("plan").is_none());
+        let sized = config(r#","mission":{"size":"unlimited"}"#);
+        assert_eq!(sized.mission.unwrap().size, PlanSize::Unlimited);
+        assert_eq!(PlanSize::Small.cap(), Some(5));
+        assert_eq!(PlanSize::Unlimited.cap(), None);
     }
 
     #[test]
