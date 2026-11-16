@@ -450,7 +450,7 @@ async fn messages_a_service_sends_starts_and_answers_with_messages_send() {
     assert!(marks.iter().all(|(_, _, by)| by["plugin"] == "svc" && by["name"] == "Svc"), "{marks:?}");
     let state = call(&f.plugins, methods::PLUGIN_STATUS, json!({ "id": "svc" })).await;
     let ops: Vec<&str> = state["agents"]["actions"].as_array().unwrap().iter().filter_map(|a| a["op"].as_str()).collect();
-    assert_eq!(ops, ["send_message", "send_message", "answer"], "{state}");
+    assert_eq!(ops, ["send_message", "new_chat", "answer"], "{state}");
 }
 
 #[tokio::test]
