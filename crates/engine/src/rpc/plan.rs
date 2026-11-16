@@ -1,6 +1,6 @@
 use super::tasks::{failed, refused};
 use super::*;
-use zeron_proto::{Chat, ChatPlan, RouteTarget, TaskStep, TaskStepPatch};
+use zeron_proto::{Chat, ChatPlan, ClosedPlan, RouteTarget, TaskStep, TaskStepPatch, ThreadState};
 
 const MAX_RESOURCE_KEYS: usize = 16;
 
@@ -383,8 +383,33 @@ impl EngineRpc {
             .map(|keys| checked_keys(&keys))
             .transpose()
             .map_err(|message| refused(&message))?;
-        let before = self.workspace.steps_of(chat_id);
+        let _plans = self.plan_writes();
+        let chat = self.chat_or_refuse(chat_id)?;
+        let before = self.current_steps(&chat);
         let now = chrono::Utc::now();
+        let mission_turn = !steps.is_empty() && self.sessions.mission_turn_open(chat_id);
+        let mut plan = chat.plan.clone().unwrap_or_default();
+        let settled = |step: &TaskStep| {
+            !matches!(
+                self.step_state(step),
+                ThreadState::Planned | ThreadState::Working
+            )
+        };
+        if mission_turn && !before.is_empty() && before.iter().all(settled) {
+            plan.closed.push(ClosedPlan {
+                number: plan.number(),
+                overview: std::mem::take(&mut plan.overview),
+                written_at: before
+                    .iter()
+                    .map(|step| step.created_at)
+                    .min()
+                    .unwrap_or(now),
+                closed_at: now,
+                until: self.doc_host.person_message(chat_id),
+            });
+            plan.images.clear();
+        }
+        let number = plan.number();
         let mut steps: Vec<TaskStep> = steps
             .into_iter()
             .map(|step| TaskStep {
@@ -408,6 +433,7 @@ impl EngineRpc {
                 role: step.role.as_deref().and_then(canonical_role),
                 route: None,
                 target: step.target,
+                plan: number,
             })
             .collect();
         carry_choices(&before, &mut steps);
@@ -416,8 +442,6 @@ impl EngineRpc {
             |step| self.workspace.step_started(step),
             &mut steps,
         );
-        let _plans = self.plan_writes();
-        let mut plan = self.chat_or_refuse(chat_id)?.plan.unwrap_or_default();
         let mission = chat.mission();
         if let Some(mission) = mission {
             plan.same_agents = mission.same_agents;
@@ -445,7 +469,6 @@ impl EngineRpc {
                 zeron_doc::TASK_IMAGES_MAX,
             )));
         }
-        let mission_turn = !steps.is_empty() && self.sessions.mission_turn_open(chat_id);
         let pending = mission_turn && mission.is_some_and(|mission| mission.approve);
         self.workspace
             .write_plan(chat_id, &plan, &steps, pending)
@@ -494,7 +517,7 @@ impl EngineRpc {
         if !chat.plan_pending {
             return Err(refused("This plan is not waiting for approval"));
         }
-        if self.workspace.steps_of(chat_id).is_empty() {
+        if self.current_steps(&chat).is_empty() {
             return Err(refused("The plan has no steps yet"));
         }
         self.workspace
@@ -526,6 +549,33 @@ impl EngineRpc {
 
     fn unstarted(&self, step: &TaskStep) -> bool {
         !self.workspace.step_started(step)
+    }
+
+    fn current_steps(&self, chat: &Chat) -> Vec<TaskStep> {
+        self.workspace
+            .steps_of(&chat.id)
+            .into_iter()
+            .filter(|step| chat.in_current_plan(step))
+            .collect()
+    }
+
+    fn step_state(&self, step: &TaskStep) -> ThreadState {
+        let thread = step
+            .chat_id
+            .as_deref()
+            .and_then(|id| self.workspace.chat(id).ok().flatten());
+        let session = thread
+            .as_ref()
+            .and_then(|thread| self.sessions.session_status(&thread.id));
+        let now = chrono::Utc::now();
+        let indicator = thread.as_ref().map(|thread| {
+            zeron_proto::view::task_thread_status(
+                zeron_proto::view::display_status(thread, session.as_ref(), now),
+                session.as_ref(),
+                now,
+            )
+        });
+        zeron_proto::step_state(step, thread.as_ref(), indicator)
     }
 
     pub(super) async fn edit_plan(
@@ -564,7 +614,7 @@ impl EngineRpc {
         let _plans = self.plan_writes();
         let chat = self.chat_or_refuse(chat_id)?;
         let plan = chat.plan.clone().unwrap_or_default();
-        let current = self.workspace.steps_of(chat_id);
+        let current = self.current_steps(&chat);
         let find = |id: &str| {
             current
                 .iter()
@@ -720,6 +770,7 @@ impl EngineRpc {
                     route: None,
                     target,
                     earlier: Vec::new(),
+                    plan: chat.plan_number(),
                 });
                 changes.push(format!("New step \"{title}\" (stepId {id}){with}."));
                 continue;
@@ -824,6 +875,7 @@ mod tests {
             route: None,
             target: None,
             earlier: Vec::new(),
+            plan: 1,
         }
     }
 

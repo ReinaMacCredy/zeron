@@ -5923,3 +5923,198 @@ async fn a_mission_chat_waits_for_approval_only_on_a_plan_from_the_persons_messa
     assert!(!lead(&rig).plan_pending, "with approval off nothing waits");
     rig.core.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_new_goal_over_a_settled_plan_starts_plan_two_and_a_rewrite_stays_in_its_plan() {
+    let rig = rig(Duration::from_millis(20));
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let config = zeron_proto::ChatConfig {
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        access: zeron_proto::AccessMode::FullAccess,
+        plan: true,
+        instructions: String::new(),
+        profile_id: None,
+        instance_id: None,
+        disabled_tools: Vec::new(),
+        mission: Some(zeron_proto::ChatMission {
+            same_agents: false,
+            approve: false,
+        }),
+    };
+    rig.core.workspace.set_chat_config("lead", &config).unwrap();
+    let plan = |titles: &[&str], overview: &str| {
+        let steps: Vec<_> = titles
+            .iter()
+            .map(|title| serde_json::json!({ "title": title }))
+            .collect();
+        serde_json::json!({
+            "op": "planSteps", "chatId": "lead", "fromChatId": "lead",
+            "steps": steps, "overview": overview,
+        })
+    };
+    let chat_plan = |rig: &Rig| {
+        rig.core
+            .workspace
+            .chat("lead")
+            .unwrap()
+            .unwrap()
+            .plan
+            .unwrap()
+    };
+    let steps = |rig: &Rig| {
+        rig.core
+            .workspace
+            .steps_of("lead")
+            .into_iter()
+            .map(|step| (step.title, step.plan))
+            .collect::<Vec<_>>()
+    };
+    let turn_over =
+        |rig: &Rig, needle: &str| !prompts_with(rig, needle).is_empty() && idle(&rig.core, "lead");
+
+    queue_run(&rig.core, "lead", "c1", "m1", "grade the outputs");
+    wait_for(|| turn_over(&rig, "grade the outputs"), "the first goal").await;
+    mutate(plan(&["Parse", "Grade"], "Grade them"))
+        .await
+        .unwrap();
+    let first = rig.core.workspace.steps_of("lead");
+    let thread = rpc_value(
+        &rig.core,
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": "lead", "task": "do: Parse", "stepId": first[0].id }),
+    )
+    .await["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let finished = |rig: &Rig| {
+        rig.core
+            .workspace
+            .chat(&thread)
+            .unwrap()
+            .and_then(|chat| chat.delegation)
+            .is_some_and(|d| d.status == zeron_proto::DelegationStatus::Completed)
+    };
+    wait_for(
+        || finished(&rig) && idle(&rig.core, "lead"),
+        "Parse ready for review",
+    )
+    .await;
+    mutate(plan(&["Grade", "Report"], "Grade them, then report"))
+        .await
+        .unwrap();
+    assert_eq!(
+        steps(&rig),
+        [
+            ("Parse".into(), 1),
+            ("Grade".into(), 1),
+            ("Report".into(), 1)
+        ],
+        "a write outside a goal's turn edits the plan it is in"
+    );
+    assert!(chat_plan(&rig).closed.is_empty());
+
+    queue_run(&rig.core, "lead", "c2", "m2", "now the cart");
+    wait_for(|| turn_over(&rig, "now the cart"), "the second goal").await;
+    mutate(plan(
+        &["Grade", "Report", "Cart"],
+        "Grade them, report, add the cart",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        steps(&rig),
+        [
+            ("Parse".into(), 1),
+            ("Grade".into(), 1),
+            ("Report".into(), 1),
+            ("Cart".into(), 1)
+        ],
+        "a goal over a plan with planned steps keeps adding to it"
+    );
+    let unstarted: Vec<String> = rig
+        .core
+        .workspace
+        .steps_of("lead")
+        .into_iter()
+        .filter(|step| step.chat_id.is_none())
+        .map(|step| step.id)
+        .collect();
+    assert_eq!(unstarted.len(), 3);
+    for id in &unstarted {
+        mutate(serde_json::json!({
+            "op": "updateTaskStep", "stepId": id, "patch": { "outcome": "skipped" }, "fromChatId": "lead",
+        }))
+        .await
+        .unwrap();
+    }
+
+    queue_run(&rig.core, "lead", "c3", "m3", "now the checkout");
+    wait_for(|| turn_over(&rig, "now the checkout"), "the third goal").await;
+    mutate(plan(&["Checkout", "Payments"], "Build the checkout"))
+        .await
+        .unwrap();
+    let plan_now = chat_plan(&rig);
+    assert_eq!(
+        plan_now.number(),
+        2,
+        "a goal over a settled plan starts the next"
+    );
+    assert_eq!(plan_now.overview, "Build the checkout");
+    assert_eq!(plan_now.closed.len(), 1);
+    let closed = &plan_now.closed[0];
+    assert_eq!(
+        (
+            closed.number,
+            closed.overview.as_str(),
+            closed.until.as_deref()
+        ),
+        (1, "Grade them, report, add the cart", Some("m3"))
+    );
+    assert!(closed.written_at <= closed.closed_at);
+    assert_eq!(
+        steps(&rig),
+        [
+            ("Parse".into(), 1),
+            ("Grade".into(), 1),
+            ("Report".into(), 1),
+            ("Cart".into(), 1),
+            ("Checkout".into(), 2),
+            ("Payments".into(), 2),
+        ]
+    );
+
+    mutate(serde_json::json!({
+        "op": "updateTaskStep", "stepId": first[0].id, "patch": { "outcome": "done" }, "fromChatId": "lead",
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        rig.core.workspace.task_step(&first[0].id).unwrap().outcome,
+        Some(zeron_proto::StepOutcome::Done),
+        "a closed plan's review step can still be marked done"
+    );
+    mutate(plan(
+        &["Checkout", "Payments", "Refunds"],
+        "Build the checkout",
+    ))
+    .await
+    .unwrap();
+    let plan_now = chat_plan(&rig);
+    assert_eq!(
+        (plan_now.number(), plan_now.closed.len()),
+        (2, 1),
+        "a rewrite outside a goal's turn stays in the current plan"
+    );
+    assert_eq!(steps(&rig).len(), 7);
+    rig.core.shutdown().await;
+}

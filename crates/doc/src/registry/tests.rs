@@ -3040,6 +3040,86 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
 }
 
 #[test]
+fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
+    let mut doc = RegistryDoc::new("a");
+    doc.upsert_chat(&chat("lead", "a")).unwrap();
+    doc.upsert_chat(&chat("child", "a")).unwrap();
+    let first = zeron_proto::ChatPlan {
+        overview: "First".into(),
+        ..Default::default()
+    };
+    doc.write_plan(
+        "lead",
+        &first,
+        &[step("a1", "lead", "One"), step("a2", "lead", "Two")],
+        false,
+        ts(3_000),
+    )
+    .unwrap();
+    assert!(
+        doc.steps_of("lead").iter().all(|s| s.plan == 1),
+        "a step without a plan number is in plan 1"
+    );
+    let bind = zeron_proto::TaskStepPatch {
+        chat_id: Some(Some("child".into())),
+        ..Default::default()
+    };
+    doc.update_task_step("a1", &bind, ts(3_500)).unwrap();
+    let done = zeron_proto::TaskStepPatch {
+        outcome: Some(Some(zeron_proto::StepOutcome::Done)),
+        ..Default::default()
+    };
+    doc.update_task_step("a2", &done, ts(3_500)).unwrap();
+    let closed = |overview: &str| zeron_proto::ClosedPlan {
+        number: 1,
+        overview: overview.into(),
+        written_at: ts(3_000),
+        closed_at: ts(4_000),
+        until: Some("m2".into()),
+    };
+    let second = zeron_proto::ChatPlan {
+        overview: "Second".into(),
+        closed: vec![closed("First")],
+        ..Default::default()
+    };
+    let next: Vec<_> = (0..49)
+        .map(|n| zeron_proto::TaskStep {
+            plan: 2,
+            ..step(&format!("b{n}"), "lead", "B")
+        })
+        .collect();
+    doc.write_plan("lead", &second, &next, false, ts(4_000))
+        .unwrap();
+    let restarted = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "a").unwrap();
+    let plans: Vec<u32> = restarted.steps_of("lead").iter().map(|s| s.plan).collect();
+    assert_eq!(
+        plans.len(),
+        51,
+        "the closed plan's steps stay, and the 50-step cap counts only the plan being written"
+    );
+    assert_eq!(&plans[..2], [1, 1]);
+    assert!(plans[2..].iter().all(|plan| *plan == 2));
+    let kept = restarted.chat("lead").unwrap().unwrap().plan.unwrap();
+    assert_eq!(kept, second);
+    assert_eq!(kept.number(), 2);
+
+    let wide = zeron_proto::ChatPlan {
+        overview: "語".repeat(3_000),
+        closed: vec![closed(&"語".repeat(2_500))],
+        ..Default::default()
+    };
+    doc.write_plan("lead", &wide, &[], false, ts(6_000))
+        .unwrap();
+    let kept = doc.chat("lead").unwrap().unwrap().plan.unwrap();
+    assert_eq!(kept.overview, wide.overview);
+    assert_eq!(
+        kept.closed,
+        [closed("")],
+        "a closed plan's overview gives way before a write is refused"
+    );
+}
+
+#[test]
 fn an_oversize_plan_is_refused_on_its_chat_and_writes_nothing() {
     let mut doc = RegistryDoc::new("a");
     doc.upsert_chat(&chat("lead", "a")).unwrap();
@@ -3148,6 +3228,7 @@ fn the_mover_puts_an_old_plan_on_its_lead_chat_once_and_keeps_the_task_row() {
             same_agents: true,
             images: vec!["/tmp/a.png".into()],
             resources: vec!["port:5173".into()],
+            closed: Vec::new(),
         })
     );
     assert!(lead.plan_pending, "the approval flag moves with the plan");

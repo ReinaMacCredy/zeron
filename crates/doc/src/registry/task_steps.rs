@@ -40,6 +40,8 @@ struct RawTaskStep {
     target: Option<serde_json::Value>,
     #[serde(default)]
     earlier: Vec<String>,
+    #[serde(default = "zeron_proto::first_plan")]
+    plan: u32,
 }
 
 impl From<RawTaskStep> for TaskStep {
@@ -65,6 +67,7 @@ impl From<RawTaskStep> for TaskStep {
                 .target
                 .and_then(|target| serde_json::from_value(target).ok()),
             earlier: raw.earlier,
+            plan: raw.plan,
         }
     }
 }
@@ -87,6 +90,7 @@ fn step_fields(step: &TaskStep, title: String, order_key: String) -> BTreeMap<St
         ("route", json!(step.route)),
         ("target", json!(step.target)),
         ("earlier", json!(step.earlier)),
+        ("plan", json!(step.plan)),
     ])
 }
 

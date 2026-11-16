@@ -288,6 +288,7 @@ struct TaskHandback {
     status: Option<DelegationStatus>,
     result: String,
     step: Option<(String, String)>,
+    closed_plan: Option<(u32, usize)>,
     notes: Vec<String>,
 }
 
@@ -354,9 +355,12 @@ fn status_and_reply(task: &TaskHandback) -> (String, Option<String>) {
                     "finished a turn"
                 }
             };
+            let place = task.closed_plan.map_or(String::new(), |(plan, n)| {
+                format!("; Plan {plan}, step {n}")
+            });
             (
                 format!(
-                    "Step \"{}\" (stepId {step_id}) {what} on its thread {}.",
+                    "Step \"{}\" (stepId {step_id}{place}) {what} on its thread {}.",
                     zeron_proto::view::single_line(step_title),
                     task.id
                 ),
@@ -621,6 +625,22 @@ fn result_parts(entries: &[SessionMessageEntry], anchor: &str) -> (Option<String
         }
     }
     (text, error)
+}
+
+fn closed_place(
+    chats: &[Chat],
+    steps: &[zeron_proto::TaskStep],
+    step: &zeron_proto::TaskStep,
+) -> Option<(u32, usize)> {
+    let lead = chats.iter().find(|chat| chat.id == step.owner_chat_id)?;
+    if lead.in_current_plan(step) {
+        return None;
+    }
+    let n = steps
+        .iter()
+        .filter(|other| other.owner_chat_id == step.owner_chat_id && other.plan == step.plan)
+        .position(|other| other.id == step.id)?;
+    Some((step.plan, n + 1))
 }
 
 fn step_run_by<'a>(
@@ -1213,6 +1233,18 @@ impl DocHost {
             .and_then(|handle| handle.doc.read_entries().ok())
     }
 
+    pub(crate) fn person_message(&self, chat_id: &str) -> Option<String> {
+        self.child_entries(chat_id)?
+            .into_iter()
+            .rev()
+            .find(|entry| {
+                entry.role == MessageRole::User
+                    && entry.from_chat_id.is_none()
+                    && entry.answers_request_id.is_none()
+            })
+            .map(|entry| entry.id)
+    }
+
     fn result_of(&self, child: &Chat, delegation: &Delegation) -> String {
         result_from(self.child_entries(&child.id).as_deref(), delegation)
     }
@@ -1244,8 +1276,10 @@ impl DocHost {
                     .and_then(|(completed_at, session)| {
                         background_note(&session, completed_at, now, background_hold())
                     });
+                let step = step_run_by(&steps, id);
                 TaskHandback {
-                    step: step_run_by(&steps, id).map(|step| (step.id.clone(), step.title.clone())),
+                    step: step.map(|step| (step.id.clone(), step.title.clone())),
+                    closed_plan: step.and_then(|step| closed_place(&chats, &steps, step)),
                     id: id.clone(),
                     title: child
                         .and_then(|chat| chat.title.clone())
@@ -2605,6 +2639,7 @@ mod tests {
             status: Some(DelegationStatus::Completed),
             result: "Battery still running.".into(),
             step: Some(("st".into(), "Grade A1".into())),
+            closed_plan: None,
             notes: vec![note.clone()],
         };
         let text = wake_text(&[task]);
@@ -2817,6 +2852,7 @@ mod tests {
             status,
             result: result.into(),
             step: None,
+            closed_plan: None,
             notes: Vec::new(),
         };
         assert_eq!(
@@ -2857,5 +2893,16 @@ mod tests {
             "Step \"Build it\" (stepId st) was interrupted on its thread s.\n\nDelegated task e (\"Title e\") completed.\n\nRead it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with delegate_task and stepId st, or mark it skipped with the plan tool. Use task_status with taskId e to read the result.",
             "a step and a task in one wake each keep their own next line"
         );
+        let mut late = task("l", Some(DelegationStatus::Completed), "");
+        late.step = Some(("s5".into(), "A1 writing".into()));
+        late.closed_plan = Some((1, 5));
+        let text = wake_text(&[late]);
+        assert!(
+            text.starts_with(
+                "Step \"A1 writing\" (stepId s5; Plan 1, step 5) finished a turn on its thread l.\n\n"
+            ),
+            "a closed plan's step is named with its plan: {text}"
+        );
+        assert_eq!(zeron_proto::transcript::step_handback_threads(&text), ["l"]);
     }
 }
