@@ -113,6 +113,17 @@ function M.split(text: string): (string, { { card: string, picks: { Pick } } }, 
 	return table.concat(pars, "\n\n", 1, from - 1), cards, table.concat(pars, "\n\n", after)
 end
 
+-- A sent text as a queue row reads it: without its pick blocks and its Open pages block.
+function M.shown(text: string): string
+	local out: { string } = {}
+	for _, par in string.split(text, "\n\n") do
+		if not sent_card(par) and string.split(par, "\n")[1] ~= M.OPEN_PAGES then
+			table.insert(out, par)
+		end
+	end
+	return table.concat(out, "\n\n")
+end
+
 function M.cards(items: { any }): { Card }
 	local order: { string } = {}
 	local by: { [string]: { any } } = {}

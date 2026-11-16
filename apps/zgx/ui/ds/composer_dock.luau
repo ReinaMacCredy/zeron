@@ -39,6 +39,7 @@ local locale = require("@self/locale")
 local Lightbox = require("@self/lightbox")
 local Tooltip = require("@self/tooltip")
 local ReplyPicture = require("@self/reply_picture")
+local HtmlPicks = require("@self/html_picks")
 
 local M = {}
 
@@ -522,8 +523,15 @@ local function thumbs(now: () -> Queued, key: string, narrow: () -> boolean, pro
 end
 
 -- A queued row.
-local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: State<Queued>, props: Props, narrow: () -> boolean, held: () -> boolean, live: () -> boolean, height: number): Node
+local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: State<Queued>, props: Props, narrow: () -> boolean, held: () -> boolean, live: () -> boolean, height: number, peek: () -> boolean): Node
 	local hovered = ui.use_state(false)
+	-- While Steer all is pointed at: this row goes with it, or stays.
+	local function goes(): boolean
+		return peek() and M.steerable(row:get())
+	end
+	local function stays(): boolean
+		return peek() and not M.steerable(row:get())
+	end
 	local function now(): Queued
 		return row:get()
 	end
@@ -602,7 +610,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 		if r.review then
 			return locale.s("ds.composer_dock.needs_review")
 		end
-		local text = string.gsub(r.text or "", "%s+", " ")
+		local text = string.gsub(HtmlPicks.shown(r.text or ""), "%s+", " ")
 		if string.find(text, "%S") == nil and has_cargo() then
 			for _, it in r.cargo :: { cargo.Item } do
 				if it.kind ~= "image" then
@@ -763,7 +771,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 		rounded = "$zeron.composer.tray.row_radius",
 		role = "listitem",
 		label = function()
-			return `{i()}. {now().text}`
+			return `{i()}. {HtmlPicks.shown(now().text or "")}`
 		end,
 		opacity = function(): number
 			return if removing() then 0.55 else 1
@@ -799,16 +807,26 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			shrink = 0,
 			tabular = true,
 			text_size = SMALL,
-			color = "$text.tertiary",
+			color = function(): string
+				return if goes() then "$accent" else "$text.tertiary"
+			end,
 		},
 		FadeText {
 			line,
 			grow = 1,
 			text_size = TEXT,
 			color = function()
-				return if editing() then "$text.tertiary" else "$text.primary"
+				return if editing() or stays() then "$text.tertiary" else "$text.primary"
 			end,
 		},
+		ui.show(stays, ui.text {
+			function(): string
+				return locale.s(if has_cargo() then "ds.composer_dock.stays_file" else "ds.composer_dock.stays")
+			end,
+			shrink = 0,
+			text_size = "$font.size.xs",
+			color = "$text.tertiary",
+		}),
 		ui.show(function()
 			return now().after_compaction == true and not editing()
 		end, ui.text {
@@ -1160,6 +1178,19 @@ end
 -- The queue's rows, and Steer all while it can do something: the deck's Queue tab.
 function M.queue_list(props: Props, queue: State<{ Queued }>, narrow: () -> boolean, live: () -> boolean, height: number): (Node, Node?)
 	local key_held = M.key_held(props)
+	local peeking = ui.use_state(false)
+	local function steerable_rows(): number
+		local n = 0
+		for _, q in queue:get() do
+			if M.steerable(q) then
+				n += 1
+			end
+		end
+		return n
+	end
+	local function peek(): boolean
+		return peeking:get() and steerable_rows() >= 2
+	end
 	local body = ui.column {
 		w_full = true,
 		role = "list",
@@ -1189,7 +1220,7 @@ function M.queue_list(props: Props, queue: State<{ Queued }>, narrow: () -> bool
 				local list = queue:get()
 				return list[#list] ~= nil and same(list[#list])
 			end
-			return queue_row(q, index, last, row, props, narrow, key_held, live, height)
+			return queue_row(q, index, last, row, props, narrow, key_held, live, height, peek)
 		end, {
 			key = function(q: Queued): string
 				return q.key or q.id
@@ -1198,7 +1229,7 @@ function M.queue_list(props: Props, queue: State<{ Queued }>, narrow: () -> bool
 			animate = { duration = 150, ease = "outCubic" },
 			reorder = props.on_queue_reorder,
 			item_label = function(q: Queued): string
-				return q.text
+				return HtmlPicks.shown(q.text)
 			end,
 		}),
 	}
@@ -1212,29 +1243,34 @@ function M.queue_list(props: Props, queue: State<{ Queued }>, narrow: () -> bool
 			if steers ~= true or not live() then
 				return false
 			end
-			local n = 0
-			for _, q in queue:get() do
-				if M.steerable(q) then
-					n += 1
-				end
-			end
-			return n >= 2
+			return steerable_rows() >= 2
 		end
 		steer_all = ui.show(can_steer_all, ui.row {
 			w_full = true,
 			justify = "end",
-			Button {
-				locale.t("ds.composer_dock.steer_all"),
-				size = "xs",
-				tone = "ghost",
-				h = 24,
-				px = "$space.2",
-				text_size = SMALL,
-				tooltip = locale.s("ds.composer_dock.steer_all_hint"),
-				tooltip_delay = 350,
-				on_click = function()
-					(props.on_queue_steer_all :: () -> ())()
+			ui.div {
+				on_hover = function(inside: boolean)
+					peeking:set(inside)
 				end,
+				Button {
+					size = "xs",
+					tone = "ghost",
+					h = 24,
+					px = "$space.2",
+					label = locale.t("ds.composer_dock.steer_all"),
+					tooltip = locale.s("ds.composer_dock.steer_all_hint"),
+					tooltip_delay = 350,
+					on_click = function()
+						peeking:set(false);
+						(props.on_queue_steer_all :: () -> ())()
+					end,
+					ui.text {
+						function(): string
+							return locale.s(if narrow() then "ds.composer_dock.steer_n_short" else "ds.composer_dock.steer_n", { n = steerable_rows() })
+						end,
+						text_size = SMALL,
+					},
+				},
 			},
 		})
 	end

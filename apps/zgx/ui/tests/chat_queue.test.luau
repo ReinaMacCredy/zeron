@@ -202,6 +202,12 @@ end)
 
 test("Steer all leaves a row with files, which would interrupt, in the queue", function()
 	local app = open({ TWO[1], { id = "q3", text = "Files", cargo = { { kind = "file", name = "a" } } }, TWO[2] })
+	expect(app:tree('role:button "Steer all"')).to_contain("Steer 2 as one")
+	expect(app:has('"stays · has a file"')).to_be(false)
+	app:hover('role:button "Steer all"')
+	app:frames(5)
+	expect(app:tree(row("2. Files"))).to_contain("stays · has a file")
+	expect(app:tree(row("1. First queued"))).never.to_contain("stays")
 	app:click('role:button "Steer all"')
 	app:frames(1)
 	expect(app:state("calls")).to_contain("steer_all:s1:q1+q2")
@@ -210,6 +216,15 @@ test("Steer all leaves a row with files, which would interrupt, in the queue", f
 	app:command("engine_answers")
 	app:frames(5)
 	expect(app:has(row("1. Files"))).to_be(true)
+end)
+
+test("a queued row reads its words, not the blocks written for the agent", function()
+	local sent = 'A2 Pick it\n\nĐã chọn trong "Frame":\nA = A2 (Top)\n\nOpen pages: close with html_render `close` each one this message answered or moved past.\n"Later": C (Rail)'
+	local app = open({ { id = "q1", text = sent }, TWO[2] })
+	local tree = app:tree('role:list "Queued messages"')
+	expect(tree).to_contain("A2 Pick it")
+	expect(tree).never.to_contain("Open pages")
+	expect(tree).never.to_contain("Frame")
 end)
 
 test("Steer all refused puts the rows back and says why", function()
