@@ -27,18 +27,20 @@ worktree.
 - In a worktree, `.maestro/worktree/<slug>` on its own branch:
   - Build with its own `CARGO_TARGET_DIR=$PWD/target`, never into the main
     checkout's `target/`.
-  - Right after `git worktree add`, run `scripts/seed-worktree-target.sh`
-    from the new worktree, before its first build: it links `target/` and
+  - Before your first cargo command in a worktree, whoever created it, run
+    `ls -ld target /Volumes/ZeronBuild`. If `target` is missing or the
+    volume is not mounted (a restart unmounts it), run
+    `scripts/seed-worktree-target.sh` from the worktree; running it twice is
+    harmless. It links `target/` and
     `apps/zgx/target` to a 24G RAM disk (`/Volumes/ZeronBuild`, mounted by
     `scripts/ram-target.sh`), so checks and narrow tests write nothing to
     the SSD, writes a git-ignored `.cargo/config.toml` that turns
     incremental compilation off, and runs `scripts/sweep-cold-targets.sh`,
     which moves any on-disk worktree `target/` idle over 3 days to
-    `~/.Trash`. The first check there is cold (about 4 min). Worktrees Zeron
-    creates get this from the project's setup Action.
-  - A restart empties the RAM disk: when cargo cannot create `target/`, run
-    `scripts/ram-target.sh` and build again. It also empties a RAM target
-    idle over a day and removes those of deleted worktrees.
+    `~/.Trash`. The first check there is cold (about 4 min). Zeron does not
+    seed the worktrees it creates.
+  - The seed also empties a RAM target idle over a day and removes those of
+    deleted worktrees.
   - On the RAM disk run only `cargo check -p <crate>` and narrow tests
     (`cargo test -p <crate> --lib <filter>`, `--test <file>`, a small
     crate): up to 8G a worktree, so three busy ones fit. Never
