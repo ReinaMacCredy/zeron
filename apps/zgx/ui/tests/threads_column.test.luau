@@ -390,6 +390,27 @@ test("threads: a handback for two steps fills each step's own line, a wake's pla
 	expect(app:error()).to_be(nil)
 end)
 
+test("threads: a row moving group leaves one row by its id; rows that moved while the panel was away open settled in host order", function()
+	local app = seeded()
+	app:command("threads_move")
+	app:frames(2)
+	expect(app:count("#threads-row-step-s5")).to_be(1)
+	app:frames(40)
+	app:command("panel_home")
+	app:frames(20)
+	expect(app:has("#threads-list")).to_be(false)
+	app:command("threads_fixed")
+	app:frames(20)
+	app:command("panel_back")
+	app:frames(40)
+	local function y(sel: string): number
+		return tonumber(string.match(app:tree(sel), ",(-?[%d.]+) ")) :: number
+	end
+	expect(y("#threads-row-step-s1") < y("#threads-row-owned-dg-fail")).to_be(true)
+	expect(y("#threads-row-owned-dg-run") < y("#threads-row-step-s5")).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
 test("threads: a row whose state changes keeps its node; one changing group moves there; the plan card's rows follow", function()
 	local app = seeded()
 	app:command("show_plan")

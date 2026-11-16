@@ -558,6 +558,15 @@ do
 			return nil
 		end)
 	end }
+	ui.command { id = "threads_fixed", title = "The flaky test's thread is ready for review", run = function()
+		patch_rows(function(r: any): any?
+			if r.chat == "dg-fail" then
+				r.state = "readyForReview"
+				return r
+			end
+			return nil
+		end)
+	end }
 	ui.command { id = "threads_rerun", title = "Step 1 runs again on a new thread", run = function()
 		patch_rows(function(r: any): any?
 			if r.step == "s1" then

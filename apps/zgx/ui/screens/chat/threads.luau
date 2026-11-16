@@ -753,7 +753,7 @@ local function mark_kind(r: any): string
 	return if Transcript.quiet(r) then "quiet" else r.state
 end
 
-local function RowView(ctx: Ctx, now: () -> any): Node
+local function RowView(ctx: Ctx, now: () -> any, here: boolean): Node
 	local hovered = ui.use_state(false)
 	local menu_open = ui.use_state(false)
 	local r0 = now()
@@ -851,7 +851,7 @@ local function RowView(ctx: Ctx, now: () -> any): Node
 			return if #l > 0 then l else nil
 		end,
 		ui.row {
-			id = `threads-row-{dom_id(M.key_of(r0))}`,
+			id = if here then `threads-row-{dom_id(M.key_of(r0))}` else nil,
 			class = "threads-row",
 			role = if opens then "button" else nil,
 			label = function(): string
@@ -913,11 +913,8 @@ local function RowView(ctx: Ctx, now: () -> any): Node
 	}
 end
 
-local placed: { [string]: { [string]: { g: string, at: number } } } = {}
 local arrivals = 0
-local function grouped(chat: string): { [string]: { any } }
-	local mine = placed[chat] or {}
-	placed[chat] = mine
+local function grouped(chat: string, mine: { [string]: { g: string, at: number } }): { [string]: { any } }
 	local by: { [string]: { any } } = {}
 	local seen: { [string]: boolean } = {}
 	for i, r in M.rows(chat) do
@@ -1098,13 +1095,17 @@ local GroupSection = ui.component(function(props: { ctx: Ctx, group: string, row
 					anime.animate(el, { opacity = { 0, 1 }, y = { -4, 0 }, duration = 180, delay = 35 * math.min(i - 1, 8), ease = EASE })
 				end
 				else nil,
-			RowView(ctx, function(): any
-				local x = by_key:get()[k]
-				if x then
-					last = x
-				end
-				return last
-			end),
+			ui.presence(function(): string
+				return if by_key:get()[k] then "here" else "leaving"
+			end, function(which: string): Node
+				return RowView(ctx, function(): any
+					local x = by_key:get()[k]
+					if x then
+						last = x
+					end
+					return last
+				end, which == "here")
+			end, { w_full = true }),
 		}
 	end
 	local function body(): Node
@@ -1287,8 +1288,9 @@ end
 
 local function List(ctx: Ctx): Node
 	local chat = ctx.session
+	local placed: { [string]: { g: string, at: number } } = {}
 	local groups = ui.computed(function(): { [string]: { any } }
-		return grouped(chat)
+		return grouped(chat, placed)
 	end)
 	local sections: { [any]: any } = { w_full = true }
 	for _, g in GROUPS do
