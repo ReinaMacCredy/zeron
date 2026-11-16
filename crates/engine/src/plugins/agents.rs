@@ -1170,14 +1170,14 @@ impl Agents {
         };
         self.loop_guard(by)?;
         let id = host.deliver(&chat.id, &text, attachments, how).map_err(|why| Refused::new(reason::FAILED, why))?;
-        self.attribute(by, &chat.id, &id, how);
+        self.attribute(by, "send_message", &chat.id, &id, how);
         tracing::info!(plugin = %by.plugin, chat = %chat.id, delivery = how.word(), "plugins: sent a message");
         Ok(json!({ "status": "sent", "chat": chat.id, "delivery": how.word(), "id": id }))
     }
 
     /// Who sent `id` in `chat`: beside its transcript, in `plugin_status`,
     /// and on the turn it runs (its events carry `by`).
-    fn attribute(&self, by: &By, chat: &str, id: &str, how: Delivery) {
+    fn attribute(&self, by: &By, op: &str, chat: &str, id: &str, how: Delivery) {
         if let Ok(host) = self.host() {
             host.mark_sent_by(chat, id, json!({ "plugin": by.plugin, "name": by.name, "kind": how.word(), "at": crate::now_ms() }));
         }
@@ -1188,11 +1188,11 @@ impl Agents {
                 Delivery::Run | Delivery::Steer => st.turn_by.insert(chat.to_owned(), by.clone()),
             };
         }
-        self.record(by, json!({ "op": "send_message", "chat": chat, "id": id, "delivery": how.word() }));
+        self.record(by, json!({ "op": op, "chat": chat, "id": id, "delivery": how.word() }));
     }
 
     /// `zeron.new_chat { prompt, device?, project?, harness?, model?, effort?,
-    /// cwd?, sandbox? }`: a chat made as the composer makes one, and its first
+    /// cwd?, sandbox?, access? }`: a chat made as the composer makes one, and its first
     /// message. Its id.
     async fn new_chat(&self, by: &By, args: &Json) -> Result<Json, Refused> {
         let prompt = args.get("prompt").and_then(Json::as_str).unwrap_or_default().trim().to_owned();
@@ -1215,6 +1215,16 @@ impl Agents {
                 "Plugins cannot start chats with a sandbox wider than workspace-write",
             ));
         }
+        let access = match args.get("access") {
+            None if sandbox == zeron_proto::SandboxLevel::ReadOnly => zeron_proto::AccessMode::Supervised,
+            None => zeron_proto::AccessMode::default(),
+            Some(value) => serde_json::from_value::<zeron_proto::AccessMode>(value.clone()).map_err(|_| {
+                Refused::new(
+                    reason::BAD_CALL,
+                    "access must be supervised, auto-accept-edits, auto-review or full-access",
+                )
+            })?,
+        };
         let host = self.host()?;
         let harness = match provider_arg(args, "harness")? {
             Some(h) => h,
@@ -1253,11 +1263,7 @@ impl Agents {
                 profile_id: None,
                 instance_id: None,
                 disabled_tools: Vec::new(),
-                access: if sandbox == zeron_proto::SandboxLevel::ReadOnly {
-                    zeron_proto::AccessMode::Supervised
-                } else {
-                    Default::default()
-                },
+                access,
                 plan: false,
                 mission: None,
             },
@@ -1268,7 +1274,7 @@ impl Agents {
         let id = host
             .deliver(&new.chat_id, &prompt, Vec::new(), Delivery::Run)
             .map_err(|why| Refused::new(reason::FAILED, why))?;
-        self.attribute(by, &new.chat_id, &id, Delivery::Run);
+        self.attribute(by, "new_chat", &new.chat_id, &id, Delivery::Run);
         tracing::info!(plugin = %by.plugin, chat = %new.chat_id, "plugins: started a chat");
         Ok(json!({ "status": "sent", "chat": new.chat_id, "id": id }))
     }

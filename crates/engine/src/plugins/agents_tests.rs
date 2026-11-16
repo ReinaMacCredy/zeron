@@ -908,7 +908,7 @@ async fn messages_a_new_chat_is_made_and_sent_its_first_message() {
     assert_eq!(new.chat_id, id);
     assert_eq!((new.project.as_deref(), new.cwd.as_deref(), new.device.as_deref()), (Some("atlas"), Some("/work"), None));
     assert_eq!(new.config.harness, HarnessId::ClaudeCode, "the default harness");
-    assert_eq!(new.config.sandbox, SandboxLevel::WorkspaceWrite);
+    assert_eq!((new.config.sandbox, new.config.access), (SandboxLevel::WorkspaceWrite, AccessMode::FullAccess));
     assert_eq!((new.config.model.as_deref(), new.config.reasoning), (Some("sonnet"), Some(ReasoningLevel::High)));
     assert_eq!(f.delivered(), [(id.clone(), "Fix the build".to_string(), vec![], Delivery::Run)]);
     assert_eq!(lock(&f.host.sent_by)[0].0, id);
@@ -916,6 +916,7 @@ async fn messages_a_new_chat_is_made_and_sent_its_first_message() {
         (json!({ "op": "new_chat", "prompt": "" }), reason::BAD_CALL),
         (json!({ "op": "new_chat", "prompt": "x", "sandbox": "danger-full-access" }), reason::BAD_CALL),
         (json!({ "op": "new_chat", "prompt": "x", "sandbox": "unknown" }), reason::BAD_CALL),
+        (json!({ "op": "new_chat", "prompt": "x", "access": "anything" }), reason::BAD_CALL),
         (json!({ "op": "new_chat", "prompt": "x", "model": "gpt" }), reason::NOT_FOUND),
         (json!({ "op": "new_chat", "prompt": "x", "harness": "nope" }), reason::NOT_FOUND),
         (json!({ "op": "new_chat", "prompt": "x", "effort": "max" }), reason::NOT_FOUND),
@@ -933,9 +934,13 @@ async fn messages_a_new_chat_is_made_and_sent_its_first_message() {
     )
     .await
     .unwrap();
+    f.op("p", json!({ "op": "new_chat", "prompt": "Change one file", "access": "supervised" })).await.unwrap();
     let created = lock(&f.host.created);
     assert_eq!(created[1].config.sandbox, SandboxLevel::ReadOnly);
     assert_eq!(created[1].config.access, AccessMode::Supervised);
+    assert_eq!((created[2].config.sandbox, created[2].config.access), (SandboxLevel::WorkspaceWrite, AccessMode::Supervised));
+    let ops: Vec<String> = f.agents.status("p")["actions"].as_array().unwrap().iter().map(|a| a["op"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(ops, ["new_chat", "new_chat", "new_chat"]);
 }
 
 #[tokio::test]

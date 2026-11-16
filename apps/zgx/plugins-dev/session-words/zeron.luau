@@ -1275,8 +1275,9 @@ return function(id: string): any
 
 	-- A new chat, sent its first message ("messages.send"): `device`,
 	-- `project` (a project's id), `harness`, `model`, `effort`, `cwd` as you'd
-	-- pick them. A promise of { status, chat, id }, `chat` the new chat's id.
-	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string?, sandbox: string? }): any
+	-- pick them; `access` as the composer's, "full-access" unless you say.
+	-- A promise of { status, chat, id }, `chat` the new chat's id.
+	function M.new_chat(s: { prompt: string, device: string?, project: string?, harness: string?, model: string?, effort: string?, cwd: string?, sandbox: string?, access: string? }): any
 		return agents("new_chat", {
 			prompt = s.prompt,
 			device = s.device,
@@ -1286,6 +1287,7 @@ return function(id: string): any
 			effort = s.effort,
 			cwd = s.cwd,
 			sandbox = s.sandbox,
+			access = s.access,
 		})
 	end
 
