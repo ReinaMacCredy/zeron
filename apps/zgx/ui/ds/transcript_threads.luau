@@ -7,6 +7,7 @@ local Button = require("@self/button")
 local motion = require("@self/motion")
 local ProgressBar = require("@self/progress").ProgressBar
 local SessionStats = require("@self/session_stats")
+local Rows = require("@self/transcript_rows")
 
 local M = {}
 
@@ -1913,6 +1914,26 @@ function M.step_handbacks(messages: { any }, card: any): { [string]: Handback }
 	return out
 end
 
+function M.step_back(x: any, card: any, here: string?): boolean
+	if x.role ~= "user" or not x.from_chat or x.from_chat == here or x.continued_on ~= nil or x.wake or not x.steps or #x.steps == 0 then
+		return false
+	end
+	for _, id in x.steps do
+		if not card.threads[id] then
+			return false
+		end
+	end
+	return true
+end
+
+function M.title_key(step: string): string
+	return `plan-card:{step}:title`
+end
+
+function M.said_key(step: string): string
+	return `plan-card:{step}:said`
+end
+
 function M.step_said(s: any, hb: Handback?): string?
 	if not hb or (s.state == "working" and hb.attempt == nil) then
 		return nil
@@ -2008,9 +2029,11 @@ end
 export type PlanProps = {
 	id: string,
 	ref: Ref?,
+	place: ((step: string, ref: Ref, gone: boolean?) -> ())?,
 	threads: Threads,
 	card: (() -> any)?,
 	handback: ((step: string) -> Handback?)?,
+	find: Rows.Find?,
 	body: ((text: string, key: string?) -> Node)?,
 	found: ((key: string) -> boolean)?,
 }
@@ -2043,8 +2066,7 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 		return M.working_line(x) ~= nil or M.facts(x.turn) ~= nil or said() ~= nil or (type(x.earlier) == "table" and #x.earlier > 0)
 	end
 	local function found(): boolean
-		local hb = handback()
-		return hb ~= nil and plan.found ~= nil and plan.found(`{hb.id}:u`)
+		return plan.found ~= nil and plan.found(M.said_key(id))
 	end
 	local function open(): boolean
 		if not has_result() then
@@ -2164,7 +2186,11 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 			min_w = 0,
 			gap = ui.raw(6, "the mockup's plan line"),
 			items = "center",
-			FadeText { title, literal = true, min_w = 0, shrink = 1 },
+			if plan.find
+				then ui.show(function(): boolean
+					return (plan.find :: Rows.Find)(M.title_key(id)).query() ~= ""
+				end, Rows.Found { key = M.title_key(id), text = title, find = plan.find, wrap = false, truncate = true, min_w = 0, shrink = 1 }, FadeText { title, literal = true, min_w = 0, shrink = 1 })
+				else FadeText { title, literal = true, min_w = 0, shrink = 1 },
 			M.Chips {
 				chips = function(): { any }
 					return M.chips(s())
@@ -2274,7 +2300,7 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 			ui.presence(function(): string?
 				local hb = handback()
 				return if hb and said() then hb.id else nil
-			end, function(msg: string): Node
+			end, function(): Node
 				local function text(): string
 					return said() or ""
 				end
@@ -2289,7 +2315,7 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 						then ui.text { locale.s("ds.threads.plan.from_attempt", { n = attempt }), id = `{base}-said-attempt`, wrap = false, text_size = ui.raw(11.5, "the mockup's result line"), color = "$text.tertiary" }
 						else nil,
 					if plan.body
-						then plan.body(text(), `{msg}:u`)
+						then plan.body(text(), M.said_key(id))
 						else ui.text { text, literal = true, wrap = true, text_size = ui.raw(12.5, "the mockup's result line"), color = "$text.secondary" },
 				}
 			end, { w_full = true, min_w = 0 })
@@ -2348,8 +2374,17 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 		end
 		return ui.column(col)
 	end
+	local own = ui.ref()
+	local place = plan.place
+	if place then
+		place(id, own)
+		ui.on_cleanup(function()
+			place(id, own, true)
+		end)
+	end
 	return ui.column {
 		id = base,
+		ref = own,
 		class = "plan-card-step",
 		w_full = true,
 		min_w = 0,

@@ -10,7 +10,7 @@
 --                 it took ⌘F (false where no chat is shown)
 --   find.close()
 --   find.marks()  what ds.Transcript's `find` reads
---   find.bind(name, messages, can_open, bar_id)  the same for another
+--   find.bind(name, messages, can_open, bar_id, chat)  the same for another
 --                 transcript (a side chat's), each its own bar and search
 --
 -- Enter or ↓ go to the next match (newer), Shift+Enter or ↑ to the one
@@ -33,11 +33,26 @@ export type Match = { key: string, block: number, k: number, row: number }
 -- Markdown is found by: a prompt's (`<id>:u`, its line breaks breaks), a
 -- reply's text blocks (`<id>:<block id>`), or a reply's whole text
 -- (`<id>:r`).
-local function sources(m: any): { { key: string, text: string, breaks: boolean?, plain: boolean? } }
+type Plan = { id: string, card: any, here: string, said: { [string]: Threads.Handback } }
+
+local function card_sources(out: { any }, plan: Plan)
+	for _, s in plan.card.steps do
+		table.insert(out, { key = Threads.title_key(s.id), text = s.title or "", plain = true })
+		local said = Threads.step_said(s, plan.said[s.id])
+		if said then
+			table.insert(out, { key = Threads.said_key(s.id), text = said, breaks = true })
+		end
+	end
+end
+
+local function sources(m: any, plan: Plan?): { { key: string, text: string, breaks: boolean?, plain: boolean? } }
 	if m.continued_on then
 		return {}
 	end
 	if m.role == "user" then
+		if plan and Threads.step_back(m, plan.card, plan.here) then
+			return {}
+		end
 		local text = if m.steps and #m.steps > 0 then Threads.handback_text(m.text or "") else m.text or ""
 		return { { key = `{m.id}:u`, text = text, breaks = true } }
 	end
@@ -65,6 +80,8 @@ local function sources(m: any): { { key: string, text: string, breaks: boolean?,
 				for _, t in Rows.texts(m, b) do
 					table.insert(out, { key = t.key, text = t.text, plain = true })
 				end
+			elseif plan and (b.kind == "tools" or b.kind == "work") and Threads.holds(b, plan.id) then
+				card_sources(out, plan)
 			end
 		end
 		return out
@@ -72,8 +89,19 @@ local function sources(m: any): { { key: string, text: string, breaks: boolean?,
 	return { { key = `{m.id}:r`, text = m.text or "" } }
 end
 
-local function bind(name: string, messages: any, can_open: () -> boolean, bar_id: string): any
+local function bind(name: string, messages: any, can_open: () -> boolean, bar_id: string, chat: (() -> string?)?): any
 	local M: any = {}
+
+	local function plan_now(): Plan?
+		local here = if chat then chat() else nil
+		local list = messages:get()
+		local id = if here then Threads.newest_plan(list) else nil
+		local card = if here and id then (require("@app/screens/chat/threads") :: any).card(here) else nil
+		if not card then
+			return nil
+		end
+		return { id = id :: string, card = card, here = here :: string, said = Threads.step_handbacks(list, card) }
+	end
 
 
 	M.shown = ui.shared(`{name}.shown`, false)
@@ -101,9 +129,10 @@ local function bind(name: string, messages: any, can_open: () -> boolean, bar_id
 		if not M.shown:get() or q == "" then
 			return out
 		end
+		local plan = plan_now()
 		for row = 1, messages:len() do
 			local m = messages:at(row)
-			for _, src in sources(m) do
+			for _, src in sources(m, plan) do
 				for n, b in blocks_of(src.key, src.text, src.breaks, src.plain) do
 					for k = 1, MarkdownFind.count(b, q) do
 						table.insert(out, { key = src.key, block = n, k = k, row = row })
@@ -292,7 +321,10 @@ end
 
 local M = bind("chat.find", store.messages, function(): boolean
 	return route.session:peek() ~= nil
-end, "chat-find")
+end, "chat-find", function(): string?
+	local s = route.session:get()
+	return if s then s.id else nil
+end)
 M.bind = bind
 
 return M

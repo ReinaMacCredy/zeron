@@ -693,6 +693,14 @@ ui.command { id = "plan_long", title = "The plan's reply says a lot before the p
 	end
 	plan_messages:set(now)
 end }
+local plan_find = require("@app/screens/chat/find").bind("fixture.plan.find", plan_messages, function(): boolean
+	return true
+end, "plan-find", function(): string?
+	return "chat-1"
+end)
+ui.command { id = "plan_find_open", title = "Find in the plan's transcript", run = function()
+	plan_find.open()
+end }
 ui.command { id = "go_plan", title = "The Plan pill's click", run = function()
 	require("@ds/transcript").to_plan()
 end }
@@ -860,11 +868,13 @@ return ui.row {
 		end
 		return ui.column {
 			id = "fixture-plan",
+			relative = true,
 			w = 420,
 			h = 860,
 			ui.component(function(): Node
 				return require("@ds/transcript").Transcript {
 					messages = plan_messages,
+					find = plan_find.marks(),
 					threads = require("@app/screens/chat/shared").threads_for(function(): string?
 						return "chat-1"
 					end, function(): string?
@@ -874,6 +884,7 @@ return ui.row {
 					end),
 				}
 			end)({}),
+			plan_find.Bar(),
 		}
 	end),
 	ui.button { id = "outside-panel", "Outside the panel" },

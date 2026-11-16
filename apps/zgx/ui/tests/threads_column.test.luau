@@ -390,6 +390,39 @@ test("threads: a handback for two steps fills each step's own line, a wake's pla
 	expect(app:error()).to_be(nil)
 end)
 
+local function plan_find(app: any, q: string): string
+	app:command("plan_find_open")
+	app:frames(10)
+	app:fill('#plan-find >> role:textbox "Find"', q)
+	app:frames(40)
+	return app:tree("#plan-find"):match('text "(%d+ of %d+)"') or app:tree("#plan-find"):match('text "(No results)"') or ""
+end
+
+local function in_view(app: any, sel: string): boolean
+	local y = tonumber(string.match(app:tree(sel), ",(-?[%d.]+) "))
+	return y ~= nil and y >= 0 and y < 860
+end
+
+test("threads: find lands a hidden handback's words on its step's opened line in the plan card, finds a step's title on its row, and counts nothing drawn nowhere", function()
+	local app = seeded()
+	app:command("show_plan")
+	app:command("plan_long")
+	app:command("plan_run")
+	app:frames(40)
+	expect(plan_find(app, "orders and refunds")).to_be("1 of 1")
+	expect(app:has("#plan-card-step-s1-said")).to_be(true)
+	expect(in_view(app, "#plan-card-step-s1-said")).to_be(true)
+	expect(plan_find(app, "Write the release notes")).to_be("1 of 1")
+	expect(app:count(".find-current")).to_be(1)
+	expect(app:text(".find-current")).to_contain("Write the release notes")
+	expect(in_view(app, "#plan-card-step-s5-row")).to_be(true)
+	app:command("plan_more")
+	app:frames(30)
+	expect(plan_find(app, "header row")).to_be("1 of 1")
+	expect(plan_find(app, "orders and refunds")).to_be("No results")
+	expect(app:error()).to_be(nil)
+end)
+
 test("threads: a row moving group leaves one row by its id; rows that moved while the panel was away open settled in host order", function()
 	local app = seeded()
 	app:command("threads_move")
