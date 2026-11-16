@@ -897,7 +897,7 @@ pub(crate) mod tests {
         assert_eq!([num(old, "number"), num(old, "done"), num(old, "total"), num(old, "review"), num(old, "ran")], [Some(1.), Some(1.), Some(3.), Some(1.), Some(5400.)]);
         assert_eq!([old.field("overview").map(text), old.field("until").map(text)], [Some("Grade them".into()), Some("m2".into())]);
         let rows = old.field("rows").unwrap().list();
-        let row = |r: &Value| (r.field("chat").map(text), num(r, "number"), num(r, "plan"), r.field("state").map(text));
+        let row = |r: &Value| (r.field("chat").filter(|c| **c != Value::Nil).map(text), num(r, "number"), num(r, "plan"), r.field("state").map(text));
         assert_eq!(
             rows.iter().map(row).collect::<Vec<_>>(),
             [(Some("k1".into()), Some(1.), Some(1.), Some("readyForReview".into())), (Some("k2".into()), Some(2.), Some(1.), Some("done".into())), (None, Some(3.), Some(1.), Some("planned".into()))]

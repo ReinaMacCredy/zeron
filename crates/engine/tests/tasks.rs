@@ -603,7 +603,7 @@ async fn a_mission_lead_reads_its_context_chats_first_and_the_list_locks_at_star
     );
     assert!(
         first.ends_with(
-            "\n7. When a step needs one of the chats you read, name it with its threadId in that step's task."
+            "\n8. When a step needs one of the chats you read, name it with its threadId in that step's task."
         ),
         "{first}"
     );
