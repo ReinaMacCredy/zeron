@@ -27,7 +27,8 @@
 #   ZGX_TARGET_DIR      where to build it (apps/zgx/target)
 #   ZGX_DMG=0           no dmg
 #   CARGO_FLAGS         extra cargo flags (CI: --locked)
-# Signing and notarization are scripts/package-macos.sh's: CODESIGN_IDENTITY,
+# Signing and notarization are scripts/package-macos.sh's: CODESIGN_IDENTITY
+# (else the keychain's first Developer ID or Apple Development identity),
 # NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID.
 
 set -euo pipefail
@@ -165,17 +166,23 @@ cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.
 
 # Signed as scripts/package-macos.sh signs Zeron.app: the engine (its
 # identifier), then the bundle.
-if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.cua-driver "$DRIVER"
-  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.tectonic "$TECTONIC"
-  codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
-  codesign --entitlements "$ENTITLEMENTS" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
-else
-  codesign --force --sign - --identifier sh.zeron.cua-driver "$DRIVER"
-  codesign --force --sign - --identifier sh.zeron.tectonic "$TECTONIC"
-  codesign --force --entitlements "$ENTITLEMENTS" --sign - --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
-  codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP"
+# Ad-hoc pins TCC grants to the cdhash, so every rebuild would lose them.
+IDENTITY="${CODESIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]]; then
+  IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  IDENTITY="$(sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' <<<"$IDENTITIES" | head -1)"
+  [[ -n "$IDENTITY" ]] || IDENTITY="$(sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' <<<"$IDENTITIES" | head -1)"
 fi
+if [[ -n "$IDENTITY" ]]; then
+  SIGN=(--options runtime --timestamp --sign "$IDENTITY")
+else
+  SIGN=(--sign -)
+  echo "warning: no signing identity found; ad-hoc builds lose their macOS privacy grants on every rebuild" >&2
+fi
+codesign --force "${SIGN[@]}" --identifier sh.zeron.cua-driver "$DRIVER"
+codesign --force "${SIGN[@]}" --identifier sh.zeron.tectonic "$TECTONIC"
+codesign --force "${SIGN[@]}" --entitlements "$ENTITLEMENTS" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
+codesign --force "${SIGN[@]}" --entitlements "$ENTITLEMENTS" "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 
 notarize() {
