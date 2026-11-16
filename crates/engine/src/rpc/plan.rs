@@ -387,7 +387,8 @@ impl EngineRpc {
         let chat = self.chat_or_refuse(chat_id)?;
         let before = self.current_steps(&chat);
         let now = chrono::Utc::now();
-        let mission_turn = !steps.is_empty() && self.sessions.mission_turn_open(chat_id);
+        let goal = self.sessions.mission_turn(chat_id);
+        let mission_turn = !steps.is_empty() && goal.is_some();
         let mut plan = chat.plan.clone().unwrap_or_default();
         let settled = |step: &TaskStep| {
             !matches!(
@@ -395,7 +396,7 @@ impl EngineRpc {
                 ThreadState::Planned | ThreadState::Working
             )
         };
-        if mission_turn && !before.is_empty() && before.iter().all(settled) {
+        if goal.is_some() && !before.is_empty() && before.iter().all(settled) {
             plan.closed.push(ClosedPlan {
                 number: plan.number(),
                 overview: std::mem::take(&mut plan.overview),
@@ -405,7 +406,7 @@ impl EngineRpc {
                     .min()
                     .unwrap_or(now),
                 closed_at: now,
-                until: self.doc_host.person_message(chat_id),
+                until: goal,
             });
             plan.images.clear();
         }

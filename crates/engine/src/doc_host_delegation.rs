@@ -1233,18 +1233,6 @@ impl DocHost {
             .and_then(|handle| handle.doc.read_entries().ok())
     }
 
-    pub(crate) fn person_message(&self, chat_id: &str) -> Option<String> {
-        self.child_entries(chat_id)?
-            .into_iter()
-            .rev()
-            .find(|entry| {
-                entry.role == MessageRole::User
-                    && entry.from_chat_id.is_none()
-                    && entry.answers_request_id.is_none()
-            })
-            .map(|entry| entry.id)
-    }
-
     fn result_of(&self, child: &Chat, delegation: &Delegation) -> String {
         result_from(self.child_entries(&child.id).as_deref(), delegation)
     }

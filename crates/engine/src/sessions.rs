@@ -1649,8 +1649,8 @@ impl SessionsEngine {
         }
     }
 
-    pub(crate) fn mission_turn_open(&self, chat_id: &str) -> bool {
-        lock(&self.inner.mission_turns).contains_key(chat_id)
+    pub(crate) fn mission_turn(&self, chat_id: &str) -> Option<String> {
+        lock(&self.inner.mission_turns).get(chat_id).cloned()
     }
 
     /// Whether the chat's live runtime still runs background work (subagents,

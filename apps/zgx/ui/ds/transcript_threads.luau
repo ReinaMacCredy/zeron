@@ -1769,10 +1769,16 @@ function M.place_plans(messages: { any }, card: any): Placed
 		end
 	end
 	local out: { [string]: any } = {}
-	local parts: { any } = if live then { card } else {}
-	for c, id in newest do
-		out[id] = c
-		table.insert(parts, c)
+	local parts: { any } = {}
+	for i = #closed, 1, -1 do
+		local id = newest[closed[i]]
+		if id then
+			out[id] = closed[i]
+			table.insert(parts, closed[i])
+		end
+	end
+	if live then
+		table.insert(parts, card)
 	end
 	return { live = live, closed = out, lookup = merged(parts) }
 end
