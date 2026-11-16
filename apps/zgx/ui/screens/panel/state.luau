@@ -53,6 +53,7 @@ export type Tab = {
 	chat: string?,
 	thread: string?,
 	editing: boolean?,
+	history: boolean?,
 	-- A device tab's (screens/device/panel): the device it shows, once
 	-- bound, { host, id }; a name given it by Rename.
 	device_target: { host: string, id: string }?,

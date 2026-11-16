@@ -1708,6 +1708,75 @@ function M.newest_plan(messages: { any }): string?
 	return nil
 end
 
+export type Placed = { live: string?, closed: { [string]: any }, lookup: any? }
+
+local function merged(parts: { any }): any?
+	if #parts <= 1 then
+		return parts[1]
+	end
+	local steps, by_step, threads = {}, {}, {}
+	for _, p in parts do
+		for _, s in p.steps do
+			table.insert(steps, s)
+		end
+		for k, v in p.by_step do
+			by_step[k] = v
+		end
+		for k, v in p.threads do
+			threads[k] = v
+		end
+	end
+	return { steps = steps, by_step = by_step, threads = threads }
+end
+
+function M.place_plans(messages: { any }, card: any): Placed
+	local closed = if card and card.closed then card.closed else {}
+	if not card or #closed == 0 then
+		local live = if card then M.newest_plan(messages) else nil
+		return { live = live, closed = {}, lookup = if live then card else nil }
+	end
+	local at: { [string]: number } = {}
+	for i, m in messages do
+		if m.role == "user" then
+			at[m.id] = i
+		end
+	end
+	local bounds: { { u: number, plan: any } } = {}
+	for i = #closed, 1, -1 do
+		local c = closed[i]
+		local u = if c.until_id then at[c.until_id] else nil
+		if u then
+			table.insert(bounds, { u = u, plan = c })
+		end
+	end
+	local live: string? = nil
+	local newest: { [any]: string } = {}
+	for i, m in messages do
+		local id = newest_in(m.blocks or { { tools = m.tools } })
+		if id then
+			local owner = nil
+			for _, b in bounds do
+				if b.u > i then
+					owner = b.plan
+					break
+				end
+			end
+			if owner then
+				newest[owner] = id
+			else
+				live = id
+			end
+		end
+	end
+	local out: { [string]: any } = {}
+	local parts: { any } = if live then { card } else {}
+	for c, id in newest do
+		out[id] = c
+		table.insert(parts, c)
+	end
+	return { live = live, closed = out, lookup = merged(parts) }
+end
+
 local MARK = 16
 local MOVE_MS = 220
 
@@ -2408,6 +2477,27 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 	}
 end)
 
+local function ticker(steps: any): State<number>
+	local tick = ui.use_state(os.time())
+	local working = ui.computed(function(): boolean
+		for _, s in steps:get() do
+			if s.state == "working" then
+				return true
+			end
+		end
+		return false
+	end)
+	ui.effect(function()
+		if working:get() then
+			tick:set(os.time())
+			ui.every(1000, function()
+				tick:set(os.time())
+			end)
+		end
+	end)
+	return tick
+end
+
 function M.Plan(props: PlanProps): Node
 	local threads = props.threads
 	local card_now = ui.computed(function(): any
@@ -2428,23 +2518,7 @@ function M.Plan(props: PlanProps): Node
 		local p = now()
 		return if p then p.steps else {}
 	end)
-	local tick = ui.use_state(os.time())
-	local working = ui.computed(function(): boolean
-		for _, s in steps:get() do
-			if s.state == "working" then
-				return true
-			end
-		end
-		return false
-	end)
-	ui.effect(function()
-		if working:get() then
-			tick:set(os.time())
-			ui.every(1000, function()
-				tick:set(os.time())
-			end)
-		end
-	end)
+	local tick = ticker(steps)
 	local flash = ui.use_state(0)
 	local was_pending = (now() or {}).pending == true
 	ui.effect(function()
@@ -2481,7 +2555,8 @@ function M.Plan(props: PlanProps): Node
 				function(): string
 					local p = now()
 					local n = if p then p.count else 0
-					return locale.s(if finished() then "ds.threads.plan.finished" else "ds.threads.plan.head", { n = n })
+					local numbered = if p and p.closed and #p.closed > 0 then "_n" else ""
+					return locale.s(`{if finished() then "ds.threads.plan.finished" else "ds.threads.plan.head"}{numbered}`, { n = n, number = if p then p.number or 1 else 1 })
 				end,
 				id = `{props.id}-head`,
 				grow = 1,
@@ -2630,6 +2705,123 @@ function M.Plan(props: PlanProps): Node
 			opacity = function(): number
 				return flash:get()
 			end,
+		},
+	}
+end
+
+local CLOSED_OPEN = ui.state("plan_closed_open", {} :: { [string]: boolean })
+
+function M.ClosedPlan(props: { id: string, key: string, plan: () -> any?, threads: Threads, handback: ((step: string) -> Handback?)?, body: ((text: string, key: string?) -> Node)? }): Node
+	local last = props.plan() or {}
+	local function now(): any
+		local p = props.plan()
+		if p then
+			last = p
+		end
+		return last
+	end
+	local function open(): boolean
+		return CLOSED_OPEN:get()[props.key] == true
+	end
+	local function line(): string
+		local p = now()
+		return locale.s("ds.threads.plan.closed_line", { number = p.number or 0, done = p.done or 0, total = p.total or 0 })
+	end
+	local steps = ui.computed(function(): { any }
+		return now().steps or {}
+	end)
+	local tick = ticker(steps)
+	local rows: PlanProps = { id = props.id, threads = props.threads, handback = props.handback, body = function(text: string): Node
+		return if props.body then props.body(text, nil) else ui.text { text, literal = true, wrap = true }
+	end }
+	local reduced = motion.reduced_now()
+	return ui.column {
+		id = props.id,
+		class = "plan-closed",
+		w_full = true,
+		min_w = 0,
+		px = ui.raw(8, "the mockup's closed plan"),
+		py = ui.raw(4, "the mockup's closed plan"),
+		rounded = ui.raw(12, "the mockup's question card"),
+		border = 1,
+		border_color = "$border.subtle",
+		selectable = false,
+		ui.button {
+			id = `{props.id}-head`,
+			class = "plan-closed-head",
+			label = line,
+			expanded = open,
+			w_full = true,
+			min_w = 0,
+			h = ui.raw(28, "the mockup's plan line"),
+			p = 0,
+			px = ui.raw(4, "the mockup's plan line"),
+			gap = ui.raw(8, "the mockup's plan line"),
+			items = "center",
+			rounded = ui.raw(7, "the mockup's plan line"),
+			bg = "#00000000",
+			hover = { bg = "$hover", color = "$text.primary" },
+			text_size = ui.raw(13, "the mockup's plan line"),
+			color = "$text.secondary",
+			on_click = function()
+				local all = table.clone(CLOSED_OPEN:peek())
+				all[props.key] = if open() then nil else true
+				CLOSED_OPEN:set(all)
+			end,
+			ui.text { line, literal = true, grow = 1, min_w = 0, wrap = false, truncate = true },
+			ui.div {
+				shrink = 0,
+				color = "$text.tertiary",
+				rotate = motion.tween(ui.computed(function(): number
+					return if open() then 0 else -90
+				end), { duration = 200, ease = CARD_EASE }),
+				Icon { name = "lucide-chevron-down", size = 12 },
+			},
+		},
+		ui.column {
+			w_full = true,
+			min_w = 0,
+			overflow = "hidden",
+			layout = "height",
+			layout_clip = true,
+			layout_duration = if reduced then 0 else MOVE_MS,
+			layout_ease = CARD_EASE,
+			ui.presence(function(): string?
+				return if open() then "open" else nil
+			end, function(): Node
+				return ui.column {
+					id = `{props.id}-steps`,
+					w_full = true,
+					min_w = 0,
+					pb = ui.raw(4, "the mockup's closed plan"),
+					ui.show(function(): boolean
+						return (now().overview or "") ~= ""
+					end, ui.text {
+						function(): string
+							return now().overview or ""
+						end,
+						literal = true,
+						wrap = true,
+						px = ui.raw(4, "the mockup's question card"),
+						pb = ui.raw(6, "the mockup's question card"),
+						text_size = ui.raw(12.5, "the mockup's question card"),
+						color = "$text.secondary",
+					}),
+					ui.each(steps, function(_s: any, _i: number, row: State<any>): Node
+						return StepRow { plan = rows, row = row, tick = tick }
+					end, {
+						key = function(s: any): string
+							return s.id or tostring(s.number)
+						end,
+						w_full = true,
+					}),
+				}
+			end, {
+				w_full = true,
+				min_w = 0,
+				enter = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, delay = 60, duration = 180 },
+				exit = { opacity = 0, duration = if reduced then motion.FADE else 120 },
+			}),
 		},
 	}
 end

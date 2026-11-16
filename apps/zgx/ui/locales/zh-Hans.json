@@ -1544,7 +1544,10 @@
         "finished": "{n, plural, one {Plan · # step done} other {Plan · # steps done}}",
         "open_thread": "Open thread {title}",
         "earlier": "Attempt {n}: {title}",
-        "from_attempt": "From attempt {n}"
+        "from_attempt": "From attempt {n}",
+        "head_n": "{n, plural, one {Plan {number} · # step} other {Plan {number} · # steps}}",
+        "finished_n": "{n, plural, one {Plan {number} · # step done} other {Plan {number} · # steps done}}",
+        "closed_line": "Plan {number} · {done}/{total} · closed"
       },
       "card": {
         "messages": "{n, plural, other {# 条消息}}",
@@ -4859,7 +4862,10 @@
         "overview": "概述",
         "hide": "隐藏",
         "edit": "编辑",
-        "waiting": "等待你的批准。尚未开始任何工作。"
+        "waiting": "等待你的批准。此计划尚无步骤开始。",
+        "numbered": "Plan {n}",
+        "history": "History",
+        "history_label": "{n, plural, =0 {History} one {History, # step to review} other {History, # steps to review}}"
       },
       "edit": {
         "head": "编辑计划",
@@ -4890,6 +4896,12 @@
         "spec_placeholder": "这个步骤要做什么",
         "default_model": "默认模型",
         "model": "{title} 的模型"
+      },
+      "history": {
+        "head": "History",
+        "review": "{n} to review",
+        "when": "{date}, {ran}",
+        "card": "Plan {number}, {done} of {total} done"
       }
     }
   },

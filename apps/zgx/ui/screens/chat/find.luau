@@ -29,7 +29,7 @@ local route = require("@app/screens/shell/route")
 
 export type Match = { key: string, block: number, k: number, row: number }
 
-type Plan = { id: string, card: any, here: string, said: { [string]: Threads.Handback } }
+type Plan = { id: string?, card: any, lookup: any, here: string, said: { [string]: Threads.Handback } }
 
 local function card_sources(out: { any }, plan: Plan)
 	for _, s in plan.card.steps do
@@ -50,7 +50,7 @@ local function sources(m: any, plan: Plan?): { { key: string, text: string, brea
 		return {}
 	end
 	if m.role == "user" then
-		if plan and Threads.step_back(m, plan.card, plan.here) then
+		if plan and Threads.step_back(m, plan.lookup, plan.here) then
 			return {}
 		end
 		local text = if m.steps and #m.steps > 0 then Threads.handback_text(m.text or "") else m.text or ""
@@ -80,7 +80,7 @@ local function sources(m: any, plan: Plan?): { { key: string, text: string, brea
 				for _, t in Rows.texts(m, b) do
 					table.insert(out, { key = t.key, text = t.text, plain = true })
 				end
-			elseif plan and (b.kind == "tools" or b.kind == "work") and Threads.holds(b, plan.id) then
+			elseif plan and plan.id and (b.kind == "tools" or b.kind == "work") and Threads.holds(b, plan.id) then
 				card_sources(out, plan)
 			end
 		end
@@ -94,13 +94,16 @@ local function bind(name: string, messages: any, can_open: () -> boolean, bar_id
 
 	local function plan_now(): Plan?
 		local here = if chat then chat() else nil
-		local list = messages:get()
-		local id = if here then Threads.newest_plan(list) else nil
-		local card = if here and id then (require("@app/screens/chat/threads") :: any).card(here) else nil
+		local card = if here then (require("@app/screens/chat/threads") :: any).card(here) else nil
 		if not card then
 			return nil
 		end
-		return { id = id :: string, card = card, here = here :: string, said = Threads.step_handbacks(list, card) }
+		local list = messages:get()
+		local placed = Threads.place_plans(list, card)
+		if not placed.lookup then
+			return nil
+		end
+		return { id = placed.live, card = card, lookup = placed.lookup, here = here :: string, said = if placed.live then Threads.step_handbacks(list, card) else {} }
 	end
 
 

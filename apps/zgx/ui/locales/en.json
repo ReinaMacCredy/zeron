@@ -1544,7 +1544,10 @@
         "finished": "{n, plural, one {Plan · # step done} other {Plan · # steps done}}",
         "open_thread": "Open thread {title}",
         "earlier": "Attempt {n}: {title}",
-        "from_attempt": "From attempt {n}"
+        "from_attempt": "From attempt {n}",
+        "head_n": "{n, plural, one {Plan {number} · # step} other {Plan {number} · # steps}}",
+        "finished_n": "{n, plural, one {Plan {number} · # step done} other {Plan {number} · # steps done}}",
+        "closed_line": "Plan {number} · {done}/{total} · closed"
       },
       "card": {
         "messages": "{n, plural, one {# message} other {# messages}}",
@@ -4859,7 +4862,10 @@
         "overview": "Overview",
         "hide": "Hide",
         "edit": "Edit",
-        "waiting": "Waiting for your approval. Nothing has started."
+        "waiting": "Waiting for your approval. No step of this plan has started.",
+        "numbered": "Plan {n}",
+        "history": "History",
+        "history_label": "{n, plural, =0 {History} one {History, # step to review} other {History, # steps to review}}"
       },
       "edit": {
         "head": "Edit plan",
@@ -4890,6 +4896,12 @@
         "spec_placeholder": "What this step should do",
         "default_model": "Default model",
         "model": "Model of {title}"
+      },
+      "history": {
+        "head": "History",
+        "review": "{n} to review",
+        "when": "{date}, {ran}",
+        "card": "Plan {number}, {done} of {total} done"
       }
     }
   },

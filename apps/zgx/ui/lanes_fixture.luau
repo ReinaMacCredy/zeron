@@ -580,6 +580,38 @@ do
 			return nil
 		end)
 	end }
+	ui.command { id = "threads_rounds", title = "chat-1's first plan closed when a new goal came; its review step is left", run = function()
+		for _, c in { owned("dg-old1", "idle", "completed"), owned("dg-old2", "idle", "completed") } do
+			table.insert(children, c)
+		end
+		publish()
+		local all = table.clone(published:peek())
+		local entry = table.clone(all["chat-1"])
+		entry.plan = table.clone(entry.plan)
+		entry.plan.number = 2
+		entry.plan.review = 1
+		entry.plan.closed = {
+			{ number = 1, done = 1, total = 2, review = 1, overview = "Port the parser first", written = NOW - 7200, closed = NOW - 1200, ran = 6120, ["until"] = "u-goal2", order = { "c1", "c2" }, rows = {
+				{ key = "step:c1", kind = "owned", read_only = false, chat = "dg-old1", step = "c1", plan = 1, number = 1, title = "Port the old parser", state = "readyForReview", line = "Ready to look at", mark = "claude", updated = NOW - 3000 },
+				{ key = "step:c2", kind = "owned", read_only = false, chat = "dg-old2", step = "c2", plan = 1, number = 2, title = "Retire the old docs", state = "done", mark = "claude", updated = NOW - 2000 },
+			} },
+		}
+		all["chat-1"] = entry
+		published:set(all)
+	end }
+	ui.command { id = "threads_long", title = "chat-1's plan grows to eleven steps", run = function()
+		local all = table.clone(published:peek())
+		local entry = table.clone(all["chat-1"])
+		entry.plan = table.clone(entry.plan)
+		entry.plan.order = table.clone(entry.plan.order)
+		entry.rows = table.clone(entry.rows)
+		for i = 1, 7 do
+			table.insert(entry.plan.order, `n{i}`)
+			table.insert(entry.rows, { key = `step:n{i}`, kind = "step", read_only = false, step = `n{i}`, number = 4 + i, title = `Later step {i}`, spec = "", role = "worker", state = "planned" })
+		end
+		all["chat-1"] = entry
+		published:set(all)
+	end }
 	ui.command { id = "threads_extras", title = "Rows carry attempts, turn facts and a quiet spell", run = function()
 		patch_rows(function(r: any): any?
 			if r.step == "s1" then
@@ -653,6 +685,30 @@ ui.command { id = "plan_forget", title = "The plan write is compacted away", run
 	local now = {}
 	for _, m in plan_messages:peek() do
 		if m.id ~= "lead-0" and m.id ~= "lead-1" then
+			table.insert(now, m)
+		end
+	end
+	plan_messages:set(now)
+end }
+ui.command { id = "plan_rounds", title = "The first plan's write and its step's handback, then the goal that closed it", run = function()
+	local now = {}
+	for _, m in plan_messages:peek() do
+		if m.id == "lead-1" then
+			table.insert(now, { id = "lead-old", role = "assistant", text = "", blocks = {
+				{ id = "bo", kind = "tools", tools = { delegate_tool("d-old", "dg-old1", "Port the old parser", "c1") } },
+			} })
+			table.insert(now, { id = "h-old", role = "user", from_chat = "dg-old1", steps = { "dg-old1" }, clock = "3:10 PM", text = 'Step "Port the old parser" (stepId c1) finished a turn on its thread dg-old1.\n\n> The old parser is ported.\n\nRead it with read_thread, then mark the step done or skipped with the plan tool, action "step", or tell the thread what is still missing with send_message_to_thread.' })
+			table.insert(now, { id = "u-goal2", role = "user", text = "Now make the bench run on release day." })
+			table.insert(now, { id = "h-late", role = "user", from_chat = "dg-old1", steps = { "dg-old1" }, clock = "3:40 PM", text = 'Step "Port the old parser" (stepId c1; Plan 1, step 1) finished a turn on its thread dg-old1.\n\n> The tests for the old parser pass too.\n\nRead it with read_thread, then mark the step done or skipped with the plan tool, action "step", or tell the thread what is still missing with send_message_to_thread.' })
+		end
+		table.insert(now, m)
+	end
+	plan_messages:set(now)
+end }
+ui.command { id = "plan_forget_old", title = "The first plan's write is compacted away", run = function()
+	local now = {}
+	for _, m in plan_messages:peek() do
+		if m.id ~= "lead-0" then
 			table.insert(now, m)
 		end
 	end

@@ -799,6 +799,8 @@ type View = {
 	threads: Threads.Threads?,
 	plan_call: (() -> string?)?,
 	plan: (() -> any?)?,
+	plan_lookup: (() -> any?)?,
+	plan_closed: (() -> { [string]: any })?,
 	plan_ref: Ref?,
 	plan_place: ((step: string, ref: Ref, gone: boolean?) -> ())?,
 	handback: ((step: string) -> Threads.Handback?)?,
@@ -844,27 +846,57 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 	return ui.each(shown, function(b: Block, _i: number, brow: State<Block>): Node
 		if (b.kind == "tools" or b.kind == "work") and top and view and view.plan_call and view.threads then
 			local plan_call, threads = view.plan_call, view.threads
-			local function card(): Node
-				return Threads.Plan { id = "plan-card", ref = view.plan_ref, place = view.plan_place, threads = threads, card = view.plan, handback = view.handback, body = view.plan_body, found = view.plan_found, find = view.find }
+			local function closed(): { [string]: any }
+				return if view.plan_closed then view.plan_closed() else {}
+			end
+			local function card(of: string): Node
+				if of == "" then
+					return Threads.Plan { id = "plan-card", ref = view.plan_ref, place = view.plan_place, threads = threads, card = view.plan, handback = view.handback, body = view.plan_body, found = view.plan_found, find = view.find }
+				end
+				local first = closed()[of]
+				return Threads.ClosedPlan {
+					id = `plan-closed-{first.number or 0}`,
+					key = of,
+					plan = function(): any?
+						return closed()[of]
+					end,
+					threads = threads,
+					handback = view.handback,
+					body = view.plan_body,
+				}
 			end
 			return ui.presence(function(): string
-				local id = plan_call()
 				local now_b = brow:get()
-				if not id or not Threads.holds(now_b, id) then
+				local id = plan_call()
+				local of: string? = nil
+				if id and Threads.holds(now_b, id) then
+					of = ""
+				else
+					for tid in closed() do
+						if Threads.holds(now_b, tid) then
+							of = tid
+							break
+						end
+					end
+				end
+				if of == nil then
 					return ""
 				end
-				return if now_b.kind == "tools" and #(now_b.tools or {}) == 1 then "only" else "after"
+				return (if now_b.kind == "tools" and #(now_b.tools or {}) == 1 then "only\0" else "after\0") .. of
 			end, function(which: string): Node
-				if which == "only" then
-					return card()
+				local sep = string.find(which, "\0", 1, true)
+				local how = if sep then string.sub(which, 1, sep - 1) else nil
+				local of = if sep then string.sub(which, sep + 1) else nil
+				if how == "only" then
+					return card(of :: string)
 				end
 				local group = blocks_of(function(): { Block }
 					return { brow:get() }
 				end, m, now, draft, view)
-				if which == "" then
+				if how == nil then
 					return group
 				end
-				return ui.column { w_full = true, min_w = 0, gap = "$space.3", group, card() }
+				return ui.column { w_full = true, min_w = 0, gap = "$space.3", group, card(of :: string) }
 			end, { w_full = true, min_w = 0 })
 		end
 		if b.kind == "tools" or b.kind == "work" then
@@ -876,7 +908,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				pictures = if view then view.shown_pictures else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
-				plan = if view then view.plan else nil,
+				plan = if view then view.plan_lookup else nil,
 				-- (A long group builds only what's near the view, as a long
 				-- reply does.)
 				window = if view
@@ -1103,7 +1135,7 @@ local function reply(
 				open_subagent = if view then view.open_subagent else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
-				plan = if view then view.plan else nil,
+				plan = if view then view.plan_lookup else nil,
 				pictures = if view then view.shown_pictures else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
@@ -1226,16 +1258,26 @@ local function Transcript(props: Props): Node
 	opened_at = ui.now()
 	local messages = props.messages
 	local threads = props.threads
-	local newest_plan = if threads and threads.plan
-		then ui.computed(function(): string?
-			return if (threads.plan :: any)() then Threads.newest_plan(messages:get()) else nil
+	local placed = if threads and threads.plan
+		then ui.computed(function(): Threads.Placed?
+			local c = (threads.plan :: any)()
+			return if c then Threads.place_plans(messages:get(), c) else nil
 		end)
 		else nil
-	local plan_call = if newest_plan
+	local plan_call = if placed
 		then function(): string?
-			return newest_plan:get()
+			local p = placed:get()
+			return if p then p.live else nil
 		end
 		else nil
+	local function plan_closed(): { [string]: any }
+		local p = if placed then placed:get() else nil
+		return if p then p.closed else {}
+	end
+	local function plan_lookup(): any
+		local p = if placed then placed:get() else nil
+		return if p then p.lookup else nil
+	end
 	-- (Its own kept states, by its name: a side chat's beside the chat
 	-- page's never shares the chat page's glide, runway or hover.)
 	local kept = if props.name then `.{props.name}` else ""
@@ -1307,11 +1349,11 @@ local function Transcript(props: Props): Node
 		return card:get()
 	end
 	local handbacks = ui.computed(function(): { [string]: Threads.Handback }
-		local p = plan_card()
+		local p = plan_lookup()
 		return if p then Threads.step_handbacks(messages:get(), p) else {}
 	end)
 	local function step_back(x: Message): boolean
-		local p = plan_card()
+		local p = plan_lookup()
 		return p ~= nil and Threads.step_back(x, p, if props.sent_from then props.sent_from() else nil)
 	end
 	local function said_of(x: Message): string
@@ -3119,7 +3161,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state),
 					})
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, plan_ref = plan_ref, plan_place = function(step: string, ref: Ref, gone: boolean?)
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, plan_lookup = if plan_call then plan_lookup else nil, plan_closed = if plan_call then plan_closed else nil, plan_ref = plan_ref, plan_place = function(step: string, ref: Ref, gone: boolean?)
 								if not gone then
 									step_refs[step] = ref
 								elseif step_refs[step] == ref then
