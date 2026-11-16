@@ -1777,8 +1777,9 @@ impl WorkspaceHost {
         plan: &ChatPlan,
         steps: &[TaskStep],
         pending: bool,
+        keep: bool,
     ) -> Result<(), EngineError> {
-        Ok(self.mutate(|doc| doc.write_plan(chat_id, plan, steps, pending, Utc::now()))?)
+        Ok(self.mutate(|doc| doc.write_plan(chat_id, plan, steps, pending, keep, Utc::now()))?)
     }
 
     pub fn edit_plan(

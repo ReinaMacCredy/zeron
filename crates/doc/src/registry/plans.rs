@@ -101,18 +101,19 @@ impl RegistryDoc {
         plan: &ChatPlan,
         steps: &[TaskStep],
         pending: bool,
+        keep: bool,
         now: DateTime<Utc>,
     ) -> Result<(), DocError> {
         let replaced = self.chat_plan(chat_id)?;
         let dropped: Vec<TaskStep> = self
             .current_steps(chat_id, replaced.as_ref())
             .into_iter()
-            .filter(|step| !plan.is_closed(step.plan) && !self.step_started(step))
+            .filter(|step| !keep && !plan.is_closed(step.plan) && !self.step_started(step))
             .collect();
         let kept = self
             .current_steps(chat_id, Some(plan))
             .into_iter()
-            .filter(|step| self.step_started(step))
+            .filter(|step| keep || self.step_started(step))
             .count();
         check_plan_size(kept + steps.len(), plan.size)?;
         let mut plan_op = self.plan_op(chat_id, Some(plan))?;

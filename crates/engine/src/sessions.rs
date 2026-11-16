@@ -5320,7 +5320,31 @@ impl Inner {
         if lock(&self.mission_turns).get(chat_id).map(String::as_str) != Some(user_entry_id) {
             return None;
         }
-        self.mission(chat_id).map(crate::rpc::mission_brief)
+        let brief = self.mission(chat_id).map(crate::rpc::mission_brief)?;
+        Some(match self.plan_in_flight(chat_id) {
+            Some(left) => format!("{brief}\n{left}"),
+            None => brief,
+        })
+    }
+
+    fn plan_in_flight(&self, chat_id: &str) -> Option<String> {
+        let workspace = self.workspace()?;
+        let chat = workspace.chat(chat_id).ok().flatten()?;
+        let steps: Vec<_> = workspace
+            .steps_of(chat_id)
+            .into_iter()
+            .filter(|step| chat.in_current_plan(step))
+            .collect();
+        let (started, left): (Vec<_>, Vec<_>) =
+            steps.iter().partition(|step| workspace.step_started(step));
+        if started.is_empty() || left.is_empty() {
+            return None;
+        }
+        let titles: Vec<&str> = left.iter().map(|step| step.title.as_str()).collect();
+        Some(format!(
+            "Your current plan is still running and keeps its steps that have not run yet ({}): write only the steps this message adds, and they join that plan. To drop a step, mark it skipped with the plan tool, action \"step\".",
+            titles.join("; ")
+        ))
     }
 
     fn mission(&self, chat_id: &str) -> Option<zeron_proto::ChatMission> {

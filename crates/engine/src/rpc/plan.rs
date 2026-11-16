@@ -286,10 +286,11 @@ fn reorder_keys(
 }
 
 fn closes(steps: &[(ThreadState, bool)]) -> bool {
-    !steps.iter().any(|(state, _)| *state == ThreadState::Working)
-        && steps
+    use ThreadState::{Planned, WaitingOnYou, Working};
+    !steps.is_empty()
+        && !steps
             .iter()
-            .any(|(state, started)| *state != ThreadState::Planned || *started)
+            .any(|(state, _)| matches!(state, Planned | Working | WaitingOnYou))
 }
 
 fn edit_text(changes: &[String], pending: bool) -> String {
@@ -414,6 +415,7 @@ impl EngineRpc {
             .map(|step| (self.step_state(step), self.workspace.step_started(step)))
             .collect();
         let closing = goal.is_some() && closes(&states);
+        let keeping = goal.is_some() && !closing && states.iter().any(|(_, started)| *started);
         if closing {
             plan.closed.push(ClosedPlan {
                 number: plan.number(),
@@ -456,7 +458,7 @@ impl EngineRpc {
             })
             .collect();
         carry_choices(&before, &mut steps);
-        let replaced: &[TaskStep] = if closing { &[] } else { &before };
+        let replaced: &[TaskStep] = if closing || keeping { &[] } else { &before };
         let (moved, orphans) = carry_images(
             replaced,
             |step| self.workspace.step_started(step),
@@ -494,7 +496,7 @@ impl EngineRpc {
         }
         let pending = mission_turn && mission.is_some_and(|mission| mission.approve);
         self.workspace
-            .write_plan(chat_id, &plan, &steps, pending)
+            .write_plan(chat_id, &plan, &steps, pending, keeping)
             .map_err(written)?;
         if mission_turn {
             self.sessions.set_mission_turn(chat_id, None);
@@ -949,12 +951,13 @@ mod tests {
     #[test]
     fn a_new_goal_closes_a_plan_that_started_and_works_no_more() {
         use ThreadState::*;
-        assert!(closes(&[(ReadyForReview, true), (Planned, false)]));
-        assert!(closes(&[(Done, true), (Skipped, true)]));
+        assert!(closes(&[(ReadyForReview, true), (Failed, true)]));
+        assert!(closes(&[(Done, true), (Skipped, true), (Cancelled, false)]));
         assert!(
-            closes(&[(Planned, true), (Planned, false)]),
-            "a step whose thread was bound has started"
+            !closes(&[(Done, true), (Planned, false)]),
+            "a step still to run keeps the plan open"
         );
+        assert!(!closes(&[(Done, true), (WaitingOnYou, true)]));
         assert!(!closes(&[(Working, true), (Done, true), (Planned, false)]));
         assert!(
             !closes(&[(Planned, false), (Planned, false)]),

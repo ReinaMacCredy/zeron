@@ -2942,7 +2942,7 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
         overview: text.into(),
         ..Default::default()
     };
-    doc.write_plan("lead", &overview("Ship it"), &plan, false, ts(4_000))
+    doc.write_plan("lead", &overview("Ship it"), &plan, false, false, ts(4_000))
         .unwrap();
     assert_eq!(step_ids(&doc, "lead"), ["run", "done", "n1", "n2"]);
     assert!(doc.task_step("open").is_none());
@@ -2954,11 +2954,20 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
         doc.chat("lead").unwrap().unwrap().plan,
         Some(overview("Ship it"))
     );
+    let more = [step("n5", "lead", "Third")];
+    doc.write_plan("lead", &overview("Ship it"), &more, false, true, ts(4_500))
+        .unwrap();
+    assert_eq!(
+        step_ids(&doc, "lead"),
+        ["run", "done", "n1", "n2", "n5"],
+        "a write that keeps adds to the steps still to run"
+    );
+    doc.delete_task_step("n5", ts(4_600)).unwrap();
 
     let before = doc.read_task_steps().unwrap();
     let refused = [step("n3", "lead", "Fine"), step("n4", "lead", "  ")];
     assert!(
-        doc.write_plan("lead", &overview("Ship it"), &refused, false, ts(5_000))
+        doc.write_plan("lead", &overview("Ship it"), &refused, false, false, ts(5_000))
             .is_err()
     );
     assert!(
@@ -2966,6 +2975,7 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
             "lead",
             &overview("Ship it"),
             &[step("x", "child", "Other")],
+            false,
             false,
             ts(5_000)
         )
@@ -3016,6 +3026,7 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
             &overview(""),
             &[step("g", "gone", "G")],
             false,
+            false,
             ts(5_000)
         )
         .is_err()
@@ -3024,7 +3035,7 @@ fn a_new_plan_keeps_the_steps_a_thread_or_outcome_holds() {
         .map(|n| step(&format!("m{n}"), "lead", "M"))
         .collect();
     assert!(
-        doc.write_plan("lead", &overview(""), &many, false, ts(7_000))
+        doc.write_plan("lead", &overview(""), &many, false, false, ts(7_000))
             .is_err(),
         "the 50-step cap counts the started steps a plan keeps"
     );
@@ -3057,6 +3068,7 @@ fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
             step("a3", "lead", "Three"),
             step("a4", "lead", "Four"),
         ],
+        false,
         false,
         ts(3_000),
     )
@@ -3093,7 +3105,7 @@ fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
             ..step(&format!("b{n}"), "lead", "B")
         })
         .collect();
-    doc.write_plan("lead", &second, &next, false, ts(4_000))
+    doc.write_plan("lead", &second, &next, false, false, ts(4_000))
         .unwrap();
     let restarted = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "a").unwrap();
     let plans: Vec<u32> = restarted.steps_of("lead").iter().map(|s| s.plan).collect();
@@ -3135,7 +3147,7 @@ fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
         closed: vec![closed(&"語".repeat(2_500))],
         ..Default::default()
     };
-    doc.write_plan("lead", &wide, &[], false, ts(6_000))
+    doc.write_plan("lead", &wide, &[], false, false, ts(6_000))
         .unwrap();
     let kept = doc.chat("lead").unwrap().unwrap().plan.unwrap();
     assert_eq!(kept.overview, wide.overview);
@@ -3167,6 +3179,7 @@ fn an_oversize_plan_is_refused_on_its_chat_and_writes_nothing() {
             &wide,
             &[step("s1", "lead", "One")],
             false,
+            false,
             ts(3_000),
         )
         .unwrap_err()
@@ -3193,7 +3206,7 @@ fn an_oversize_plan_is_refused_on_its_chat_and_writes_nothing() {
     };
     let small = sized(Some(zeron_proto::PlanSize::Small));
     let err = doc
-        .write_plan("lead", &small, &steps("a", 6), false, ts(3_000))
+        .write_plan("lead", &small, &steps("a", 6), false, false, ts(3_000))
         .unwrap_err()
         .to_string();
     assert!(
@@ -3201,19 +3214,19 @@ fn an_oversize_plan_is_refused_on_its_chat_and_writes_nothing() {
         "{err}"
     );
     assert!(doc.steps_of("lead").is_empty(), "the refused write keeps nothing");
-    doc.write_plan("lead", &small, &steps("b", 5), false, ts(3_000))
+    doc.write_plan("lead", &small, &steps("b", 5), false, false, ts(3_000))
         .unwrap();
     doc.edit_plan("lead", None, &[], &steps("c", 3), &[], ts(3_000))
         .expect("the person's edit is not held to the size");
     assert_eq!(doc.steps_of("lead").len(), 8);
 
     let err = doc
-        .write_plan("lead", &sized(None), &steps("d", 51), false, ts(3_000))
+        .write_plan("lead", &sized(None), &steps("d", 51), false, false, ts(3_000))
         .unwrap_err()
         .to_string();
     assert!(err.contains("up to 50 steps"), "a plan written before sizes keeps the ceiling: {err}");
     let unlimited = sized(Some(zeron_proto::PlanSize::Unlimited));
-    doc.write_plan("lead", &unlimited, &steps("e", 51), false, ts(3_000))
+    doc.write_plan("lead", &unlimited, &steps("e", 51), false, false, ts(3_000))
         .expect("an unlimited mission has no ceiling");
     doc.edit_plan("lead", None, &[], &steps("f", 2), &[], ts(3_000))
         .expect("nor does the person's edit of it");

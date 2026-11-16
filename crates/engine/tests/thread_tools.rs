@@ -5988,11 +5988,13 @@ async fn a_message_read_mid_turn_over_a_plan_that_ran_starts_plan_two() {
     wait_for(|| working(&rig.core, "lead"), "the first goal's turn").await;
     mutate(plan(&["Parse", "Grade"])).await.unwrap();
     let first = rig.core.workspace.steps_of("lead");
-    mutate(serde_json::json!({
-        "op": "updateTaskStep", "stepId": first[0].id, "patch": { "outcome": "skipped" }, "fromChatId": "lead",
-    }))
-    .await
-    .unwrap();
+    for step in &first {
+        mutate(serde_json::json!({
+            "op": "updateTaskStep", "stepId": step.id, "patch": { "outcome": "skipped" }, "fromChatId": "lead",
+        }))
+        .await
+        .unwrap();
+    }
     queue_steer(&rig.core, "lead", "s1", "now the cart");
     wait_for(
         || rig.steers.lock().unwrap().iter().any(|s| s.contains("now the cart")),
@@ -6102,7 +6104,7 @@ async fn a_plan_takes_a_changed_size_until_a_step_of_it_runs() {
 }
 
 #[tokio::test]
-async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_its_plan() {
+async fn a_new_goal_adds_to_a_plan_with_steps_to_run_and_starts_plan_two_once_all_are_finished() {
     let rig = rig(Duration::from_millis(20));
     let rpc = rig.core.rpc_service();
     let call = |method: &'static str, params: serde_json::Value| {
@@ -6203,29 +6205,16 @@ async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_
 
     queue_run(&rig.core, "lead", "c2", "m2", "now the cart");
     wait_for(|| turn_over(&rig, "now the cart"), "the second goal").await;
+    assert!(
+        prompts_with(&rig, "now the cart")[0].contains("keeps its steps that have not run yet (Grade; Report)"),
+        "the lead is told which steps stay"
+    );
     mutate(serde_json::json!({
         "op": "planSteps", "chatId": "lead", "fromChatId": "lead",
         "steps": [], "overview": "Add the cart",
     }))
     .await
     .unwrap();
-    let plan_now = chat_plan(&rig);
-    assert_eq!(
-        plan_now.number(),
-        2,
-        "a goal over a plan a step ran in and none works starts the next, an overview alone too"
-    );
-    assert_eq!(plan_now.closed.len(), 1);
-    let closed = &plan_now.closed[0];
-    assert_eq!(
-        (
-            closed.number,
-            closed.overview.as_str(),
-            closed.until.as_deref()
-        ),
-        (1, "Grade them, then report", Some("m2"))
-    );
-    assert!(closed.written_at <= closed.closed_at);
     mutate(serde_json::json!({
         "op": "planSteps", "chatId": "lead", "fromChatId": "lead",
         "steps": [{ "title": "Cart" }],
@@ -6238,15 +6227,51 @@ async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_
             ("Parse".into(), 1),
             ("Grade".into(), 1),
             ("Report".into(), 1),
-            ("Cart".into(), 2),
+            ("Cart".into(), 1),
         ],
-        "the closed plan keeps the steps it never ran"
+        "a goal over a plan with steps still to run adds to it"
     );
-    assert_eq!(chat_plan(&rig).overview, "Add the cart");
+    assert!(chat_plan(&rig).closed.is_empty());
 
+    for step in rig.core.workspace.steps_of("lead").iter().skip(1) {
+        mutate(serde_json::json!({
+            "op": "updateTaskStep", "stepId": step.id, "patch": { "outcome": "skipped" }, "fromChatId": "lead",
+        }))
+        .await
+        .unwrap();
+    }
     queue_run(&rig.core, "lead", "c3", "m3", "now the checkout");
     wait_for(|| turn_over(&rig, "now the checkout"), "the third goal").await;
-    mutate(plan(&["Checkout", "Payments"], "Build the checkout"))
+    mutate(serde_json::json!({
+        "op": "planSteps", "chatId": "lead", "fromChatId": "lead",
+        "steps": [], "overview": "Build the checkout",
+    }))
+    .await
+    .unwrap();
+    let plan_now = chat_plan(&rig);
+    assert_eq!(
+        plan_now.number(),
+        2,
+        "a goal over a plan whose every step is finished starts the next, an overview alone too"
+    );
+    assert_eq!(plan_now.closed.len(), 1);
+    let closed = &plan_now.closed[0];
+    assert_eq!(
+        (
+            closed.number,
+            closed.overview.as_str(),
+            closed.until.as_deref()
+        ),
+        (1, "Add the cart", Some("m3"))
+    );
+    assert!(closed.written_at <= closed.closed_at);
+    mutate(plan(&["Checkout"], "Build the checkout"))
+        .await
+        .unwrap();
+
+    queue_run(&rig.core, "lead", "c4", "m4", "now the refunds");
+    wait_for(|| turn_over(&rig, "now the refunds"), "the fourth goal").await;
+    mutate(plan(&["Refunds", "Payments"], "Build the refunds"))
         .await
         .unwrap();
     let plan_now = chat_plan(&rig);
@@ -6255,14 +6280,15 @@ async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_
         (2, 1),
         "a goal over a plan nothing ran in replaces it"
     );
-    assert_eq!(plan_now.overview, "Build the checkout");
+    assert_eq!(plan_now.overview, "Build the refunds");
     assert_eq!(
         steps(&rig),
         [
             ("Parse".into(), 1),
             ("Grade".into(), 1),
             ("Report".into(), 1),
-            ("Checkout".into(), 2),
+            ("Cart".into(), 1),
+            ("Refunds".into(), 2),
             ("Payments".into(), 2),
         ]
     );
@@ -6277,47 +6303,16 @@ async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_
         Some(zeron_proto::StepOutcome::Done),
         "a closed plan's review step can still be marked done"
     );
-    let grade = rig
-        .core
-        .workspace
-        .steps_of("lead")
-        .into_iter()
-        .find(|step| step.title == "Grade")
-        .unwrap();
     assert!(
         mutate(serde_json::json!({ "op": "carryStep", "stepId": first[0].id }))
             .await
             .is_err(),
         "a step that ran stays in its plan"
     );
-    mutate(serde_json::json!({ "op": "carryStep", "stepId": grade.id }))
-        .await
-        .unwrap();
-    assert_eq!(
-        steps(&rig),
-        [
-            ("Parse".into(), 1),
-            ("Report".into(), 1),
-            ("Checkout".into(), 2),
-            ("Payments".into(), 2),
-            ("Grade".into(), 2),
-        ],
-        "a carried step joins the current plan after its last step"
-    );
-    let line = format!(
-        "- New step \"Grade\" (stepId {}), from Plan 1 where it never ran.",
-        grade.id
-    );
-    wait_for(
-        || !prompts_with(&rig, &line).is_empty(),
-        "the lead hears of the carried step",
-    )
-    .await;
-    assert!(prompts_with(&rig, &line)[0].contains("The person edited your plan:"));
 
     mutate(plan(
-        &["Checkout", "Payments", "Refunds"],
-        "Build the checkout",
+        &["Refunds", "Payments", "Receipts"],
+        "Build the refunds",
     ))
     .await
     .unwrap();
@@ -6327,6 +6322,6 @@ async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_
         (2, 1),
         "a rewrite outside a goal's turn stays in the current plan"
     );
-    assert_eq!(steps(&rig).len(), 5);
+    assert_eq!(steps(&rig).len(), 7);
     rig.core.shutdown().await;
 }
