@@ -94,8 +94,25 @@ function M.bind(b: Bind): { [string]: any }
 		for _, p in now.projects or {} do
 			names[p.id] = p.name
 		end
+		-- (Those at work first, then the latest moved.)
+		local listed = table.clone(now.chats or {})
+		local function live(c: any): boolean
+			return c.status == "working" or c.status == "waiting" or c.status == "input"
+		end
+		local function moved(c: any): number
+			return if type(c.updated) == "number" then c.updated else 0
+		end
+		table.sort(listed, function(a: any, z: any): boolean
+			if live(a) ~= live(z) then
+				return live(a)
+			end
+			if moved(a) ~= moved(z) then
+				return moved(a) > moved(z)
+			end
+			return tostring(a.id) < tostring(z.id)
+		end)
 		local out = {}
-		for _, c in now.chats or {} do
+		for _, c in listed do
 			if c.id ~= here and ChatLinks.valid(c.id) then
 				local title = ChatLinks.title(c.title)
 				table.insert(out, {
