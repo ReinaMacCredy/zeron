@@ -7,8 +7,51 @@ local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
 local FileLinks = require("@app/screens/chat/file_links")
 local references = require("@ds/references")
+local HtmlPicks = require("@ds/html_picks")
+local store = require("@app/screens/chat/store")
+local queued = require("@app/screens/chat/queued")
 
 local M = {}
+
+-- A message waiting in the chat's queue has sent its picks, until it is edited (`except`: the one being taken to edit) or leaves the queue.
+function M.with_queue(chat: string?, messages: { any }, except: string?): { any }
+	local s = store.session:get()
+	if not chat or not s or s.id ~= chat then
+		return messages
+	end
+	local engine = s.queue or {}
+	local seen: { [string]: boolean } = {}
+	for _, m in messages do
+		seen[m.id] = true
+	end
+	local out: { any }? = nil
+	local function add(r: any)
+		if seen[r.id] or r.editing or r.id == except then
+			return
+		end
+		seen[r.id] = true
+		local picks = {}
+		local _, cards = HtmlPicks.split(r.text or "")
+		for _, c in cards do
+			for _, p in c.picks do
+				table.insert(picks, { kind = "pick", card = c.card, group = p.group or "", code = p.code, label = p.label })
+			end
+		end
+		if #picks > 0 then
+			out = out or table.clone(messages)
+			table.insert(out :: { any }, { id = r.id, role = "user", attachments = picks })
+		end
+	end
+	for _, r in engine do
+		add(r)
+	end
+	for _, r in queued.rows(chat, engine) do
+		if r.sending then
+			add(r)
+		end
+	end
+	return out or messages
+end
 
 -- (Up to a later card of the same title: what was sent there is that card's.)
 function M.sent_of(list: { any }, title: string, message: string): { list: { any }, locked: { [string]: boolean }, closed: boolean }
@@ -66,6 +109,76 @@ local function token(key: string, p: any): string
 	return references.add(shared.refs_key(key), { kind = "pick", name = p.label, code = if (p.group or "") ~= "" then p.code else "·", link = p.code })
 end
 
+local function staged(key: string, card: string, title: string, p: any, name: string, locked: { string }): any
+	local group = p.group or ""
+	return {
+		id = `pick-{card}-{if group ~= "" then group else p.code}`,
+		kind = "pick",
+		name = p.label,
+		card = card,
+		card_title = title,
+		group = group,
+		group_name = name,
+		code = p.code,
+		label = p.label,
+		groups = p.groups or {},
+		locked = locked,
+		shown = token(key, p),
+	}
+end
+
+-- (The code as the prompt's words have it, where its chip stood.)
+local function chip_in(text: string, code: string, shown: string): string
+	local at = 1
+	while true do
+		local s, e = string.find(text, code, at, true)
+		if not s or not e then
+			return if text == "" then shown else `{text} {shown}`
+		end
+		local before, after = string.sub(text, s - 1, s - 1), string.sub(text, e + 1, e + 1)
+		if (before == "" or string.find(before, "^%s")) and (after == "" or string.find(after, "^%s")) then
+			return string.sub(text, 1, s - 1) .. shown .. string.sub(text, e + 1)
+		end
+		at = e + 1
+	end
+end
+
+-- A queued message's picks (`HtmlPicks.split`) for the draft it is edited in: its words with each code a chip again, and the chips. Nil when a page of its isn't shown here or a pick has no group: it is edited as text.
+function M.edited(chat: string, words: string, cards: { any }, except: string): { text: string, cargo: { any } }?
+	local messages = M.with_queue(chat, store.messages:peek(), except)
+	local text, cargo = words, {}
+	for _, c in cards do
+		local page: any = nil
+		for _, e in M.shown:peek()[chat] or {} do
+			if e.title == c.card then
+				page = e
+			end
+		end
+		if not page then
+			return nil
+		end
+		local groups, names = {}, {}
+		for _, g in page.groups do
+			table.insert(groups, { code = g.code, name = g.name })
+			names[g.code] = g.name
+		end
+		local locked = {}
+		for g in M.sent_of(messages, page.title, page.message).locked do
+			table.insert(locked, g)
+		end
+		table.sort(locked)
+		for _, p in c.picks do
+			if not p.group or not names[p.group] then
+				return nil
+			end
+			local it = staged(chat, page.card, page.title, { group = p.group, code = p.code, label = p.label, groups = groups }, names[p.group], locked)
+			table.insert(cargo, it)
+			text = chip_in(text, p.code, it.shown)
+		end
+	end
+	return { text = text, cargo = cargo }
+end
+
 function M.place(key: string, card: string, title: string, p: any, sent: { list: { any }, locked: { [string]: boolean }, closed: boolean })
 	local group = p.group or ""
 	if sent.closed or (group ~= "" and sent.locked[group]) then
@@ -118,23 +231,10 @@ function M.place(key: string, card: string, title: string, p: any, sent: { list:
 			end
 			return
 		end
-		local shown = token(key, p)
-		table.insert(list, {
-			id = `pick-{card}-{if group ~= "" then group else p.code}`,
-			kind = "pick",
-			name = p.label,
-			card = card,
-			card_title = title,
-			group = group,
-			group_name = name,
-			code = p.code,
-			label = p.label,
-			groups = p.groups or {},
-			locked = locked,
-			shown = shown,
-		})
+		local it = staged(key, card, title, p, name, locked)
+		table.insert(list, it)
 		shared.set_cargo_of(key, list)
-		shared.put_words(key, shown)
+		shared.put_words(key, it.shown)
 	end)
 end
 
@@ -156,6 +256,7 @@ function M.ready(chat: string, card: string, title: string, message: string, gro
 end
 
 local function left_of(chat: string, messages: { any }, picked: { any }): { { page: any, left: { any } } }
+	messages = M.with_queue(chat, messages)
 	local here: { [string]: boolean } = {}
 	for _, m in messages do
 		here[m.id] = true
@@ -245,12 +346,12 @@ function M.pages(key: () -> string?, messages: State<{ any }>, session: () -> an
 			return out
 		end,
 		sent = function(title: string, message: string): any
-			return M.sent_of(messages:get(), title, message)
+			return M.sent_of(M.with_queue(key(), messages:get()), title, message)
 		end,
 		pick = function(card: string, title: string, message: string, p: any)
 			local k = key()
 			if k then
-				M.place(k, card, title, p, M.sent_of(messages:peek(), title, message))
+				M.place(k, card, title, p, M.sent_of(M.with_queue(k, messages:peek()), title, message))
 			end
 		end,
 		ready = function(card: string, title: string, message: string, groups: { any })

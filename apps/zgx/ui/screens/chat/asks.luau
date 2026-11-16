@@ -21,8 +21,17 @@ local Dock = require("@ds/composer_dock")
 local Carried = require("@app/screens/chat/carried")
 local references = require("@ds/references")
 local T = require("@ds/transcript")
+local HtmlPicks = require("@ds/html_picks")
+local Pages = require("@app/screens/chat/pages")
 
 local M = {}
+
+-- What follows the picks' block in a queued message whose picks are chips while it's edited, by message.
+local AFTER_PICKS = ui.shared("chat.queue.after_picks", {} :: { [string]: string })
+
+local function after_picks(item: string, tail: string?)
+	AFTER_PICKS:set_key({ item }, tail)
+end
 
 -- A queued message edited in a chat's composer, by whichever composer shows
 -- that chat: `text` its draft, `editing` which message and the draft it set
@@ -69,6 +78,20 @@ function M.queue_edits(e: Edits): { [string]: any }
 			return
 		end
 		local words = if e.refs then references.encode(e.refs(), e.text:peek()) else e.text:peek()
+		local tail = AFTER_PICKS:peek()[now.item]
+		if tail and e.cargo then
+			local chosen = {}
+			for _, it in e.cargo() do
+				if it.kind == "pick" then
+					table.insert(chosen, it)
+				end
+			end
+			words = HtmlPicks.with_open(HtmlPicks.with_picks(words, HtmlPicks.cards(chosen)), Pages.open(id, store.messages:peek(), chosen))
+			if tail ~= "" then
+				words = if words == "" then tail else `{words}\n\n{tail}`
+			end
+		end
+		after_picks(now.item, nil)
 		-- The files it carries now: its chips, as edited.
 		local files = if e.cargo then Carried.pack(e.cargo(), "", "").attachments else nil
 		ui.batch(function()
@@ -94,9 +117,17 @@ function M.queue_edits(e: Edits): { [string]: any }
 				ui.batch(function()
 					e.editing:set { item = item, aside = e.text:peek(), aside_cargo = if e.cargo then e.cargo() else nil }
 					local text = if got then got.text else ""
+					local files = chips_of(if got then got.attachments else nil)
+					local head, cards, tail = HtmlPicks.split(text)
+					local picked = if #cards > 0 and e.set_cargo and e.refs then Pages.edited(id, head, cards, item) else nil
+					if picked then
+						text = picked.text
+						table.move(picked.cargo, 1, #picked.cargo, #files + 1, files)
+						after_picks(item, tail)
+					end
 					e.text:set(if e.refs then references.decode(e.refs(), text) else text)
 					if e.set_cargo then
-						e.set_cargo(chips_of(if got then got.attachments else nil))
+						e.set_cargo(files)
 					end
 				end)
 				e.focus()

@@ -47,7 +47,7 @@ local function option_row(chat: string, e: any, g: any, o: any, close: () -> ())
 			for _, x in e.groups do
 				table.insert(groups, { code = x.code, name = x.name })
 			end
-			Pages.place(chat, e.card, e.title, { group = g.code, code = o.code, label = o.label, groups = groups }, Pages.sent_of(store.messages:peek(), e.title, e.message))
+			Pages.place(chat, e.card, e.title, { group = g.code, code = o.code, label = o.label, groups = groups }, Pages.sent_of(Pages.with_queue(chat, store.messages:peek()), e.title, e.message))
 			local _, left = Pages.waiting(chat, store.messages:peek())
 			if left == 0 then
 				close()

@@ -207,19 +207,23 @@ test("picks: a click puts its token in the draft; another option of its group sw
 	expect(string.find(app:state("calls"), "send:", 1, true)).to_be(nil)
 end)
 
-test("picks: a page's groups left to pick show as a pill over the composer; its card lists each option and picks it as the page does", function()
-	local app = mount("chat_fixture.luau")
-	seeded(app)
-	expect(app:has("#pills-picks")).to_be(false)
-	local ready = {}
+local function ready(app: any)
+	local list = {}
 	for _, g in GROUPS do
 		local options = {}
 		for _, n in { "1", "2" } do
 			table.insert(options, { code = g.code .. n, label = LABELS[g.code .. n], desc = `about {g.code}{n}` })
 		end
-		table.insert(ready, { code = g.code, name = g.name, options = options })
+		table.insert(list, { code = g.code, name = g.name, options = options })
 	end
-	post(app, FRAME, { ready = ready })
+	post(app, FRAME, { ready = list })
+end
+
+test("picks: a page's groups left to pick show as a pill over the composer; its card lists each option and picks it as the page does", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	expect(app:has("#pills-picks")).to_be(false)
+	ready(app)
 	expect(app:tree("#pills-picks")).to_contain("Khung app")
 	expect(app:tree("#pills-picks")).to_contain("3 groups to pick")
 	pick(app, "A2")
@@ -234,6 +238,81 @@ test("picks: a page's groups left to pick show as a pill over the composer; its 
 	expect(app:tree("#pills-picks")).to_contain("1 group to pick")
 	pick(app, "C2")
 	expect(app:has("#pills-picks")).to_be(false)
+end)
+
+local QUEUED = 'A2 B2 + header\n\nĐã chọn trong "Khung app":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nChưa chọn: C (Rail)'
+
+local function queue(app: any, words: string)
+	app:set_state("test_queued_words", words)
+	app:command("queue_said")
+	settle(app)
+end
+
+local function edit_queued(app: any)
+	if app:has('role:button "Open Queue"') then
+		app:click('role:button "Open Queue"')
+		app:frames(30)
+	end
+	app:hover("role:listitem")
+	settle(app)
+	app:click('role:button "Edit"')
+	settle(app)
+end
+
+test("picks: a message waiting in the queue has sent its picks: the pill and the page count them, until it leaves the queue", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	ready(app)
+	expect(app:tree("#pills-picks")).to_contain("3 groups to pick")
+	queue(app, QUEUED)
+	expect(app:tree("#pills-picks")).to_contain("1 group to pick")
+	expect(last_run(app, FRAME)).to_contain('"locked":["A","B"]')
+	pick(app, "A1")
+	expect(picked_any(app)).to_be(false)
+	queue(app, QUEUED .. "\nC = C1 (Ảnh sát mép)")
+	expect(app:has("#pills-picks")).to_be(true)
+	queue(app, 'A2 B2 C1\n\nĐã chọn trong "Khung app":\nA = A2 (Nổi sát đỉnh)\nB = B2 (Không viền)\nC = C1 (Ảnh sát mép)\n\n> a quote after')
+	expect(app:has("#pills-picks")).to_be(false)
+	app:command("queue_none")
+	settle(app)
+	expect(app:tree("#pills-picks")).to_contain("3 groups to pick")
+	expect(last_run(app, FRAME)).to_contain('"locked":[]')
+end)
+
+test("picks: a queued message edited brings its picks back as chips and the pill with them; saved, its block follows the picks; left alone, it saves as it was", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	ready(app)
+	local tail = "\n\n> a quote after"
+	queue(app, QUEUED .. tail)
+	edit_queued(app)
+	expect(app:tree("#pills-picks")).to_contain("1 group to pick")
+	expect(draft(app)).to_contain(token("A2"))
+	expect(draft(app)).to_contain(token("B2"))
+	expect(draft(app)).never.to_contain("Khung app")
+	app:click('role:button "Save to queue"')
+	settle(app)
+	expect(app:state("calls")).to_contain("queue_finish:s2:q3:commit:" .. QUEUED .. tail .. ":files=")
+	expect(app:tree("#pills-picks")).to_contain("1 group to pick")
+	-- Another option of a group and the group left, picked while it is edited.
+	edit_queued(app)
+	pick(app, "A1")
+	pick(app, "C2")
+	expect(app:has("#pills-picks")).to_be(false)
+	app:click('role:button "Save to queue"')
+	settle(app)
+	expect(app:state("calls")).to_contain('queue_finish:s2:q3:commit:A1 B2 + header C2\n\nĐã chọn trong "Khung app":\nA = A1 (Bo góc thường)\nB = B2 (Không viền)\nC = C2 (Cùng tông)' .. tail .. ":files=")
+	expect(app:has("#pills-picks")).to_be(false)
+	-- Cancelled, the row is as it was and its picks still sent.
+	edit_queued(app)
+	expect(draft(app)).to_contain(token("A1"))
+	expect(last_run(app, FRAME)).to_contain('"locked":[]')
+	pick(app, "A2")
+	app:key("Escape")
+	settle(app)
+	expect(app:state("calls")).to_contain("queue_finish:s2:q3:cancel:")
+	expect(app:has("#pills-picks")).to_be(false)
+	expect(picked_any(app)).to_be(false)
 end)
 
 test("picks: the prompt carries the note then each group's pick and what's left; sent groups lock, the rest stay open", function()

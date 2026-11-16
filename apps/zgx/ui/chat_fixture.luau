@@ -841,16 +841,18 @@ stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
 	local s = table.clone(META[id] or {})
 	local q = table.clone(s.queue or {})
+	local words = "Queued words"
 	for i, row in q do
 		if row.id == item then
 			q[i] = { id = row.id, text = row.text, editing = true }
+			words = row.text
 		end
 	end
 	publish(id, { queue = q })
 	if item == "q2" then
 		return settled({ text = queued_words:peek(), attachments = QUEUED_FILES })
 	end
-	return settled({ text = "Queued words" })
+	return settled({ text = words })
 end
 stub.queue_finish = function(id: string, item: string, action: string, text: string?, attachments: { any }?): any
 	local files = ""
@@ -862,9 +864,33 @@ stub.queue_finish = function(id: string, item: string, action: string, text: str
 		files = `:files={table.concat(names, ",")}`
 	end
 	note(`queue_finish:{id}:{item}:{action}:{text or ""}{files}`)
-	publish(id, { queue = { { id = item, text = if action == "commit" then text else "Queued words" } } })
+	local was = "Queued words"
+	for _, row in (META[id] or {}).queue or {} do
+		if row.id == item then
+			was = row.text
+		end
+	end
+	publish(id, { queue = { { id = item, text = if action == "commit" then text else was } } })
 	return settled(nil)
 end
+ui.command {
+	id = "queue_said",
+	title = "A message of the test's words waits in the queue",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q3", text = queued_words:peek() } } })
+		end
+	end,
+}
+ui.command {
+	id = "queue_none",
+	title = "The queue empties",
+	run = function()
+		if opened then
+			publish(opened, { queue = {} })
+		end
+	end,
+}
 ui.command {
 	id = "queue_with_files",
 	title = "A message with files waits in the queue",

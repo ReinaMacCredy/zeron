@@ -66,6 +66,53 @@ function M.with_open(text: string, open: { { title: string, left: { Group } } })
 	return (if out ~= "" then out .. "\n\n" else "") .. table.concat(lines, "\n")
 end
 
+local function sent_card(par: string): (string?, { Pick })
+	local lines = string.split(par, "\n")
+	local card = string.match(lines[1], `^{M.PICKED_IN} "(.+)":$`)
+	local picks: { Pick } = {}
+	if not card then
+		return nil, picks
+	end
+	for i = 2, #lines do
+		local line = lines[i]
+		local free = string.match(line, "^%- (.*%S.*)$")
+		local group, code, label = string.match(line, "^(%S+) = (%S+) %((.*)%)$")
+		if free then
+			table.insert(picks, { code = free, label = free })
+		elseif group then
+			table.insert(picks, { group = group, code = code, label = label })
+		elseif not (i == #lines and #picks > 0 and string.sub(line, 1, #M.NOT_PICKED) == M.NOT_PICKED) then
+			return nil, picks
+		end
+	end
+	return if #picks > 0 then card else nil, picks
+end
+
+-- A prompt as `with_picks` and `with_open` left it (zeron_proto `extract_picks`): its words, each page's picks, the blocks after them.
+function M.split(text: string): (string, { { card: string, picks: { Pick } } }, string)
+	local pars = string.split(text, "\n\n")
+	local cards = {}
+	local from, to = 0, 0
+	for i, par in pars do
+		local card, picks = sent_card(par)
+		if card then
+			from = if from == 0 then i else from
+			to = i
+			table.insert(cards, { card = card, picks = picks })
+		elseif from > 0 then
+			break
+		end
+	end
+	if from == 0 then
+		return text, cards, ""
+	end
+	local after = to + 1
+	if pars[after] and string.split(pars[after], "\n")[1] == M.OPEN_PAGES then
+		after += 1
+	end
+	return table.concat(pars, "\n\n", 1, from - 1), cards, table.concat(pars, "\n\n", after)
+end
+
 function M.cards(items: { any }): { Card }
 	local order: { string } = {}
 	local by: { [string]: { any } } = {}
