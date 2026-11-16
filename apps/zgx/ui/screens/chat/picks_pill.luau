@@ -48,8 +48,7 @@ local function option_row(chat: string, e: any, g: any, o: any, close: () -> ())
 				table.insert(groups, { code = x.code, name = x.name })
 			end
 			Pages.place(chat, e.card, e.title, { group = g.code, code = o.code, label = o.label, groups = groups }, Pages.sent_of(Pages.with_queue(chat, store.messages:peek()), e.title, e.message))
-			local _, left = Pages.waiting(chat, store.messages:peek())
-			if left == 0 then
+			if not Pages.waiting(chat, store.messages:peek()) then
 				close()
 			end
 		end,
@@ -152,7 +151,7 @@ function M.Pill(props: { open: any, width: () -> number, chat: () -> string? }):
 		class = "pills-pill",
 		label = function(): string
 			local w = waiting:get()
-			return if w then locale.s("ds.html_picks.pill", { title = w.title, n = w.left }) else ""
+			return if not w then "" elseif w.left == 0 then locale.s("ds.html_picks.pill_edit", { title = w.title }) else locale.s("ds.html_picks.pill", { title = w.title, n = w.left })
 		end,
 		active = function(): boolean
 			return props.open:get()
@@ -177,7 +176,7 @@ function M.Pill(props: { open: any, width: () -> number, chat: () -> string? }):
 		end, id = "pills-picks-title", literal = true, shrink = 1, min_w = 0, truncate = true, color = "$text.primary" },
 		ui.text { function(): string
 			local w = waiting:get()
-			return if w then "· " .. locale.s("ds.html_picks.left", { n = w.left }) else ""
+			return if not w then "" elseif w.left == 0 then "· " .. locale.s("ds.html_picks.left_edit") else "· " .. locale.s("ds.html_picks.left", { n = w.left })
 		end, id = "pills-picks-count", shrink = 0, wrap = false, color = "$text.tertiary" },
 		ui.button {
 			id = "pills-picks-close",

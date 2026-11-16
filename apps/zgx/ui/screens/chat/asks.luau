@@ -26,12 +26,6 @@ local Pages = require("@app/screens/chat/pages")
 
 local M = {}
 
--- What follows the picks' block in a queued message whose picks are chips while it's edited, by message.
-local AFTER_PICKS = ui.shared("chat.queue.after_picks", {} :: { [string]: string })
-
-local function after_picks(item: string, tail: string?)
-	AFTER_PICKS:set_key({ item }, tail)
-end
 
 -- A queued message edited in a chat's composer, by whichever composer shows
 -- that chat: `text` its draft, `editing` which message and the draft it set
@@ -78,7 +72,7 @@ function M.queue_edits(e: Edits): { [string]: any }
 			return
 		end
 		local words = if e.refs then references.encode(e.refs(), e.text:peek()) else e.text:peek()
-		local tail = AFTER_PICKS:peek()[now.item]
+		local tail = Pages.editing:peek()[now.item]
 		if tail and e.cargo then
 			local chosen = {}
 			for _, it in e.cargo() do
@@ -91,7 +85,7 @@ function M.queue_edits(e: Edits): { [string]: any }
 				words = if words == "" then tail else `{words}\n\n{tail}`
 			end
 		end
-		after_picks(now.item, nil)
+		Pages.editing:set_key({ now.item }, nil)
 		-- The files it carries now: its chips, as edited.
 		local files = if e.cargo then Carried.pack(e.cargo(), "", "").attachments else nil
 		ui.batch(function()
@@ -123,7 +117,7 @@ function M.queue_edits(e: Edits): { [string]: any }
 					if picked then
 						text = picked.text
 						table.move(picked.cargo, 1, #picked.cargo, #files + 1, files)
-						after_picks(item, tail)
+						Pages.editing:set_key({ item }, tail)
 					end
 					e.text:set(if e.refs then references.decode(e.refs(), text) else text)
 					if e.set_cargo then

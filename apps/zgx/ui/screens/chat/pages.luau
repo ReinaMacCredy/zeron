@@ -13,7 +13,10 @@ local queued = require("@app/screens/chat/queued")
 
 local M = {}
 
--- A message waiting in the chat's queue has sent its picks, until it is edited (`except`: the one being taken to edit) or leaves the queue.
+-- Queued messages whose picks are chips in the draft they are edited in, each with what followed its picks' block.
+M.editing = ui.shared("chat.picks.editing", {} :: { [string]: string })
+
+-- A message waiting in the chat's queue has sent its picks, until they are chips again in an edit of it (`except`: the one being taken to edit) or it leaves the queue.
 function M.with_queue(chat: string?, messages: { any }, except: string?): { any }
 	local s = store.session:get()
 	if not chat or not s or s.id ~= chat then
@@ -26,7 +29,7 @@ function M.with_queue(chat: string?, messages: { any }, except: string?): { any 
 	end
 	local out: { any }? = nil
 	local function add(r: any)
-		if seen[r.id] or r.editing or r.id == except then
+		if seen[r.id] or M.editing:get()[r.id] or r.id == except then
 			return
 		end
 		seen[r.id] = true
@@ -289,12 +292,29 @@ function M.waiting(chat: string?, messages: { any }): (any?, number)
 	if not chat then
 		return nil, 0
 	end
-	local list = left_of(chat, messages, shared.cargo_of(chat))
+	local picked = shared.cargo_of(chat)
+	local list = left_of(chat, messages, picked)
 	local last = list[#list]
-	if not last then
-		return nil, 0
+	if last then
+		return last.page, #last.left
 	end
-	return last.page, #last.left
+	-- Nothing left to pick, in a queued message's edit: its page still, to change a pick on.
+	local s = store.session:get()
+	local edited = false
+	for _, r in (if s and s.id == chat then s.queue else nil) or {} do
+		edited = edited or M.editing:get()[r.id] ~= nil
+	end
+	local found: any = nil
+	if edited then
+		for _, e in M.shown:get()[chat] or {} do
+			for _, it in picked do
+				if it.kind == "pick" and it.card == e.card then
+					found = e
+				end
+			end
+		end
+	end
+	return found, 0
 end
 
 -- (A page this message picks on says what it left in its own block.)

@@ -1340,6 +1340,8 @@ return {
 	["ds.html_picks.left"] = "{n, plural, one {# group to pick} other {# groups to pick}}",
 	["ds.html_picks.sent"] = "Picked options",
 	["ds.html_picks.close_page"] = "Close page",
+	["ds.html_picks.pill_edit"] = "{title} · change picks",
+	["ds.html_picks.left_edit"] = "change picks",
 	["ds.html_card.closed"] = "Closed",
 	["ds.html_card.count_sent"] = "Sent",
 	["ds.html_card.count_free"] = "{n} chosen",

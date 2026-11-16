@@ -1614,7 +1614,9 @@
       "pill": "{title} · {n, plural, one {# group to pick} other {# groups to pick}}",
       "left": "{n, plural, one {# group to pick} other {# groups to pick}}",
       "sent": "Picked options",
-      "close_page": "Close page"
+      "close_page": "Close page",
+      "pill_edit": "{title} · change picks",
+      "left_edit": "change picks"
     },
     "html_card": {
       "closed": "Closed",

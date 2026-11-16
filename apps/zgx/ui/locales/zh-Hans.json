@@ -1614,7 +1614,9 @@
       "pill": "{title} · {n} 组待选",
       "left": "{n} 组待选",
       "sent": "已选选项",
-      "close_page": "关闭页面"
+      "close_page": "关闭页面",
+      "pill_edit": "{title} · 更改选择",
+      "left_edit": "更改选择"
     },
     "html_card": {
       "closed": "已关闭",
