@@ -415,7 +415,7 @@ local function head_gap(): number
 	return if type(v) == "number" then v else 12
 end
 local MISSION = { same_agents = false, approve = true, size = "medium" }
-local SIZES = { { value = "small", n = 5 }, { value = "medium", n = 10 }, { value = "large", n = 50 }, { value = "unlimited" } }
+local SIZES = { { value = "small", n = 5, ink = "$success" }, { value = "medium", n = 10, ink = "$info" }, { value = "large", n = 50, ink = "$warning" }, { value = "unlimited", ink = "$danger" } }
 local SIZE_KEYS = "alt+tab"
 local OPTIONS, OPTION_H, SEND_LABEL_PAD = 32, 24, 7
 local MISSION_EASE = "cubicBezier(.2,.8,.2,1)"
@@ -2317,6 +2317,14 @@ return ui.component(function(props: Props): Node
 	local function size_word(v: string): string
 		return locale.s(`ds.composer.mission.size_{v}`)
 	end
+	local function size_ink(): string
+		for _, s in SIZES do
+			if s.value == size_now() then
+				return s.ink
+			end
+		end
+		return "$text.primary"
+	end
 	local size_pick = ui.use_state(size_now())
 	ui.effect(function()
 		size_pick:set(size_now())
@@ -2327,6 +2335,7 @@ return ui.component(function(props: Props): Node
 			table.insert(items, {
 				value = s.value,
 				label = size_word(s.value),
+				ink = s.ink,
 				tag = if s.n then locale.s("ds.composer.mission.size_steps", { n = s.n }) else locale.s("ds.composer.mission.size_no_limit"),
 			})
 		end
@@ -2386,7 +2395,7 @@ return ui.component(function(props: Props): Node
 					ui.text { locale.t("ds.composer.mission.size"), shrink = 0 },
 					ui.text { function(): string
 						return size_word(size_now())
-					end, color = "$text.primary", truncate = true, min_w = 0 },
+					end, color = size_ink, truncate = true, min_w = 0 },
 					Kbd { keys = SIZE_KEYS, look = "plain", tone = "quiet" },
 				}
 			end,

@@ -93,6 +93,7 @@ local function set_default(key: string, value: any)
 	prefs.mission_defaults:set_key({ key }, value)
 end
 local STEPS = { small = 5, medium = 10, large = 50 }
+local SIZE_INK = { small = "$success", medium = "$info", large = "$warning", unlimited = "$danger" }
 M.ZERON_ROWS = {
 	{
 		id = "mission.size",
@@ -101,6 +102,9 @@ M.ZERON_ROWS = {
 		options = { "small", "medium", "large", "unlimited" },
 		option_label = function(o: string): string
 			return ui.t(`ds.composer.mission.size_{o}`):get()
+		end,
+		option_ink = function(o: string): string?
+			return SIZE_INK[o]
 		end,
 		option_detail = function(o: string): string
 			local n = STEPS[o]
@@ -334,7 +338,7 @@ local function line(r: any, on: boolean, q: string, on_click: () -> (), on_value
 			gap = g(6),
 			items = "center",
 			min_w = 0,
-			highlight(r.shown or r.value, q, {}),
+			highlight(r.shown or r.value, q, { color = r.ink }),
 			if #r.options > 2 and r.writable then ui.text { "›", color = "$text.tertiary", wrap = false } else nil,
 		}
 	end
@@ -435,7 +439,7 @@ local function options_list(r: any, current: string, hot: number, on_pick: (i: n
 				border_color = if cur then "$accent" else "$text.secondary",
 				bg = if cur then "$accent" else nil,
 			},
-			ui.text { if r.option_label then r.option_label(o) else o, wrap = false },
+			ui.text { if r.option_label then r.option_label(o) else o, color = if r.option_ink then r.option_ink(o) else nil, wrap = false },
 			if r.option_detail then ui.text { r.option_detail(o), color = "$text.tertiary", wrap = false } else nil,
 		})
 	end
@@ -501,6 +505,7 @@ function M.Panel(props: Props): Node
 				label = ui.t(z.label):get(),
 				value = v,
 				shown = if z.option_label then z.option_label(v) else v,
+				ink = if z.option_ink then z.option_ink(v) else nil,
 				options = z.options,
 				kind = z.kind,
 				writable = true,

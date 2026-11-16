@@ -1376,7 +1376,7 @@ return ui.component(function(props: Props): Node
 								elseif item.hint then named(item, function(): boolean
 									return hi:get() == item.value
 								end)
-								else text(item.label),
+								else text(item.label, item.ink),
 							if props.row_note
 								then (function(): Node
 									local note = (props.row_note :: (Item) -> string?)(item)
