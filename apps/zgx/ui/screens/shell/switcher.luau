@@ -1,12 +1,11 @@
 -- crates/ui shell/switcher.rs.
 
 local ds = require("@ds")
-local Glass = require("@ds/glass")
 local SessionRow = require("@ds/session_row")
+local motion = require("@ds/motion")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local view = require("@app/screens/shell/view")
-local art = require("@app/screens/shell/art")
 local tabs = require("@app/screens/shell/session_tabs")
 local chat_shared = require("@app/screens/chat/shared")
 local refocus = require("@app/screens/shell/refocus")
@@ -16,9 +15,12 @@ local boundary = require("@app/screens/shell/boundary")
 
 local M = {}
 
-local CARD_W, THUMB_H, THUMB_PX = 220, 140, 440
-local CARD_OUTER = CARD_W + 2 * 8 + 2
-local CARD_GAP, PANEL_PAD = 6, 10
+local TILE_W, TILE_H, THUMB_PX = 166, 108, 332
+local TILE_GAP, RIM, TITLE_GAP, TITLE_H = 24, 8, 10, 16
+local ROW_H = TILE_H + TITLE_GAP + TITLE_H + 2 * RIM
+local PAGE, BAND_H = 5, 430
+local ARRIVE = { duration = 180, ease = "cubicBezier(.5,1,.89,1)" }
+local SLIDE = { duration = 60, ease = "cubicBezier(.33,1,.68,1)" }
 local PICTURES = 40
 -- (A chat left sooner than this has hardly drawn: no picture, and none of its cost when
 -- going through them fast.)
@@ -27,7 +29,20 @@ local SETTLED_MS = 300
 -- has it.)
 local CARD_LINGER_MS = 100
 -- (A quick press goes to the chat before with no cards: they come up once Control has been held this long, or at a second press.)
-local HOLD_MS = 200
+local HOLD_MS = 120
+
+ui.theme.tokens {
+	zeron = {
+		switcher = {
+			plate = "alpha({text.primary}, 0.16)",
+			plate_edge = "alpha({text.primary}, 0.2)",
+			edge = "alpha({text.primary}, 0.1)",
+			chip = "{zeron.menu.solid}",
+			veil = "alpha({zeron.window}, 0.3)",
+			shadow = "0 4 14 0 #00000038",
+		},
+	},
+}
 
 M.window = ui.persist("shell_switcher_window", "all")
 M.limit = ui.persist("shell_switcher_limit", 0)
@@ -312,186 +327,325 @@ function M.step(by: number): boolean
 	return true
 end
 
-local STATE_WORDS: { [string]: string } = {
-	working = "shell.switcher.working",
-	connecting = "shell.switcher.working",
-	input = "shell.switcher.asking",
-	approval = "shell.switcher.asking",
-	failed = "shell.switcher.failed",
-	limited = "shell.switcher.failed",
-	done = "shell.switcher.done",
-}
+local page = ui.computed(function(): number
+	return (hi:get() - 1) // PAGE
+end)
+local page_list = ui.computed(function(): { string }
+	local list = card_list:get()
+	local first = page:get() * PAGE
+	return table.move(list, first + 1, math.min(first + PAGE, #list), 1, {})
+end)
 
-local function target_of(c: any): string
-	local now = sessions.now:peek()
-	local folder = "~"
-	for _, p in now.projects do
-		if p.id == c.project then
-			folder = p.name
-		end
-	end
-	for _, d in now.devices do
-		if d.id == c.device then
-			return `{folder} @ {d.name}`
-		end
-	end
-	return folder
+local function window_size(): (number, number)
+	local size = (ui.window.size :: any):get()
+	return math.max(1, size.width or 0), math.max(1, size.height or 0)
 end
 
-local function Card(id: string, at: number): Node
+local function row_w(): number
+	local n = #page_list:get()
+	return n * TILE_W + math.max(n - 1, 0) * TILE_GAP + 2 * RIM
+end
+
+local function Tile(id: string): Node
 	local draft = tabs.draft_in(id)
 	local c = if draft then nil else chat_row(id)
 	local function lit(): boolean
-		return hi:get() == at
+		return card_list:get()[hi:get()] == id
+	end
+	local function pick()
+		local at = table.find(card_list:peek(), id)
+		if at and hi:peek() ~= at then
+			hi:set(at)
+		end
 	end
 	local picture = pictures.src(id)
 	local text = if draft then chat_shared.draft_of(draft).text elseif c then c.preview else nil
-	local visual: Node = if picture
-		then ui.image {
-			src = picture,
-			w = CARD_W,
-			h = THUMB_H,
-			fit = "cover",
-			rounded = ui.raw(8, "Zeron's picture's corner"),
-			border = 1,
-			border_color = "$border",
-		}
-		else ui.div {
-			w = CARD_W,
-			h = THUMB_H,
-			overflow = "hidden",
-			rounded = ui.raw(8, "Zeron's picture's corner"),
-			border = 1,
-			border_color = "$border",
-			bg = "$hover",
-			p = ui.raw(10, "Zeron's text's inset"),
-			color = "$text.secondary",
-			ui.text { if text and text ~= "" then text else ui.t("shell.switcher.no_messages"), wrap = true, text_size = "$font.size.xs" },
-		}
 	local title: any = if c then c.title else ui.t("shell.tabs.new_session")
-	local word = if c and c.status then STATE_WORDS[c.status] else nil
 	return ui.column {
 		id = `switcher-card-{id}`,
 		role = "button",
 		label = title,
 		selected = lit,
 		shrink = 0,
-		wrap = false,
-		p = ui.raw(8, "Zeron's card's inset"),
-		rounded = ui.raw(12, "Zeron's card's corner"),
+		w = TILE_W,
+		gap = ui.raw(TITLE_GAP, "Yab's gap under the picture"),
 		cursor = "pointer",
-		border = 1,
-		border_color = function(): string
-			return if lit() then "$border" else "#00000000"
-		end,
-		bg = function(): string
-			return if lit() then "$zeron.selected.bg" else "#00000000"
-		end,
 		-- (Moved over it, not its coming up under a pointer at rest, which would be where a quick press lands.)
-		on_pointer_move = function()
-			if hi:peek() ~= at then
-				hi:set(at)
-			end
-		end,
+		on_pointer_move = pick,
 		on_click = function()
-			hi:set(at)
+			pick()
 			M.commit()
 		end,
-		visual,
-		ui.row {
-			mt = ui.raw(8, "Zeron's gap under the picture"),
-			w = CARD_W,
-			gap = ui.raw(6, "Zeron's gap in a card's foot"),
-			items = "center",
-			if c
-				then SessionRow.mark(function(): any
-					return c
-				end, function(): boolean
-					return true
-				end)
-				else ui.div { color = "$warning", ds.Icon { name = "pen", size = 13 } },
-			ds.FadeText { title, grow = 1, min_w = 0, text_size = "$font.size.sm", weight = "$font.weight.medium" },
+		ui.div {
+			relative = true,
+			w = TILE_W,
+			h = TILE_H,
+			overflow = "hidden",
+			rounded = ui.raw(13, "Yab's tile corner"),
+			bg = "$zeron.window",
+			border = 1,
+			border_over = true,
+			border_color = "$zeron.switcher.edge",
+			shadow = "$zeron.switcher.shadow",
+			if picture
+				then ui.image { src = picture, w = TILE_W, h = TILE_H, fit = "cover", object_position = { 0.5, 0 } }
+				else ui.div {
+					w_full = true,
+					h_full = true,
+					p = ui.raw(10, "Zeron's text's inset"),
+					pb = ui.raw(46, "clear of the mark plate"),
+					overflow = "hidden",
+					color = "$text.secondary",
+					ui.text { if text and text ~= "" then text else ui.t("shell.switcher.no_messages"), wrap = true, text_size = "$font.size.xs" },
+				},
+			ui.div {
+				absolute = true,
+				left = ui.raw(8, "Yab's mark's inset"),
+				bottom = ui.raw(8, "Yab's mark's inset"),
+				w = ui.raw(30, "Yab's mark plate"),
+				h = ui.raw(30, "Yab's mark plate"),
+				rounded = ui.raw(8, "Yab's mark plate's corner"),
+				bg = "$zeron.switcher.chip",
+				border = 1,
+				border_color = "$zeron.switcher.edge",
+				items = "center",
+				justify = "center",
+				if c
+					then SessionRow.mark(function(): any
+						return c
+					end, function(): boolean
+						return true
+					end)
+					else ui.div { color = "$warning", ds.Icon { name = "pen", size = 13 } },
+			},
 		},
 		ui.row {
-			w = CARD_W,
-			gap = ui.raw(6, "Zeron's gap in a card's foot"),
+			w = TILE_W,
+			h = ui.raw(TITLE_H, "Yab's title line"),
+			px = ui.raw(8, "Yab's title inset, level with the mark"),
 			items = "center",
-			color = "$text.tertiary",
-			ds.FadeText { if c then target_of(c) else "~", grow = 1, min_w = 0, text_size = ui.raw(11, "Zeron's card's foot") },
-			if word
-				then ui.text {
-					ui.t(word),
-					shrink = 0,
-					text_size = ui.raw(11, "Zeron's card's foot"),
-					color = `$zeron.status.{c.status}`,
-				}
-				else nil,
+			color = function(): string
+				return if lit() then "$text.primary" else "$text.tertiary"
+			end,
+			ds.FadeText { title, grow = 1, min_w = 0, text_size = ui.raw(13, "Yab's tile title") },
 		},
 	}
 end
 
-function M.Overlay(): Node
-	local function width(): number
-		local n = #(cards:get() or {})
-		local most = math.max(art.window:get().w - 48, CARD_OUTER + 2 * PANEL_PAD)
-		local across = math.max(math.floor((most - 2 * PANEL_PAD + CARD_GAP) / (CARD_OUTER + CARD_GAP)), 1)
-		local fit = math.clamp(n, 1, across)
-		return fit * CARD_OUTER + (fit - 1) * CARD_GAP + 2 * PANEL_PAD + 2
+local function Row(): Node
+	local function fit(): number
+		local w = window_size()
+		return math.min(1, (w - 48) / row_w())
 	end
-	return ui.modal {
-		open = function(): boolean
-			return cards:get() ~= nil and up:get()
+	return ui.div {
+		absolute = true,
+		left = function(): number
+			local w = window_size()
+			return (w - row_w()) / 2
 		end,
-		on_close = function()
-			M.close()
+		top = function(): number
+			local _, h = window_size()
+			return (h - ROW_H) / 2
 		end,
-		label = ui.t("shell.switcher.label"),
-		w = width,
-		p = 0,
-		gap = 0,
-		bg = "#00000000",
-		rounded = ui.raw(16, "Zeron's switcher's corner"),
-		build = function()
-			local panel: { [any]: any } = {
-				id = "session-switcher",
-				w_full = true,
-				rounded = ui.raw(16, "Zeron's switcher's corner"),
-				autofocus = true,
-				focusable = true,
-				focus = { outline = 0, border = 0 },
-				-- (Tab moves on, not to the next control, and no command runs under it.)
-				capture_keys = true,
-				on_key = function(e: any): boolean?
-					if e.key == "Tab" then
-						M.step(if e.shift then -1 else 1)
-					elseif e.key == "Escape" then
-						M.close()
-					elseif e.key == "Enter" then
-						M.commit()
-					end
-					return true
-				end,
-				max_h = function(): number
-					return math.max(art.window:get().h - 48, 200)
-				end,
-				ui.scroll {
-					w_full = true,
-					ui.row {
-						w_full = true,
-						wrap = true,
-						p = ui.raw(PANEL_PAD, "Zeron's switcher's inset"),
-						gap = ui.raw(CARD_GAP, "Zeron's gap between cards"),
-						ui.each(card_list, function(id: string, at: number): Node
-							return Card(id, at)
-						end, { key = function(id: string): string
-							return id
-						end, direction = "row", wrap = true, gap = ui.raw(CARD_GAP, "Zeron's gap between cards") }),
-					},
-				},
+		w = row_w,
+		h = ui.raw(ROW_H, "Yab's row: a tile, its title and the plate's rim"),
+		scale = fit,
+		relative = true,
+		-- (Built again on a page flip, so the plate lands there at once rather than sliding.)
+		ui.presence(function(): number
+			return page:get()
+		end, function(): Node
+			return ui.div {
+				absolute = true,
+				left = 0,
+				top = 0,
+				w = ui.raw(TILE_W + 2 * RIM, "Yab's plate: the tile and its rim"),
+				h = ui.raw(TILE_H + 2 * RIM, "Yab's plate: the tile and its rim"),
+				rounded = ui.raw(21, "Yab's plate's corner, concentric with the tile's"),
+				bg = "$zeron.switcher.plate",
+				border = 1,
+				border_color = "$zeron.switcher.plate_edge",
+				x = motion.tween(
+					ui.computed(function(): number
+						return (hi:get() - 1) % PAGE * (TILE_W + TILE_GAP)
+					end),
+					SLIDE
+				),
 			}
-			Glass.style(panel, "menu")
-			return ui.column(panel)
+		end),
+		ui.row {
+			p = ui.raw(RIM, "Yab's plate's rim"),
+			gap = ui.raw(TILE_GAP, "Yab's gap between tiles"),
+			items = "start",
+			ui.each(page_list, function(id: string): Node
+				return Tile(id)
+			end, { key = function(id: string): string
+				return id
+			end, direction = "row", gap = ui.raw(TILE_GAP, "Yab's gap between tiles") }),
+		},
+	}
+end
+
+local function showing(): boolean
+	return cards:get() ~= nil and up:get()
+end
+local arrive = ui.state("shell_switcher_arrive", 0)
+local arriving: any = nil
+local was_showing = false
+ui.effect(function()
+	local on = showing()
+	if on == was_showing then
+		return
+	end
+	was_showing = on
+	if arriving then
+		arriving:cancel()
+		arriving = nil
+	end
+	arrive:set(0)
+	if on then
+		arriving = anime.animate(arrive, {
+			value = 1,
+			duration = if motion.reduced_now() then motion.FADE else ARRIVE.duration,
+			ease = ARRIVE.ease,
+		})
+	end
+end)
+local function shown(): number
+	return math.clamp(arrive:get(), 0, 1)
+end
+
+-- (zgx masks a fill but not a backdrop blur: the band's blur softens in steps, as Yab's stacked blurs do.)
+local function Band(h: number, blur: any): Node
+	return ui.div {
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = function(): number
+			local _, wh = window_size()
+			return (wh - h) / 2
 		end,
+		h = ui.raw(h, "a step of Yab's blurred band about the row"),
+		bg = ui.raw("#00000001", "a backdrop blur paints only over a fill"),
+		backdrop_blur = blur,
+	}
+end
+
+function M.Overlay(): Node
+	return ui.div {
+		theme = { backdrop = "#00000000" },
+		ui.modal {
+			open = showing,
+			on_close = function()
+				M.close()
+			end,
+			label = ui.t("shell.switcher.label"),
+			placement = { x = "start", y = "start", inset = 0 },
+			w = function(): number
+				return (window_size())
+			end,
+			h = function(): number
+				local _, h = window_size()
+				return h
+			end,
+			max_w = function(): number
+				return (window_size())
+			end,
+			max_h = function(): number
+				local _, h = window_size()
+				return h
+			end,
+			p = 0,
+			gap = 0,
+			rounded = 0,
+			bg = "#00000000",
+			border = 0,
+			shadow = "$zeron.dialog.stage",
+			build = function()
+				return ui.div {
+					id = "session-switcher",
+					w_full = true,
+					h_full = true,
+					relative = true,
+					autofocus = true,
+					focusable = true,
+					focus = { outline = 0, border = 0 },
+					-- (Tab moves on, not to the next control, and no command runs under it.)
+					capture_keys = true,
+					on_key = function(e: any): boolean?
+						if e.key == "Tab" then
+							M.step(if e.shift then -1 else 1)
+						elseif e.key == "ArrowLeft" or e.key == "ArrowUp" then
+							M.step(-1)
+						elseif e.key == "ArrowRight" or e.key == "ArrowDown" then
+							M.step(1)
+						elseif e.key == "Escape" then
+							M.close()
+						elseif e.key == "Enter" then
+							M.commit()
+						end
+						return true
+					end,
+					ui.div {
+						absolute = true,
+						left = 0,
+						top = 0,
+						right = 0,
+						bottom = 0,
+						opacity = shown,
+						aria_hidden = true,
+						on_click = function()
+							M.close()
+						end,
+						ui.div {
+							absolute = true,
+							left = 0,
+							top = 0,
+							right = 0,
+							bottom = 0,
+							bg = ui.raw("#00000001", "a backdrop blur paints only over a fill"),
+							backdrop_blur = ui.raw(1.3, "Yab's blur over the whole window"),
+						},
+						Band(BAND_H, ui.raw(3.3, "Yab's blur at the band's edge")),
+						Band(340, ui.raw(4.9, "Yab's blur nearer the row")),
+						Band(240, ui.raw(6.7, "Yab's blur about the row")),
+						ui.div {
+							absolute = true,
+							left = 0,
+							right = 0,
+							top = function(): number
+								local _, h = window_size()
+								return (h - BAND_H) / 2
+							end,
+							h = ui.raw(BAND_H, "Yab's veil about the row"),
+							bg = "$zeron.switcher.veil",
+							mask_gradient = {
+								angle = 180,
+								stops = {
+									{ 0, "#00000000" },
+									{ 0.32, "#000000ff" },
+									{ 0.68, "#000000ff" },
+									{ 1, "#00000000" },
+								},
+							},
+						},
+					},
+					ui.div {
+						absolute = true,
+						left = 0,
+						top = 0,
+						right = 0,
+						bottom = 0,
+						opacity = shown,
+						scale = function(): number
+							return if motion.reduced() then 1 else 0.95 + 0.05 * arrive:get()
+						end,
+						pointer_events = "none",
+						Row(),
+					},
+				}
+			end,
+		},
 	}
 end
 
