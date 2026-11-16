@@ -36,6 +36,12 @@ JSON line each way) instead of the gpui driver's:
 - Replies are the command's text; `{"json":true}` gives its data instead. A snapshot is copied to
   `~/.zeron/run/shots`, or to `--path`, and renders even on a locked Mac.
 
+A plugin's consent sheet is a window of its own, and only a debug build serves its devtools. To
+allow a plugin in a Dev, copy its folder into `target/zgx-dev<N>/data/plugins` and launch with
+`ZERON_DEV_PROFILE=debug ZERON_ZGX_REVIEW=<plugin id>`: the sheet opens at launch and takes the
+devtools (`click '{"node":"#consent-allow"}'`), and the main window serves them again once the
+sheet closes. A release Dev, and every packaged app, ignores `ZERON_ZGX_REVIEW`.
+
 ```sh
 zeron app launch --zgx --mock
 zeron app tree --target "Beta Dev 61"

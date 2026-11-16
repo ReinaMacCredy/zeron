@@ -20,7 +20,13 @@ CLEAN_ENV=(
 )
 
 (cd "$ROOT" && scripts/gc-target.sh && cargo build -p zeron --bin zeron-engine)
-(cd "$ROOT/apps/zgx" && env -u CARGO_TARGET_DIR "${CLEAN_ENV[@]}" ZIG="$ZIG_BIN" cargo build --release)
+# ZERON_DEV_PROFILE=debug: the build that reads the development switches
+# (apps/zgx/src/dev.rs), as ZERON_ZGX_REVIEW=<plugin id> for its consent sheet.
+PROFILE="${ZERON_DEV_PROFILE:-release}"
+[[ "$PROFILE" == release || "$PROFILE" == debug ]] || { echo "ZERON_DEV_PROFILE must be release or debug" >&2; exit 2; }
+BUILD=(cargo build)
+[[ "$PROFILE" == debug ]] || BUILD+=(--release)
+(cd "$ROOT/apps/zgx" && env -u CARGO_TARGET_DIR "${CLEAN_ENV[@]}" ZIG="$ZIG_BIN" "${BUILD[@]}")
 
 mkdir -p "$DEV_ROOT/data" "$DEV_ROOT/home"
 cp -c "$TARGET/debug/zeron-engine" "$DEV_ROOT/zeron-engine"
@@ -43,4 +49,4 @@ exec env "${CLEAN_ENV[@]}" \
   ZERON_ZGX_EDGE=http://127.0.0.1:9 \
   ZERON_ZGX_NO_BROWSER=1 \
   ${MOCK[@]+"${MOCK[@]}"} \
-  "$ROOT/apps/zgx/target/release/zeron-zgx" "$@" --inspect
+  "$ROOT/apps/zgx/target/$PROFILE/zeron-zgx" "$@" --inspect

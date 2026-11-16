@@ -1223,7 +1223,8 @@ impl Bridge {
         }
         self.state.set("ready");
         // `ZERON_ZGX_REVIEW=<id>` (development): that plugin's sheet at
-        // launch, its window serving devtools (run without --inspect).
+        // launch, its window serving devtools (the main window's, with
+        // --inspect, are served again as the sheet closes).
         if let Some(id) = crate::dev::switch("ZERON_ZGX_REVIEW").and_then(|v| v.into_string().ok())
             && !self.reviewed.replace(true)
         {

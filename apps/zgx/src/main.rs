@@ -1081,28 +1081,25 @@ fn serve_with(
             None => view,
         }
     }));
-    let devtools = if inspect {
-        let session = zgx_script::inspect::Session::new(
-            &cx.ui,
-            handle.clone(),
-            &host,
-            Some(cx.inspector.clone()),
-        );
-        let tasks = cx.tasks.clone();
-        match zgx_script::inspect::serve(session, entry, move |task| tasks.spawn(task)) {
-            Ok(server) => {
-                eprintln!("zeron-zgx: devtools for {entry} at {}", server.path().display());
-                let published = app_api::publish(server.path());
-                Some((server, published))
+    let devtools = inspect.then(|| {
+        let (ui, handle, host, inspector, tasks, entry) =
+            (cx.ui.downgrade(), handle.clone(), host.clone(), cx.inspector.clone(), cx.tasks.clone(), entry.to_owned());
+        Devtools::open(move || {
+            let session = zgx_script::inspect::Session::new(&ui.upgrade()?, handle.clone(), &host, Some(inspector.clone()));
+            let tasks = tasks.clone();
+            match zgx_script::inspect::serve(session, &entry, move |task| tasks.spawn(task)) {
+                Ok(server) => {
+                    eprintln!("zeron-zgx: devtools for {entry} at {}", server.path().display());
+                    let published = app_api::publish(server.path());
+                    Some((server, published))
+                }
+                Err(error) => {
+                    eprintln!("zeron-zgx: devtools: {error}");
+                    None
+                }
             }
-            Err(error) => {
-                eprintln!("zeron-zgx: devtools: {error}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+        })
+    });
     let commands = serve_commands(cx, &host, role);
     // Reload interface: every script evaluated again and the window's
     // interface mounted anew, as a save under ui/ does (state kept), on the
@@ -1153,12 +1150,56 @@ fn serve_with(
         reloading.borrow_mut().take();
         if let Some((host, devtools, commands, corner)) = keep.borrow_mut().take() {
             host.save();
-            drop(devtools);
+            if let Some(devtools) = devtools {
+                devtools.close();
+            }
             drop(commands);
             drop(corner);
         }
     });
     handle
+}
+
+type Served = (zgx_script::inspect::Server, Option<app_api::Published>);
+
+/// A window's devtools. A process has one devtools socket, so the window
+/// that served last holds it, and as that one closes the one before it
+/// serves again (a consent sheet opened over an inspected main window).
+struct Devtools {
+    serve: Box<dyn Fn() -> Option<Served>>,
+    held: RefCell<Option<Served>>,
+}
+
+thread_local! {
+    static DEVTOOLS: RefCell<Vec<Rc<Devtools>>> = const { RefCell::new(Vec::new()) };
+}
+
+impl Devtools {
+    fn open(serve: impl Fn() -> Option<Served> + 'static) -> Rc<Devtools> {
+        DEVTOOLS.with(|all| {
+            let mut all = all.borrow_mut();
+            // Dropped before the next serves: a server removes its socket's path as it goes.
+            if let Some(last) = all.last() {
+                last.held.borrow_mut().take();
+            }
+            let devtools = Rc::new(Devtools { held: RefCell::new(serve()), serve: Box::new(serve) });
+            all.push(devtools.clone());
+            devtools
+        })
+    }
+
+    fn close(self: Rc<Self>) {
+        DEVTOOLS.with(|all| {
+            let mut all = all.borrow_mut();
+            let last = all.last().is_some_and(|d| Rc::ptr_eq(d, &self));
+            all.retain(|d| !Rc::ptr_eq(d, &self));
+            self.held.borrow_mut().take();
+            if last && let Some(before) = all.last() {
+                let served = (before.serve)();
+                *before.held.borrow_mut() = served;
+            }
+        });
+    }
 }
 
 /// Whether a window at `bounds` fills its monitor's work area (the screen less
