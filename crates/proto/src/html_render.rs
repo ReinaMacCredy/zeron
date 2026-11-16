@@ -474,31 +474,33 @@ pub fn with_picks(words: &str, cards: &[(String, Vec<Pick>, Vec<PickGroup>)]) ->
 
 /// Only trailing blocks in exactly `with_picks`'s form read back, so typed text stays words.
 pub fn extract_picks(text: &str) -> (String, Vec<(String, Vec<Pick>)>) {
+    let (rest, blocks, _) = split_picks(text);
+    (rest.to_owned(), blocks.into_iter().filter_map(picks_of_block).collect())
+}
+
+/// A prompt's words, then its pick blocks and its Open pages block as written.
+pub fn split_picks(text: &str) -> (&str, Vec<&str>, Option<&str>) {
     let mut rest = text.trim_end();
+    let mut open = None;
     let (before, last) = rest.rsplit_once("\n\n").unwrap_or(("", rest));
     if is_open_pages_block(last) {
+        open = Some(last);
         rest = before.trim_end();
     }
-    let mut cards = Vec::new();
-    loop {
+    let mut blocks = Vec::new();
+    while !rest.is_empty() {
         let (before, block) = match rest.rfind("\n\n") {
             Some(at) => (&rest[..at], &rest[at + 2..]),
             None => ("", rest),
         };
-        let Some(card) = picks_of_block(block) else {
-            break;
-        };
-        cards.push(card);
-        rest = before;
-        if rest.is_empty() {
+        if picks_of_block(block).is_none() {
             break;
         }
+        blocks.push(block);
+        rest = before;
     }
-    if cards.is_empty() {
-        return (rest.to_owned(), cards);
-    }
-    cards.reverse();
-    (rest.trim_end().to_owned(), cards)
+    blocks.reverse();
+    (rest.trim_end(), blocks, open)
 }
 
 fn picks_of_block(block: &str) -> Option<(String, Vec<Pick>)> {

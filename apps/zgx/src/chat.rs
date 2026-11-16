@@ -4252,9 +4252,20 @@ struct SteerRow {
 type SteerAll = Vec<SteerRow>;
 
 fn whole_of(rows: &[SteerRow]) -> (String, Vec<String>) {
-    let texts: Vec<String> = rows.iter().map(|r| r.text.clone()).collect();
-    let words = if let [one] = texts.as_slice() { one.trim().to_owned() } else { numbered(&texts) };
+    let words = if let [one] = rows { one.text.trim().to_owned() } else { joined(rows) };
     (words, rows.iter().flat_map(|r| r.paths.clone()).collect())
+}
+
+/// Each row's picks after all the words, where the one message's readers look for them.
+fn joined(rows: &[SteerRow]) -> String {
+    let parts: Vec<_> = rows.iter().map(|r| zeron_proto::html_render::split_picks(&r.text)).collect();
+    let mut out = numbered(&parts.iter().map(|p| p.0.to_owned()).collect::<Vec<_>>());
+    let blocks = parts.iter().flat_map(|p| p.1.iter().copied());
+    for block in blocks.chain(parts.iter().rev().find_map(|p| p.2)) {
+        out.push_str("\n\n");
+        out.push_str(block);
+    }
+    out
 }
 
 fn numbered(texts: &[String]) -> String {
@@ -9296,6 +9307,20 @@ mod tests {
     #[test]
     fn rows_steered_as_one_are_numbered_blocks() {
         assert_eq!(numbered(&["  first \n".into(), "second".into()]), "1. first\n\n2. second");
+        let row = |text: &str| SteerRow { id: String::new(), text: text.into(), paths: Vec::new() };
+        let open = format!("{}\n\"Later\": C (Rail)", zeron_proto::html_render::OPEN_PAGES);
+        let whole = whole_of(&[
+            row(&format!("A2\n\nĐã chọn trong \"Frame\":\nA = A2 (Top)\nChưa chọn: B (Tabs)\n\n{open}")),
+            row("plain"),
+            row("B1\n\nĐã chọn trong \"Frame\":\nB = B1 (Edge)"),
+        ])
+        .0;
+        assert_eq!(
+            whole,
+            format!("1. A2\n\n2. plain\n\n3. B1\n\nĐã chọn trong \"Frame\":\nA = A2 (Top)\nChưa chọn: B (Tabs)\n\nĐã chọn trong \"Frame\":\nB = B1 (Edge)\n\n{open}")
+        );
+        let chips: Vec<String> = page_picks(&whole).1.iter().map(|c| c.field("code").map(text).unwrap_or_default()).collect();
+        assert_eq!(chips, ["A2", "B1"]);
     }
 
     #[test]
