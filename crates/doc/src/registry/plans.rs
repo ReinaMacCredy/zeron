@@ -1,5 +1,5 @@
 use super::task_steps::flagged_deleted;
-use super::tasks::{check_images, check_notes, check_step_count, invalid};
+use super::tasks::{check_images, check_notes, check_plan_size, check_step_count, invalid};
 use super::*;
 use zeron_proto::{ChatPlan, TaskStep, TaskStepPatch, pin_order_key_between};
 
@@ -114,7 +114,7 @@ impl RegistryDoc {
             .into_iter()
             .filter(|step| self.step_started(step))
             .count();
-        check_step_count(kept + steps.len())?;
+        check_plan_size(kept + steps.len(), plan.size)?;
         let mut plan_op = self.plan_op(chat_id, Some(plan))?;
         if pending && let Some(set) = plan_op.set.as_mut() {
             set.insert("planPending".into(), json!(true));
@@ -143,8 +143,12 @@ impl RegistryDoc {
         deletes: &[String],
         now: DateTime<Utc>,
     ) -> Result<(), DocError> {
-        let current = self.current_steps(chat_id, self.chat_plan(chat_id)?.as_ref());
-        check_step_count((current.len() + creates.len()).saturating_sub(deletes.len()))?;
+        let stored = self.chat_plan(chat_id)?;
+        let current = self.current_steps(chat_id, stored.as_ref());
+        check_step_count(
+            (current.len() + creates.len()).saturating_sub(deletes.len()),
+            plan.or(stored.as_ref()).and_then(|plan| plan.size),
+        )?;
         let mut batch: Vec<RowOp> = match plan {
             Some(plan) => vec![self.plan_op(chat_id, Some(plan))?],
             None => Vec::new(),
@@ -182,7 +186,7 @@ impl RegistryDoc {
                 "Only a step a closed plan never ran can join the current plan",
             ));
         }
-        check_step_count(self.current_steps(&chat_id, Some(&plan)).len() + 1)?;
+        check_step_count(self.current_steps(&chat_id, Some(&plan)).len() + 1, plan.size)?;
         let hlc = self.next_hlc();
         let key = pin_order_key_between(self.last_step_key(&chat_id).as_deref(), None, &hlc)
             .map_err(invalid)?;
@@ -247,6 +251,7 @@ impl RegistryDoc {
                 overview: text(&task, "plan").unwrap_or_default(),
                 plan_doc: flag(&task, "planDoc"),
                 same_agents: flag(&task, "sameAgents"),
+                size: None,
                 images: list(&task, "images"),
                 resources: list(&task, "resources"),
                 closed: Vec::new(),

@@ -1,5 +1,5 @@
 use super::*;
-use zeron_proto::{Task, TaskPatch, pin_order_key_between, valid_pin_order_key};
+use zeron_proto::{PlanSize, Task, TaskPatch, pin_order_key_between, valid_pin_order_key};
 
 pub const TASK_TITLE_MAX_CHARS: usize = 500;
 pub const TASK_NOTES_MAX_CHARS: usize = 10_000;
@@ -102,11 +102,27 @@ pub fn check_images(images: &[String]) -> Result<(), DocError> {
 
 pub const TASK_STEPS_MAX: usize = 50;
 
-pub(super) fn check_step_count(count: usize) -> Result<(), DocError> {
+pub(super) fn check_step_count(count: usize, size: Option<PlanSize>) -> Result<(), DocError> {
+    if size == Some(PlanSize::Unlimited) {
+        return Ok(());
+    }
     if count > TASK_STEPS_MAX {
         return Err(invalid("A plan holds up to 50 steps"));
     }
     Ok(())
+}
+
+pub(super) fn check_plan_size(count: usize, size: Option<PlanSize>) -> Result<(), DocError> {
+    if let Some(size) = size
+        && let Some(cap) = size.cap()
+        && count > cap
+    {
+        return Err(invalid(&format!(
+            "This mission is {}: a plan holds up to {cap} steps. Merge steps and write again.",
+            size.label()
+        )));
+    }
+    check_step_count(count, size)
 }
 
 pub const TASK_CONTEXT_MAX: usize = 5;

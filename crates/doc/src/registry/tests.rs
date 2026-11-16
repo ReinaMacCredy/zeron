@@ -3181,6 +3181,43 @@ fn an_oversize_plan_is_refused_on_its_chat_and_writes_nothing() {
     assert!(doc.steps_of("lead").is_empty());
     assert!(doc.set_chat_plan("lead", Some(&wide), true).is_err());
     assert!(!doc.chat("lead").unwrap().unwrap().plan_pending);
+
+    let sized = |size| zeron_proto::ChatPlan {
+        size,
+        ..Default::default()
+    };
+    let steps = |prefix: &str, n: usize| -> Vec<zeron_proto::TaskStep> {
+        (0..n)
+            .map(|i| step(&format!("{prefix}{i}"), "lead", "Step"))
+            .collect()
+    };
+    let small = sized(Some(zeron_proto::PlanSize::Small));
+    let err = doc
+        .write_plan("lead", &small, &steps("a", 6), false, ts(3_000))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("This mission is Small: a plan holds up to 5 steps. Merge steps and write again."),
+        "{err}"
+    );
+    assert!(doc.steps_of("lead").is_empty(), "the refused write keeps nothing");
+    doc.write_plan("lead", &small, &steps("b", 5), false, ts(3_000))
+        .unwrap();
+    doc.edit_plan("lead", None, &[], &steps("c", 3), &[], ts(3_000))
+        .expect("the person's edit is not held to the size");
+    assert_eq!(doc.steps_of("lead").len(), 8);
+
+    let err = doc
+        .write_plan("lead", &sized(None), &steps("d", 51), false, ts(3_000))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("up to 50 steps"), "a plan written before sizes keeps the ceiling: {err}");
+    let unlimited = sized(Some(zeron_proto::PlanSize::Unlimited));
+    doc.write_plan("lead", &unlimited, &steps("e", 51), false, ts(3_000))
+        .expect("an unlimited mission has no ceiling");
+    doc.edit_plan("lead", None, &[], &steps("f", 2), &[], ts(3_000))
+        .expect("nor does the person's edit of it");
+    assert_eq!(doc.steps_of("lead").len(), 53);
 }
 
 fn old_row(kind: &str, id: &str, fields: Value, ms: i64) -> RegistryRow {
@@ -3259,6 +3296,7 @@ fn the_mover_puts_an_old_plan_on_its_lead_chat_once_and_keeps_the_task_row() {
             overview: "Sync the app".into(),
             plan_doc: true,
             same_agents: true,
+            size: None,
             images: vec!["/tmp/a.png".into()],
             resources: vec!["port:5173".into()],
             closed: Vec::new(),
