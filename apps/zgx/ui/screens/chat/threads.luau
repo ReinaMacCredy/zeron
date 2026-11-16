@@ -10,6 +10,7 @@ local Glass = require("@ds/glass")
 local Transcript = require("@ds/transcript_threads")
 local locale = require("@ds/locale")
 local status = require("@ds/status")
+local motion = require("@ds/motion")
 local sessions = require("@account/sessions")
 local lanes = require("@app/screens/chat/lanes")
 local state = require("@app/screens/panel/state")
@@ -92,13 +93,57 @@ function M.card(chat: string?): any
 		return nil
 	end
 	local lines: { any } = {}
+	local by_step: { [string]: any } = {}
+	local by_thread: { [string]: string } = {}
 	for _, s in steps do
 		local r = s.row
 		if r then
-			table.insert(lines, { number = r.number or s.at, title = r.step_title or r.title, mark = r.mark, model = r.model, harness = r.harness })
+			local line = {
+				id = s.id,
+				number = r.number or s.at,
+				title = r.step_title or r.title,
+				mark = r.mark,
+				model = r.model,
+				harness = r.harness,
+				state = r.state,
+				chat = r.chat,
+				line = r.line,
+				attempt = r.attempt,
+				earlier = r.earlier,
+				background = r.background,
+				quiet_since = r.quiet_since,
+				activity = r.activity,
+				activity_at = r.activity_at,
+				turn = r.turn,
+			}
+			table.insert(lines, line)
+			by_step[s.id] = line
+			if r.chat then
+				by_thread[r.chat] = s.id
+			end
+			for _, e in (if type(r.earlier) == "table" then r.earlier else {}) do
+				if type(e) == "table" and e.id then
+					by_thread[e.id] = s.id
+				end
+			end
 		end
 	end
-	return { overview = plan.overview or "", pending = plan.pending == true, count = #steps, steps = lines }
+	local progress = plan.progress or {}
+	return {
+		overview = plan.overview or "",
+		pending = plan.pending == true,
+		count = #steps,
+		steps = lines,
+		by_step = by_step,
+		threads = by_thread,
+		done = progress.done or 0,
+		total = progress.total or #steps,
+	}
+end
+
+function M.plan_running(chat: string?): boolean
+	local entry = M.of(chat)
+	return entry ~= nil and entry.plan ~= nil and entry.plan.pending ~= true and #(entry.plan.order or {}) > 0
 end
 
 function M.working(chat: string?): number
@@ -654,65 +699,137 @@ local function more_menu(ctx: Ctx, row: any, list: { any }, open: any): Node
 	return ui.menu(Menu.panel(panel))
 end
 
-local function RowView(ctx: Ctx, row: any): Node
+local MOVE_MS = 220
+local EASE = "cubicBezier(.2,.8,.2,1)"
+
+function M.key_of(row: any): string
+	return if row.step then `step:{row.step}` else row.key
+end
+
+local function line_of(r: any): string
+	if r.state == "waitingOnYou" then
+		return M.question(r.chat) or r.line or ""
+	end
+	local working = Transcript.working_line(r)
+	if working then
+		return working
+	end
+	local facts = if r.state ~= "working" and r.state ~= "planned" then Transcript.facts(r.turn) else nil
+	local text = r.line or ""
+	if facts then
+		return if text ~= "" then `{facts} · {text}` else facts
+	end
+	return text
+end
+
+local function mark_kind(r: any): string
+	return if r.state == "working" and type(r.quiet_since) == "number" then "quiet" else r.state
+end
+
+local function RowView(ctx: Ctx, now: () -> any): Node
 	local hovered = ui.use_state(false)
 	local menu_open = ui.use_state(false)
-	local list = entries(ctx, row)
-	local tag = tag_of(row)
-	local opens = row.chat ~= nil
+	local r0 = now()
+	local opens = r0.chat ~= nil
+	local reduced = motion.reduced_now()
+	local fade_in = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, delay = 60, duration = 180 }
+	local fade_out = { opacity = 0, duration = motion.FADE }
+	local function list(): { any }
+		return entries(ctx, now())
+	end
 	local title: { any } = { items = "baseline", gap = ui.raw(6, "the mockup's step number"), min_w = 0 }
-	if row.number then
-		table.insert(title, ui.text { tostring(row.number), color = "$text.tertiary", tabular = true, shrink = 0, wrap = false })
+	if r0.number then
+		table.insert(title, ui.text {
+			function(): string
+				return tostring(now().number or "")
+			end,
+			color = "$text.tertiary",
+			tabular = true,
+			shrink = 0,
+			wrap = false,
+		})
 	end
 	table.insert(title, FadeText {
-		row.title,
+		function(): string
+			return now().title or ""
+		end,
 		literal = true,
 		min_w = 0,
 		shrink = 1,
-		color = if row.state == "planned" then "$text.secondary" else "$text.primary",
+		color = function(): string
+			local st = now().state
+			return if st == "planned" then "$text.secondary" elseif st == "failed" then "$danger" else "$text.primary"
+		end,
 	})
-	local lines: { any } = { grow = 1, min_w = 0, gap = ui.raw(1, "the mockup's row"), ui.row(title) }
-	local function line(): string
-		return (if row.state == "waitingOnYou" then M.question(row.chat) else nil) or row.line or ""
-	end
-	table.insert(
-		lines,
-		ui.show(function(): boolean
-			return line() ~= ""
-		end, ui.text { line, literal = true, wrap = true, lines = 2, text_size = ui.raw(12, "the mockup's row"), color = "$text.secondary" })
-	)
-	if tag then
-		table.insert(lines, ui.text { tag, literal = true, wrap = false, truncate = true, text_size = ui.raw(11.5, "the mockup's row"), color = "$text.tertiary" })
-	end
-	local corner: { any } = { shrink = 0, items = "end", gap = ui.raw(6, "the mockup's row") }
-	if row.state ~= "planned" and row.updated then
-		table.insert(corner, ui.text {
-			function(): string
-				return status.ago(status.since(row.updated))
+	table.insert(title, ui.div {
+		self = "center",
+		shrink = 0,
+		Transcript.Chips {
+			chips = function(): { any }
+				return Transcript.chips(now())
 			end,
-			text_size = ui.raw(11.5, "the mockup's row"),
-			color = "$text.tertiary",
-			wrap = false,
-			opacity = function(): number
-				return if hovered:get() or menu_open:get() then 0 else 1
+		},
+	})
+	local lines: { any } = {
+		grow = 1,
+		min_w = 0,
+		gap = ui.raw(1, "the mockup's row"),
+		ui.row(title),
+		ui.presence(function(): string?
+			local l = line_of(now())
+			return if l ~= "" then l else nil
+		end, function(l: string): Node
+			return ui.text { l, literal = true, wrap = true, lines = 2, text_size = ui.raw(12, "the mockup's row"), color = "$text.secondary" }
+		end, { w_full = true, min_w = 0, enter = fade_in, exit = fade_out }),
+		ui.presence(function(): string?
+			return tag_of(now())
+		end, function(tag: string): Node
+			return ui.text { tag, literal = true, wrap = false, truncate = true, text_size = ui.raw(11.5, "the mockup's row"), color = "$text.tertiary" }
+		end, { w_full = true, min_w = 0 }),
+	}
+	local corner: { any } = {
+		shrink = 0,
+		items = "end",
+		gap = ui.raw(6, "the mockup's row"),
+		ui.show(
+			function(): boolean
+				local r = now()
+				return r.state ~= "planned" and r.updated ~= nil
 			end,
-		})
-	end
-	local mark = mark_of(row, 14)
-	if mark then
-		table.insert(corner, mark)
-	end
+			ui.text {
+				function(): string
+					local at = now().updated
+					return if at then status.ago(status.since(at)) else ""
+				end,
+				text_size = ui.raw(11.5, "the mockup's row"),
+				color = "$text.tertiary",
+				wrap = false,
+				opacity = function(): number
+					return if hovered:get() or menu_open:get() then 0 else 1
+				end,
+			}
+		),
+		ui.presence(function(): string?
+			local r = now()
+			return if r.mark then `{r.mark}\0{r.model or ""}` else nil
+		end, function(): Node
+			return mark_of(now(), 14) or ui.div {}
+		end, { shrink = 0 }),
+	}
 	return ContextMenu {
 		ring = "$radius.lg",
 		w_full = true,
 		items = function(): { any }?
-			return if #list > 0 then list else nil
+			local l = list()
+			return if #l > 0 then l else nil
 		end,
 		ui.row {
-			id = `threads-row-{dom_id(row.key)}`,
-			class = `threads-row threads-row-{row.state}`,
+			id = `threads-row-{dom_id(M.key_of(r0))}`,
+			class = "threads-row",
 			role = if opens then "button" else nil,
-			label = row.title,
+			label = function(): string
+				return now().title or ""
+			end,
 			relative = true,
 			w_full = true,
 			p = ui.raw(8, "the mockup's row"),
@@ -728,58 +845,106 @@ local function RowView(ctx: Ctx, row: any): Node
 			end,
 			on_click = if opens
 				then function()
-					open_row(ctx, row)
+					open_row(ctx, now())
 				end
 				else nil,
-			ui.div { mt = ui.raw(1, "the mockup's row"), M.state_icon(row.state, 18) },
+			ui.presence(function(): string
+				return mark_kind(now())
+			end, function(kind: string): Node
+				local st = now().state
+				return ui.div {
+					class = `threads-row-{st}`,
+					mt = ui.raw(1, "the mockup's row"),
+					if kind == "quiet" then status.Spinner { size = 18, ink = "$zeron.tone.warning.ink" } else M.state_icon(st, 18),
+				}
+			end, {
+				shrink = 0,
+				enter = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { from = 0, to = 1, duration = 160 }, scale = { 0.6, 1 }, duration = MOVE_MS, ease = EASE },
+				exit = { opacity = 0, duration = if reduced then motion.FADE else 160 },
+			}),
 			ui.column(lines),
 			ui.column(corner),
-			if #list > 0
-				then ui.div {
-					absolute = true,
-					right = ui.raw(6, "the mockup's row"),
-					top = ui.raw(6, "the mockup's row"),
-					opacity = function(): number
-						return if hovered:get() or menu_open:get() then 1 else 0
-					end,
-					more_menu(ctx, row, list, menu_open),
-				}
-				else nil,
+			ui.div {
+				absolute = true,
+				right = ui.raw(6, "the mockup's row"),
+				top = ui.raw(6, "the mockup's row"),
+				opacity = function(): number
+					return if hovered:get() or menu_open:get() then 1 else 0
+				end,
+				ui.presence(function(): string?
+					local l = list()
+					if #l == 0 then
+						return nil
+					end
+					local r = now()
+					return `{r.state}\0{r.chat or ""}`
+				end, function(): Node
+					return more_menu(ctx, now(), list(), menu_open)
+				end),
+			},
 		},
 	}
 end
 
-local function items_of(chat: string, closed: { [string]: boolean }): { any }
+local placed: { [string]: { [string]: { g: string, at: number } } } = {}
+local arrivals = 0
+local function grouped(chat: string): { [string]: { any } }
+	local mine = placed[chat] or {}
+	placed[chat] = mine
 	local by: { [string]: { any } } = {}
-	for _, r in M.rows(chat) do
-		local g = M.group_of(r)
-		by[g] = by[g] or {}
-		table.insert(by[g], r)
-	end
-	local out: { any } = {}
-	for _, g in GROUPS do
-		local list = by[g]
-		if list then
-			local is_shut = closed[`{chat}:{g}`] == true
-			table.insert(out, { kind = "group", group = g, n = #list, shut = is_shut, key = `group:{g}:{#list}:{is_shut}` })
-			if not is_shut then
-				for _, r in list do
-					local said = `{r.state}|{r.title}|{r.line or ""}|{r.updated or 0}|{r.number or ""}|{r.mark or ""}|{r.model or ""}|{r.step or ""}|{r.chat or ""}`
-					table.insert(out, { kind = "row", row = r, key = `{r.key}|{said}` })
-				end
+	local seen: { [string]: boolean } = {}
+	for i, r in M.rows(chat) do
+		local g, k = M.group_of(r), M.key_of(r)
+		seen[k] = true
+		local p = mine[k]
+		if not p or p.g ~= g then
+			local at = 0
+			if p then
+				arrivals += 1
+				at = arrivals
 			end
+			p = { g = g, at = at }
+			mine[k] = p
 		end
+		by[g] = by[g] or {}
+		table.insert(by[g], { r = r, at = p.at, i = i })
+	end
+	for k in mine do
+		if not seen[k] then
+			mine[k] = nil
+		end
+	end
+	local out: { [string]: { any } } = {}
+	for g, list in by do
+		if g ~= "planned" then
+			table.sort(list, function(a: any, b: any): boolean
+				if a.at ~= b.at then
+					return a.at > b.at
+				end
+				return a.i < b.i
+			end)
+		end
+		local rows: { any } = {}
+		for _, x in list do
+			table.insert(rows, x.r)
+		end
+		out[g] = rows
 	end
 	return out
 end
 
-local function GroupHead(chat: string, item: any): Node
-	local key = `{chat}:{item.group}`
+local function GroupHead(chat: string, group: string, n: () -> number, closed: () -> boolean): Node
+	local key = `{chat}:{group}`
+	local name = locale.s(`chat.threads.group.{group}`)
 	return ui.button {
-		id = `threads-group-{item.group}`,
+		id = `threads-group-{group}`,
 		class = "threads-group",
-		label = `{locale.s(`chat.threads.group.{item.group}`)} · {item.n}`,
-		expanded = not item.shut,
+		label = function(): string
+			return `{name} · {n()}`
+		end,
+		expanded = function(): boolean
+			return not closed()
+		end,
 		bg = "#00000000",
 		px = ui.raw(6, "the mockup's group head"),
 		pt = ui.raw(12, "the mockup's group head"),
@@ -791,13 +956,183 @@ local function GroupHead(chat: string, item: any): Node
 		hover = { color = "$text.primary" },
 		on_click = function()
 			local now = table.clone(shut:peek())
-			now[key] = if item.shut then nil else true
+			now[key] = if closed() then nil else true
 			shut:set(now)
 		end,
-		ui.text { `{locale.s(`chat.threads.group.{item.group}`)} · {item.n}`, literal = true, wrap = false },
-		ui.div { rotate = if item.shut then -90 else 0, Icon { name = "lucide-chevron-down", size = 12 } },
+		ui.row {
+			items = "center",
+			gap = ui.raw(4, "the mockup's group head"),
+			ui.text { `{name} ·`, literal = true, wrap = false },
+			Transcript.Roll {
+				id = `threads-group-{group}-count`,
+				value = function(): string
+					return tostring(n())
+				end,
+			},
+		},
+		ui.div {
+			rotate = motion.tween(ui.computed(function(): number
+				return if closed() then -90 else 0
+			end), { duration = 200, ease = EASE }),
+			Icon { name = "lucide-chevron-down", size = 12 },
+		},
 	}
 end
+
+local GroupSection = ui.component(function(props: { ctx: Ctx, group: string, rows: () -> { any } }): Node
+	local ctx, group = props.ctx, props.group
+	local chat = ctx.session
+	local skey = `{chat}:{group}`
+	local list = ui.computed(props.rows)
+	local n = ui.computed(function(): number
+		return #list:get()
+	end)
+	local closed = ui.computed(function(): boolean
+		return shut:get()[skey] == true
+	end)
+	local reduced = motion.reduced_now()
+	local built_at = ui.now()
+	local opened_at = -1e9
+	local body_on = ui.use_state(not closed:peek())
+	local rows_ref = ui.ref()
+	local was = closed:peek()
+	ui.effect(function()
+		local c = closed:get()
+		if c == was then
+			return
+		end
+		was = c
+		if not c then
+			opened_at = ui.now()
+			if body_on:peek() then
+				local els = rows_ref:elements()
+				if #els > 0 and not motion.reduced_now() then
+					anime.animate(els, {
+						opacity = { 0, 1 },
+						y = { -4, 0 },
+						duration = 180,
+						delay = function(_el: any, i: number): number
+							return 35 * math.min(i, 8)
+						end,
+						ease = EASE,
+					})
+				end
+			else
+				body_on:set(true)
+			end
+		else
+			local els = rows_ref:elements()
+			if #els > 0 and not motion.reduced_now() then
+				anime.animate(els, { opacity = 0, y = -4, duration = 180, ease = EASE })
+			end
+			ui.after(MOVE_MS, function()
+				if closed:peek() then
+					body_on:set(false)
+				end
+			end)
+		end
+	end)
+	local alive = ui.use_state(n:peek() > 0)
+	ui.effect(function()
+		if n:get() > 0 then
+			alive:set(true)
+		else
+			ui.after(MOVE_MS, function()
+				if n:peek() == 0 then
+					alive:set(false)
+				end
+			end)
+		end
+	end)
+	local by_key = ui.computed(function(): { [string]: any }
+		local out: { [string]: any } = {}
+		for _, r in list:get() do
+			out[M.key_of(r)] = r
+		end
+		return out
+	end)
+	local function item(r: any, i: number): Node
+		local k, last = M.key_of(r), r
+		local at = ui.now()
+		local opening = at - opened_at < 100
+		local arriving = not opening and at - built_at > 100
+		local stagger = opening and not motion.reduced_now()
+		return ui.column {
+			ref = rows_ref,
+			w_full = true,
+			layout = if arriving and not reduced then "height" else nil,
+			layout_clip = arriving,
+			layout_enter = arriving and not reduced,
+			layout_duration = MOVE_MS,
+			layout_ease = EASE,
+			opacity = if stagger then 0 else nil,
+			on_mount = if stagger
+				then function(el: any)
+					anime.animate(el, { opacity = { 0, 1 }, y = { -4, 0 }, duration = 180, delay = 35 * math.min(i - 1, 8), ease = EASE })
+				end
+				else nil,
+			RowView(ctx, function(): any
+				local x = by_key:get()[k]
+				if x then
+					last = x
+				end
+				return last
+			end),
+		}
+	end
+	local function body(): Node
+		return ui.column {
+			w_full = true,
+			overflow = "hidden",
+			layout = "height",
+			layout_clip = true,
+			layout_duration = if reduced then 0 else MOVE_MS,
+			layout_ease = EASE,
+			max_h = function(): number
+				return if closed:get() then 0 else 1e6
+			end,
+			ui.show(
+				body_on,
+				ui.each(list, item, {
+					key = function(r: any): string
+						return M.key_of(r)
+					end,
+					w_full = true,
+					animate = if reduced then nil else { duration = MOVE_MS, ease = EASE },
+					enter = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, y = { 6, 0 }, duration = MOVE_MS, ease = EASE },
+					exit = { opacity = 0, duration = motion.FADE },
+				})
+			),
+		}
+	end
+	return ui.presence(function(): string?
+		return if alive:get() then "on" else nil
+	end, function(): Node
+		local arriving = not reduced and ui.now() - built_at > 100
+		return ui.column {
+			id = `threads-section-{group}`,
+			w_full = true,
+			ui.column {
+				w_full = true,
+				overflow = "hidden",
+				layout = "height",
+				layout_clip = true,
+				layout_enter = arriving,
+				layout_duration = if reduced then 0 else MOVE_MS,
+				layout_ease = EASE,
+				max_h = function(): number
+					return if n:get() > 0 then 1e6 else 0
+				end,
+				GroupHead(chat, group, function(): number
+					return n:get()
+				end, function(): boolean
+					return closed:get()
+				end),
+			},
+			body(),
+		}
+	end, { w_full = true })
+end)
 
 local function PlanBar(chat: string): Node
 	local function plan(): any
@@ -820,17 +1155,15 @@ local function PlanBar(chat: string): Node
 			items = "center",
 			gap = ui.raw(6, "the mockup's plan bar"),
 			ui.text { locale.t("chat.threads.plan.title"), weight = "$font.weight.semibold", wrap = false },
-			ui.text {
-				function(): string
+			Transcript.Roll {
+				id = "threads-plan-progress",
+				value = function(): string
 					local p = plan()
 					return if p and p.progress then `{p.progress.done}/{p.progress.total}` else ""
 				end,
-				id = "threads-plan-progress",
 				font = "$font.mono",
 				text_size = ui.raw(12, "the mockup's plan bar"),
 				color = "$text.tertiary",
-				tabular = true,
-				wrap = false,
 			},
 			ui.div { grow = 1 },
 		}
@@ -927,9 +1260,19 @@ end
 
 local function List(ctx: Ctx): Node
 	local chat = ctx.session
-	local items = ui.computed(function(): { any }
-		return items_of(chat, shut:get())
+	local groups = ui.computed(function(): { [string]: { any } }
+		return grouped(chat)
 	end)
+	local sections: { [any]: any } = { w_full = true }
+	for _, g in GROUPS do
+		table.insert(sections, GroupSection {
+			ctx = ctx,
+			group = g,
+			rows = function(): { any }
+				return groups:get()[g] or {}
+			end,
+		})
+	end
 	return ui.column {
 		id = "threads-list",
 		w_full = true,
@@ -979,17 +1322,7 @@ local function List(ctx: Ctx): Node
 					pt = ui.raw(6, "the mockup's list"),
 					pb = ui.raw(20, "the mockup's list"),
 					PlanBar(chat),
-					ui.each(items, function(item: any): Node
-						if item.kind == "group" then
-							return GroupHead(chat, item)
-						end
-						return RowView(ctx, item.row)
-					end, {
-						key = function(item: any): string
-							return item.key
-						end,
-						w_full = true,
-					}),
+					ui.column(sections),
 				},
 			}
 		end, { w_full = true, grow = 1, min_h = 0 }),

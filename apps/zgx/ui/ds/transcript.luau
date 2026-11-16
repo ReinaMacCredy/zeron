@@ -796,6 +796,10 @@ type View = {
 	open_subagent: ((sub: any) -> ())?,
 	threads: Threads.Threads?,
 	plan_call: (() -> string?)?,
+	plan: (() -> any?)?,
+	handback: ((thread: string) -> Threads.Handback?)?,
+	plan_body: ((text: string, key: string?) -> Node)?,
+	plan_found: ((key: string) -> boolean)?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
 	-- The text an open annotation input washes in it.
@@ -837,7 +841,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		if (b.kind == "tools" or b.kind == "work") and top and view and view.plan_call and view.threads then
 			local plan_call, threads = view.plan_call, view.threads
 			local function card(): Node
-				return Threads.Plan { id = "plan-card", threads = threads }
+				return Threads.Plan { id = "plan-card", threads = threads, handback = view.handback, body = view.plan_body, found = view.plan_found }
 			end
 			return ui.presence(function(): string
 				local id = plan_call()
@@ -868,6 +872,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				pictures = if view then view.shown_pictures else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
+				plan = if view then view.plan else nil,
 				-- (A long group builds only what's near the view, as a long
 				-- reply does.)
 				window = if view
@@ -1094,6 +1099,7 @@ local function reply(
 				open_subagent = if view then view.open_subagent else nil,
 				threads = if view then view.threads else nil,
 				agent = if view and view.threads then view.threads.agent else nil,
+				plan = if view then view.plan else nil,
 				pictures = if view then view.shown_pictures else nil,
 				thought = thought_of(m, now, draft),
 				tools = function()
@@ -1206,6 +1212,8 @@ end
 -- (`landing`: the id of a prompt the host adds after `push`, a steer's.)
 local shown: (() -> ())? = nil
 local sending: ((push: () -> (), landing: string?) -> ())? = nil
+local to_plan: (() -> ())? = nil
+local named_to_plan: { [string]: () -> () } = {}
 -- A named transcript's (`name`: a side chat's), by its name.
 local named_shown: { [string]: () -> () } = {}
 local named_sending: { [string]: (push: () -> (), landing: string?) -> () } = {}
@@ -1283,6 +1291,62 @@ local function Transcript(props: Props): Node
 			return { key = key, query = f.query, current = f.current, reveal = reveal }
 		end
 	end
+	local function plan_card(): any
+		return if plan_call and plan_call() and threads and threads.plan then (threads.plan :: any)() else nil
+	end
+	local handbacks = ui.computed(function(): { [string]: Threads.Handback }
+		local out: { [string]: Threads.Handback } = {}
+		local p = plan_card()
+		if not p then
+			return out
+		end
+		for _, x in messages:get() do
+			if x.role == "user" and x.from_chat and x.continued_on == nil and x.steps and #x.steps > 0 then
+				for _, id in x.steps do
+					if p.threads[id] then
+						out[id] = { id = x.id, text = x.text or "" }
+					end
+				end
+			end
+		end
+		return out
+	end)
+	local function step_back(x: Message): boolean
+		if x.role ~= "user" or not x.from_chat or x.continued_on ~= nil or x.wake or not x.steps or #x.steps == 0 then
+			return false
+		end
+		local p = plan_card()
+		if not p then
+			return false
+		end
+		for _, id in x.steps do
+			if not p.threads[id] then
+				return false
+			end
+		end
+		return voice_of(x, props) == "peer"
+	end
+	local function said_of(x: Message): string
+		return if x.steps and #x.steps > 0 then Threads.handback_text(x.text or "") else x.text or ""
+	end
+	local function plan_body(text: string, key: string?): Node
+		return Markdown {
+			text = text,
+			small = true,
+			ink = "$text.secondary",
+			breaks = true,
+			open = props.open_link,
+			chat_mark = chat_mark,
+			link_menu = props.link_menu,
+			find = if find_for and key then find_for(key) else nil,
+		}
+	end
+	local plan_found = if find
+		then function(key: string): boolean
+			local c = (find :: TranscriptFind).current()
+			return c ~= nil and c.key == key
+		end
+		else nil
 	-- Whether the transcript this one replaces rested at its end (kept
 	-- state: a reload's rebuild knows it; `keep` brings a view back only if
 	-- it didn't). Then a new one starts at its end.
@@ -2221,6 +2285,24 @@ local function Transcript(props: Props): Node
 		end,
 		go = go_to,
 	}
+	local function go_plan()
+		local id = if plan_call then plan_call() else nil
+		if not id then
+			return
+		end
+		for i = messages:len(), 1, -1 do
+			local x = messages:at(i)
+			if x and Threads.holds({ blocks = x.blocks, tools = x.tools }, id) then
+				go_to(x.id)
+				return
+			end
+		end
+	end
+	if props.name then
+		named_to_plan[props.name] = go_plan
+	else
+		to_plan = go_plan
+	end
 
 	local branch = props.branch
 	local editing = ui.use_state(nil :: { id: string, index: number, phase: MessageEdit.Phase, at_end: boolean }?)
@@ -2475,7 +2557,7 @@ local function Transcript(props: Props): Node
 	end
 
 	local function peer_of(x: Message): string?
-		if x.role ~= "user" or not x.from_chat or x.continued_on ~= nil or x.wake or (x.steps and #x.steps > 1) then
+		if x.role ~= "user" or not x.from_chat or x.continued_on ~= nil or x.wake or (x.steps and #x.steps > 1) or step_back(x) then
 			return nil
 		end
 		return if voice_of(x, props) == "peer" then x.from_chat else nil
@@ -2521,7 +2603,7 @@ local function Transcript(props: Props): Node
 				end,
 				text = function(id: string): string
 					local x = at(id)
-					return if x then x.text or "" else ""
+					return if x then said_of(x) else ""
 				end,
 				clock = function(id: string): string?
 					local x = at(id)
@@ -2554,7 +2636,7 @@ local function Transcript(props: Props): Node
 						Markdown {
 							text = function(): string
 								local x = at(id)
-								return if x then x.text or "" else ""
+								return if x then said_of(x) else ""
 							end,
 							breaks = true,
 							open = props.open_link,
@@ -2684,11 +2766,17 @@ local function Transcript(props: Props): Node
 		end
 		local voice = if mine then voice_of(m, props) else nil
 		local woken = if voice == "wake" and m.wake and #m.wake == 1 then m.wake[1] else nil
-		local grouped = voice == "peer" and peer_of(m) ~= nil
+		local grouped = voice == "peer" and m.role == "user" and m.from_chat ~= nil and m.continued_on == nil and not m.wake and not (m.steps and #m.steps > 1)
+		local function hidden(): boolean
+			return voice == "peer" and step_back(state:get())
+		end
 		local shape: (() -> string)? = nil
 		if grouped or woken then
 			local from = m.from_chat
 			local made = ui.computed(function(): string
+				if hidden() then
+					return "hidden"
+				end
 				local i = index:get()
 				local prev = if i > 1 then messages:at(i - 1) else nil
 				local before = if prev then peer_of(prev) else nil
@@ -2717,7 +2805,11 @@ local function Transcript(props: Props): Node
 			end
 		end
 		local function gone(): boolean
-			return shape ~= nil and (shape :: () -> string)() == "gone"
+			if shape == nil then
+				return hidden()
+			end
+			local sh = (shape :: () -> string)()
+			return sh == "gone" or sh == "hidden"
 		end
 		-- Zeron's gaps: a message opens 16 under the lane of the one before;
 		-- a prompt sits 6 under the switch seam over it.
@@ -2920,27 +3012,32 @@ local function Transcript(props: Props): Node
 					end, { w_full = true })
 					elseif voice == "wake" then Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
 					elseif grouped and shape then ui.presence(function(): string?
-						return if (shape :: () -> string)() ~= "gone" then "card" else nil
+						local sh = (shape :: () -> string)()
+						return if sh ~= "gone" and sh ~= "hidden" then "card" else nil
 					end, function(): Node
 						return peer_card(m, index, shape :: () -> string, hovered)
 					end, { w_full = true })
-					elseif voice == "peer" then ui.column {
-						class = "message message-peer",
-						provide = { message = m.id },
-						w_full = true,
-						Threads.From { id = `from-{m.id}`, senders = if m.steps and #m.steps > 1 then m.steps else { m.from_chat :: string }, clock = m.clock, threads = props.threads },
-						Markdown {
-							text = function(): string
-								return state:get().text or ""
-							end,
-							breaks = true,
-							open = props.open_link,
-							chat_mark = chat_mark,
-							link_menu = props.link_menu,
-							find = if find_for then find_for(`{m.id}:u`) else nil,
-						},
-						strip(m, state, hovered),
-					}
+					elseif voice == "peer" then ui.presence(function(): string?
+						return if hidden() then nil else "peer"
+					end, function(): Node
+						return ui.column {
+							class = "message message-peer",
+							provide = { message = m.id },
+							w_full = true,
+							Threads.From { id = `from-{m.id}`, senders = if m.steps and #m.steps > 1 then m.steps else { m.from_chat :: string }, clock = m.clock, threads = props.threads },
+							Markdown {
+								text = function(): string
+									return said_of(state:get())
+								end,
+								breaks = true,
+								open = props.open_link,
+								chat_mark = chat_mark,
+								link_menu = props.link_menu,
+								find = if find_for then find_for(`{m.id}:u`) else nil,
+							},
+							strip(m, state, hovered),
+						}
+					end, { w_full = true })
 					elseif mine then landed(ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the
@@ -2988,7 +3085,9 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state),
 					})
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, handback = function(thread: string): Threads.Handback?
+							return handbacks:get()[thread]
+						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?
@@ -3289,6 +3388,12 @@ return {
 	-- whatever they were reading).
 	latest = function(name: string?)
 		local go = if name then named_shown[name] else shown
+		if go then
+			go()
+		end
+	end,
+	to_plan = function(name: string?)
+		local go = if name then named_to_plan[name] else to_plan
 		if go then
 			go()
 		end

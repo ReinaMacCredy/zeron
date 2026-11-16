@@ -103,6 +103,7 @@ export type Props = {
 	pictures: ReplyPicture.Pictures?,
 	threads: Threads.Threads?,
 	agent: (() -> any)?,
+	plan: (() -> any?)?,
 	-- A thought being written: `words`, a thought's words as they arrive, by
 	-- its id (nil for one not being written: the reply's draft holds them,
 	-- so a tick of them doesn't build its rows again); `seeded`, whether what
@@ -148,6 +149,15 @@ local function skill_ink(): string
 end
 
 local CARDS: { [string]: boolean } = { agent = true, delegate = true, thread = true }
+
+local function step_of(t: Tool, plan: any): string?
+	local id = string.match(t.call or "", '"stepId"%s*:%s*"([^"]+)"')
+	if id and plan.by_step and plan.by_step[id] then
+		return id
+	end
+	local ref = if t.delegate then t.delegate.ref else nil
+	return if ref and plan.threads then plan.threads[ref] else nil
+end
 
 local function card_of(now: () -> any, props: any): Node
 	local t = now()
@@ -1013,12 +1023,48 @@ return ui.component(function(props: Props): Node
 			end
 			return out
 		end)
+		local entries = ui.computed(function(): { any }
+			local p = if props.plan then props.plan() else nil
+			local out: { any } = {}
+			local run: any = nil
+			for _, t in tools:get() do
+				local step = if p and t.kind == "delegate" then step_of(t, p) else nil
+				if step then
+					if not run then
+						run = { key = `steps:{t.id}`, steps = {} }
+						table.insert(out, run)
+					end
+					table.insert(run.steps, step)
+				else
+					run = nil
+					table.insert(out, { key = t.id, tool = t })
+				end
+			end
+			return out
+		end)
 		return ui.column {
 			class = "agent-cards",
 			w_full = true,
 			pt = ui.raw(2, "transcript.rs CHIPS_TOP_PAD"),
 			gap = ui.raw(8, "transcript.rs CHIP_HEIGHT less its card"),
-			ui.each(tools, function(t: Tool)
+			ui.each(entries, function(e: any)
+				local key = e.key
+				if e.steps then
+					local last = e.steps
+					return Threads.StepsStarted {
+						id = `steps-started-{string.sub(key, 7)}`,
+						steps = function(): { string }
+							for _, x in entries:get() do
+								if x.key == key then
+									last = x.steps
+								end
+							end
+							return last
+						end,
+						plan = props.plan :: () -> any,
+					}
+				end
+				local t = e.tool :: Tool
 				local now = ui.computed(function(): Tool
 					return by_id:get()[t.id] or t
 				end)
@@ -1026,8 +1072,8 @@ return ui.component(function(props: Props): Node
 					return now:get()
 				end, props)
 			end, {
-				key = function(t: Tool): string
-					return t.id
+				key = function(e: any): string
+					return e.key
 				end,
 				enter = { opacity = { 0, 1 }, y = { -6, 0 }, duration = 360, ease = "outExpo" },
 			}),

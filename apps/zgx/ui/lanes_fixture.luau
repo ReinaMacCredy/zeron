@@ -521,6 +521,47 @@ do
 	ui.command { id = "threads_open", title = "Open chat-1's Threads tab", run = function()
 		Threads.open("chat-1")
 	end }
+	local function patch_rows(f: (r: any) -> any?)
+		local all = table.clone(published:peek())
+		local entry = table.clone(all["chat-1"])
+		local rows = {}
+		for _, r in entry.rows do
+			table.insert(rows, f(table.clone(r)) or r)
+		end
+		entry.rows = rows
+		all["chat-1"] = entry
+		published:set(all)
+	end
+	ui.command { id = "threads_move", title = "Step 5 starts; step 2 fails", run = function()
+		patch_rows(function(r: any): any?
+			if r.step == "s5" then
+				r.state = "working"
+				r.chat = "dg-five"
+				r.key = "owned:dg-five"
+				r.line = "Drafting the notes"
+				return r
+			elseif r.step == "s2" then
+				r.state = "failed"
+				r.line = "The limiter would not build"
+				return r
+			end
+			return nil
+		end)
+	end }
+	ui.command { id = "threads_extras", title = "Rows carry attempts, turn facts and a quiet spell", run = function()
+		patch_rows(function(r: any): any?
+			if r.step == "s1" then
+				r.attempt = 2
+				r.earlier = { { id = "dg-old", title = "Add CSV export, first try" } }
+				r.turn = { ms = 125000, tools = 3, failed = 1 }
+				return r
+			elseif r.chat == "dg-run" then
+				r.quiet_since = NOW - 360
+				return r
+			end
+			return nil
+		end)
+	end }
 end
 ui.command { id = "open_late", title = "Open a child not yet listed", run = function()
 	lanes.open_child("chat-1", "late-1")
@@ -557,6 +598,28 @@ local plan_messages = ui.state("test_plan_messages", {
 		{ id = "b2", kind = "tools", tools = { plan_tool("t-new") } },
 	} },
 } :: any)
+local function delegate_tool(id: string, ref: string, title: string, step: string?): any
+	local input = if step then `\n  "stepId": "{step}",` else ""
+	return { id = id, kind = "delegate", verb = "Delegated", target = title, call = `zeron · delegate_task\n\{{input}\n  "title": "{title}"\n\}`, delegate = { ref = ref, title = title } }
+end
+local RUN: { any } = {
+	{ id = "lead-2", role = "assistant", text = "", blocks = {
+		{ id = "b3", kind = "tools", tools = { delegate_tool("d-1", "dg-review", "Add CSV export to orders", "s1"), delegate_tool("d-2", "dg-ask", "Add rate limiting to checkout", "s2"), delegate_tool("d-3", "dg-fail", "Fix flaky cart total test", nil) } },
+	} },
+	{ id = "p-review", role = "user", from_chat = "dg-review", clock = "4:19 PM", text = "A note from the export thread." },
+	{ id = "h-review", role = "user", from_chat = "dg-review", steps = { "dg-review" }, clock = "4:20 PM", text = 'Step "Add CSV export to orders" (stepId s1) finished a turn on its thread dg-review.\nTurn: 2m 5s, 3 tool calls, 1 failed.\n\n> The export works for orders and refunds.\n\nRead it with read_thread, then mark the step done or skipped with the plan tool, action "step", or tell the thread what is still missing with send_message_to_thread.' },
+	{ id = "p-fail", role = "user", from_chat = "dg-fail", clock = "4:21 PM", text = "The suite would not start." },
+}
+ui.command { id = "plan_run", title = "The lead runs two steps and hears back", run = function()
+	local now = table.clone(plan_messages:peek())
+	for _, m in RUN do
+		table.insert(now, m)
+	end
+	plan_messages:set(now)
+end }
+ui.command { id = "plan_forget", title = "The plan write is compacted away", run = function()
+	plan_messages:set(RUN)
+end }
 
 -- The spawns as a transcript shows them (cards, with their open state).
 local cards_shown = ui.state("test_lanes_cards", false)
@@ -715,7 +778,7 @@ return ui.row {
 		return ui.column {
 			id = "fixture-plan",
 			w = 420,
-			h = 600,
+			h = 860,
 			ui.component(function(): Node
 				return require("@ds/transcript").Transcript {
 					messages = plan_messages,

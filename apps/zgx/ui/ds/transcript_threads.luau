@@ -5,6 +5,7 @@ local status = require("@self/status")
 local locale = require("@self/locale")
 local Button = require("@self/button")
 local motion = require("@self/motion")
+local ProgressBar = require("@self/progress").ProgressBar
 
 local M = {}
 
@@ -1652,6 +1653,9 @@ function M.AutoContinue(): Node
 end
 
 function M.is_plan_write(t: any): boolean
+	if t.plan == "write" then
+		return true
+	end
 	if t.kind ~= "mcp" or type(t.target) ~= "string" then
 		return false
 	end
@@ -1702,22 +1706,668 @@ function M.newest_plan(messages: { any }): string?
 	return nil
 end
 
-function M.Plan(props: { id: string, threads: Threads }): Node
+local MARK = 16
+local MOVE_MS = 220
+
+function M.Roll(props: { value: () -> string, id: string?, font: string?, text_size: any?, color: any?, weight: any? }): Node
+	local reduced = motion.reduced_now()
+	return ui.div {
+		id = props.id,
+		shrink = 0,
+		overflow = "hidden",
+		ui.presence(props.value, function(v: string): Node
+			return ui.text { v, literal = true, wrap = false, tabular = true, font = props.font, text_size = props.text_size, color = props.color, weight = props.weight }
+		end, {
+			enter = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, y = { 10, 0 }, duration = 260, ease = CARD_EASE },
+			exit = if reduced then { opacity = 0, duration = motion.FADE } else { opacity = 0, y = -10, duration = 260, ease = CARD_EASE },
+		}),
+	}
+end
+
+function M.Chip(props: { text: string | () -> string, id: string? }): Node
+	return ui.row {
+		id = props.id,
+		class = "step-chip",
+		shrink = 0,
+		h = ui.raw(16, "the mockup's chip"),
+		px = ui.raw(6, "the mockup's chip"),
+		items = "center",
+		rounded = ui.raw(8, "the mockup's chip"),
+		bg = "$zeron.tone.warning.wash",
+		ui.text { props.text, literal = true, wrap = false, text_size = ui.raw(10, "the mockup's chip"), weight = "$font.weight.semibold", color = "$zeron.tone.warning.ink" },
+	}
+end
+
+local function quiet_minutes(since: number): number
+	return math.max(1, math.floor(status.since(since) / 60))
+end
+
+function M.chips(s: any): { { k: string, text: string } }
+	local out = {}
+	if type(s.attempt) == "number" and s.attempt > 1 then
+		table.insert(out, { k = "attempt", text = locale.s("ds.threads.chip.attempt", { n = s.attempt }) })
+	end
+	if s.state == "working" and type(s.background) == "table" and #s.background > 0 then
+		table.insert(out, { k = "background", text = locale.s("ds.threads.chip.background") })
+	end
+	if s.state == "working" and type(s.quiet_since) == "number" then
+		table.insert(out, { k = "quiet", text = locale.s("ds.threads.chip.quiet", { n = quiet_minutes(s.quiet_since) }) })
+	end
+	return out
+end
+
+function M.Chips(props: { chips: () -> { { k: string, text: string } } }): Node
+	local reduced = motion.reduced_now()
+	local list = ui.computed(props.chips)
+	return ui.each(list, function(c: any): Node
+		local k, last = c.k, c.text
+		return M.Chip {
+			text = function(): string
+				for _, x in list:get() do
+					if x.k == k then
+						last = x.text
+					end
+				end
+				return last
+			end,
+		}
+	end, {
+		key = function(c: any): string
+			return c.k
+		end,
+		gap = ui.raw(4, "the mockup's chips"),
+		shrink = 0,
+		items = "center",
+		enter = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, scale = { 0.6, 1 }, duration = MOVE_MS, ease = CARD_EASE },
+		exit = { opacity = 0, duration = motion.FADE },
+	})
+end
+
+function M.facts(turn: any): string?
+	if type(turn) ~= "table" or type(turn.ms) ~= "number" then
+		return nil
+	end
+	return locale.s("ds.threads.line.turn", { time = M.elapsed(turn.ms / 1000), tools = turn.tools or 0, failed = turn.failed or 0 })
+end
+
+function M.working_line(s: any): string?
+	if s.state ~= "working" then
+		return nil
+	end
+	if type(s.background) == "table" and #s.background > 0 then
+		return locale.s("ds.threads.line.background", { what = table.concat(s.background, ", ") })
+	end
+	if type(s.quiet_since) == "number" then
+		return locale.s("ds.threads.line.quiet", { n = quiet_minutes(s.quiet_since) })
+	end
+	if type(s.activity) == "string" and s.activity ~= "" then
+		return s.activity
+	end
+	return nil
+end
+
+local function next_line(l: string): boolean
+	return string.match(l, "^Read it with read_thread") ~= nil or string.match(l, "^Read them with read_thread") ~= nil
+end
+
+-- (The engine parses the stored text: only what a person reads loses its lines.)
+function M.handback_text(text: string, thread: string?): string
+	local paras: { { string } } = {}
+	local cur: { string } = {}
+	for line in string.gmatch(text .. "\n", "(.-)\r?\n") do
+		if string.match(line, "^%s*$") then
+			if #cur > 0 then
+				table.insert(paras, cur)
+				cur = {}
+			end
+		else
+			table.insert(cur, line)
+		end
+	end
+	if #cur > 0 then
+		table.insert(paras, cur)
+	end
+	while #paras > 0 and next_line(paras[#paras][1]) do
+		table.remove(paras)
+	end
+	local out: { string } = {}
+	local owner: string? = nil
+	for _, p in paras do
+		local kept: { string } = {}
+		local machine = false
+		for _, l in p do
+			local of = string.match(l, '^Step ".-" %(stepId [^)]*%) .- on its thread (%S+)%.$')
+			if of then
+				machine = true
+				owner = of
+			elseif not (machine and string.match(l, "^Turn: .+%.$")) then
+				table.insert(kept, l)
+			end
+		end
+		if #kept > 0 and (thread == nil or owner == nil or owner == thread) then
+			table.insert(out, table.concat(kept, "\n"))
+		end
+	end
+	return table.concat(out, "\n\n")
+end
+
+local function first_lines(text: string, n: number): string
+	local out: { string } = {}
+	for line in string.gmatch(text .. "\n", "(.-)\n") do
+		if #out == n then
+			out[n] ..= " …"
+			break
+		end
+		table.insert(out, line)
+	end
+	return table.concat(out, "\n")
+end
+
+local function clock_text(secs: number): string
+	secs = math.max(0, math.floor(secs))
+	local h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
+	if h > 0 then
+		return string.format("%d:%02d:%02d", h, m, s)
+	end
+	return string.format("%d:%02d", m, s)
+end
+
+local function mark_kind(s: any): string
+	local st = s.state
+	if st == "working" then
+		return if type(s.quiet_since) == "number" then "quiet" else "working"
+	elseif st == "readyForReview" then
+		return "review"
+	end
+	return st or "planned"
+end
+M.mark_kind = mark_kind
+
+local CHECK_INK = { review = "$text.secondary", done = "$success" }
+
+local Check = ui.component(function(props: { ink: string, draw: boolean }): Node
+	local drawn = ui.use_state(if props.draw then 0 else 1)
+	if props.draw then
+		anime.animate(drawn, { value = { 0, 1 }, delay = 120, duration = 260, ease = "out(2)" })
+	end
+	return ui.canvas {
+		w = MARK,
+		h = MARK,
+		shrink = 0,
+		aria_hidden = true,
+		draw = function(c: any, w: number, h: number)
+			local t = drawn:get()
+			if t <= 0 then
+				return
+			end
+			local k = math.min(w, h) / MARK
+			c:stroke(ui.path():move(4 * k, 8.4 * k):line(6.6 * k, 11 * k):line(12 * k, 5.6 * k), props.ink, 1.8, { cap = "round", join = "round", draw = t })
+		end,
+	}
+end)
+
+local function mark_of(kind: string, draw: boolean): Node
+	if kind == "working" then
+		return status.StatusIcon { kind = "working", size = MARK }
+	elseif kind == "quiet" then
+		return status.Spinner { size = MARK, ink = "$zeron.tone.warning.ink" }
+	elseif CHECK_INK[kind] then
+		return Check { ink = CHECK_INK[kind], draw = draw and not motion.reduced_now() }
+	elseif kind == "failed" then
+		return status.StatusIcon { kind = "failed", size = MARK }
+	elseif kind == "waitingOnYou" then
+		return ui.div { shrink = 0, color = "$warning", Icon { name = "clock-circle", size = MARK } }
+	elseif kind == "cancelled" then
+		return ui.div { shrink = 0, color = "$text.tertiary", Icon { name = "close-circle", size = MARK } }
+	elseif kind == "skipped" then
+		return ui.div { shrink = 0, color = "$text.tertiary", Icon { name = "status-done", size = MARK } }
+	end
+	return ui.div {
+		w = MARK,
+		h = MARK,
+		shrink = 0,
+		items = "center",
+		justify = "center",
+		opacity = 0.7,
+		ui.div { w = ui.raw(11, "the mockup's dashed ring"), h = ui.raw(11, "the mockup's dashed ring"), rounded = "$radius.full", border = 1.5, border_color = "$text.tertiary", border_dash = { 2, 2 } },
+	}
+end
+
+function M.StepMark(props: { kind: () -> string, class: ((kind: string) -> string)? }): Node
+	local reduced = motion.reduced_now()
+	local first = true
+	return ui.presence(props.kind, function(kind: string): Node
+		local draw = not first
+		first = false
+		return ui.div {
+			class = if props.class then props.class(kind) else `step-mark step-mark-{kind}`,
+			w = MARK,
+			h = MARK,
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			mark_of(kind, draw),
+		}
+	end, {
+		w = MARK,
+		h = MARK,
+		shrink = 0,
+		enter = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { from = 0, to = 1, duration = 160 }, scale = { 0.6, 1 }, duration = MOVE_MS, ease = CARD_EASE },
+		exit = { opacity = 0, duration = if reduced then motion.FADE else 160 },
+	})
+end
+
+export type Handback = { id: string, text: string }
+export type PlanProps = {
+	id: string,
+	threads: Threads,
+	handback: ((thread: string) -> Handback?)?,
+	body: ((text: string, key: string?) -> Node)?,
+	found: ((key: string) -> boolean)?,
+}
+
+local RESULTS = ui.state("plan_card_results", {} :: { [string]: boolean })
+local ENDED = { readyForReview = true, done = true, failed = true, cancelled = true, skipped = true }
+local SWEPT = { readyForReview = true, done = true, failed = true }
+
+local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>, tick: State<number> }): Node
+	local plan, row = props.plan, props.row
+	local threads = plan.threads
+	local function s(): any
+		return row:get()
+	end
+	local id = row:peek().id :: string
+	local dk = (string.gsub(id, "[^%w%-]", "-"))
+	local base = `{plan.id}-step-{dk}`
+	local function child(): Child?
+		local c = s().chat
+		return if c then threads.child(c) else nil
+	end
+	local function handback(): Handback?
+		local c = s().chat
+		return if c and plan.handback then plan.handback(c) else nil
+	end
+	local function said(): string
+		local hb = handback()
+		return if hb then M.handback_text(hb.text, s().chat) else ""
+	end
+	local function has_result(): boolean
+		local x = s()
+		return M.working_line(x) ~= nil or M.facts(x.turn) ~= nil or said() ~= "" or (type(x.earlier) == "table" and #x.earlier > 0)
+	end
+	local function found(): boolean
+		local hb = handback()
+		return hb ~= nil and plan.found ~= nil and plan.found(`{hb.id}:u`)
+	end
+	local function open(): boolean
+		if not has_result() then
+			return false
+		end
+		local v = RESULTS:get()[id]
+		if v ~= nil then
+			return v or found()
+		end
+		return s().state == "failed" or found()
+	end
+	local function toggle()
+		if not has_result() then
+			return
+		end
+		local all = table.clone(RESULTS:peek())
+		all[id] = not open()
+		RESULTS:set(all)
+	end
+	local function title(): string
+		return s().title or ""
+	end
+	local function model(): string?
+		local x = s()
+		if not x.model then
+			return nil
+		end
+		return (if threads.model_label then threads.model_label(x.harness, x.model) else nil) or x.model
+	end
+	local function corner(): string
+		local x = s()
+		local c = child()
+		if x.state == "working" then
+			local now = props.tick:get()
+			return if c and c.delegated_at then clock_text(now - c.delegated_at) else ""
+		end
+		if type(x.turn) == "table" and type(x.turn.ms) == "number" then
+			return M.elapsed(x.turn.ms / 1000)
+		end
+		return if c and c.delegated_at and c.delegated_end then M.elapsed(c.delegated_end - c.delegated_at) else ""
+	end
+	local sweep = ui.use_state(0)
+	local sweep_bad = ui.use_state(false)
+	local width = ui.use_state(0)
+	local last = row:peek().state
+	ui.effect(function()
+		local st = s().state
+		if st == last then
+			return
+		end
+		local was = last
+		last = st
+		if SWEPT[st] and not ENDED[was] and not motion.reduced_now() then
+			sweep_bad:set(st == "failed")
+			sweep:set(0)
+			anime.animate(sweep, { value = { 0, 1 }, duration = 650, ease = "out(2)" })
+		end
+	end)
+	local reduced = motion.reduced_now()
+	local opener = threads.open_child
+	local line = ui.button {
+		id = `{base}-row`,
+		class = "plan-card-step-row",
+		label = title,
+		expanded = function(): boolean
+			return open()
+		end,
+		selectable = false,
+		relative = true,
+		overflow = "hidden",
+		w_full = true,
+		min_w = 0,
+		h = ui.raw(28, "the mockup's plan line"),
+		p = 0,
+		px = ui.raw(4, "the mockup's plan line"),
+		gap = ui.raw(8, "the mockup's plan line"),
+		items = "center",
+		rounded = ui.raw(7, "the mockup's plan line"),
+		bg = "#00000000",
+		hover = { bg = "$hover" },
+		active = { bg = "$hover" },
+		text_size = ui.raw(13, "the mockup's plan line"),
+		color = function(): string
+			local st = s().state
+			return if st == "failed" then "$danger" elseif st == "planned" then "$text.secondary" else "$text.primary"
+		end,
+		cursor = function(): string
+			return if has_result() then "pointer" else "default"
+		end,
+		on_resize = function(size: { w: number, h: number })
+			width:set(size.w)
+		end,
+		on_click = toggle,
+		on_press = function() end,
+		on_release = function() end,
+		M.StepMark {
+			kind = function(): string
+				return mark_kind(s())
+			end,
+		},
+		ui.text {
+			function(): string
+				return tostring(s().number or "")
+			end,
+			literal = true,
+			w = ui.raw(14, "the mockup's step number"),
+			shrink = 0,
+			wrap = false,
+			align = "right",
+			font = "$font.mono",
+			text_size = ui.raw(11, "the mockup's step number"),
+			color = "$text.tertiary",
+		},
+		ui.row {
+			grow = 1,
+			min_w = 0,
+			gap = ui.raw(6, "the mockup's plan line"),
+			items = "center",
+			FadeText { title, literal = true, min_w = 0, shrink = 1 },
+			M.Chips {
+				chips = function(): { any }
+					return M.chips(s())
+				end,
+			},
+		},
+		ui.presence(function(): string?
+			local x = s()
+			return if x.state == "planned" then x.mark else nil
+		end, function(mark: string): Node
+			return AgentMark.Mark { label = mark, mark = mark, size = 12, bare = true }
+		end, { shrink = 0 }),
+		ui.show(function(): boolean
+			return s().state == "planned"
+		end, ui.text {
+			function(): string
+				return model() or ""
+			end,
+			literal = true,
+			shrink = 0,
+			wrap = false,
+			text_size = ui.raw(12, "the mockup's model"),
+			color = "$text.tertiary",
+		}, ui.text {
+			corner,
+			id = `{base}-clock`,
+			literal = true,
+			shrink = 0,
+			wrap = false,
+			font = "$font.mono",
+			text_size = ui.raw(11, "the mockup's plan clock"),
+			color = "$text.tertiary",
+		}),
+		ui.show(
+			function(): boolean
+				return opener ~= nil and s().chat ~= nil
+			end,
+			ui.button {
+				id = `{base}-open`,
+				class = "plan-card-step-open",
+				label = function(): string
+					return locale.s("ds.threads.plan.open_thread", { title = title() })
+				end,
+				w = TILE,
+				h = TILE,
+				p = 0,
+				shrink = 0,
+				items = "center",
+				justify = "center",
+				rounded = ui.raw(5, "transcript.rs open tile"),
+				bg = "#00000000",
+				hover = { bg = "$hover" },
+				color = "$text.tertiary",
+				cursor = "pointer",
+				on_click = function()
+					local c = s().chat
+					if c and opener then
+						opener(c)
+					end
+				end,
+				Icon { name = "arrow-up-right", size = 11 },
+			}
+		),
+		ui.div {
+			absolute = true,
+			top = 0,
+			bottom = 0,
+			w = function(): number
+				return width:get() * 0.45
+			end,
+			left = function(): number
+				local band = width:get() * 0.45
+				return -band + sweep:get() * (width:get() + band)
+			end,
+			opacity = function(): number
+				local t = sweep:get()
+				return if t <= 0 or t >= 1 then 0 else math.sin(t * math.pi)
+			end,
+			bg = function(): string
+				return if sweep_bad:get() then "$zeron.tone.danger.wash" else "$zeron.tone.success.wash"
+			end,
+			rounded = "$radius.full",
+			pointer_events = "none",
+			aria_hidden = true,
+		},
+	}
+	local function result(): Node
+		local children: { Node } = {}
+		table.insert(
+			children,
+			ui.show(function(): boolean
+				return M.working_line(s()) ~= nil or M.facts(s().turn) ~= nil
+			end, ui.text {
+				function(): string
+					local x = s()
+					return M.working_line(x) or M.facts(x.turn) or ""
+				end,
+				id = `{base}-line`,
+				literal = true,
+				wrap = true,
+				text_size = ui.raw(12.5, "the mockup's result line"),
+				color = "$text.secondary",
+			})
+		)
+		table.insert(
+			children,
+			ui.presence(function(): string?
+				local hb = handback()
+				return if hb and s().state ~= "working" and said() ~= "" then hb.id else nil
+			end, function(msg: string): Node
+				local function text(): string
+					return first_lines(said(), 6)
+				end
+				return ui.column {
+					id = `{base}-said`,
+					w_full = true,
+					min_w = 0,
+					if plan.body
+						then plan.body(text(), `{msg}:u`)
+						else ui.text { text, literal = true, wrap = true, text_size = ui.raw(12.5, "the mockup's result line"), color = "$text.secondary" },
+				}
+			end, { w_full = true, min_w = 0 })
+		)
+		table.insert(
+			children,
+			ui.each(ui.computed(function(): { any }
+				local out = {}
+				for i, e in s().earlier or {} do
+					if type(e) == "table" and e.id then
+						table.insert(out, { id = e.id, title = e.title, n = i })
+					end
+				end
+				return out
+			end), function(e: any): Node
+				return ui.button {
+					id = `{base}-earlier-{(string.gsub(e.id, "[^%w%-]", "-"))}`,
+					class = "plan-card-earlier",
+					label = locale.s("ds.threads.plan.earlier", { n = e.n, title = e.title or "" }),
+					h = ui.raw(22, "the mockup's result line"),
+					p = 0,
+					gap = ui.raw(4, "the mockup's result line"),
+					items = "center",
+					bg = "#00000000",
+					hover = { bg = "#00000000", underline = true },
+					text_size = ui.raw(12, "the mockup's result line"),
+					color = "$text.tertiary",
+					cursor = "pointer",
+					on_click = function()
+						if opener then
+							opener(e.id)
+						end
+					end,
+					Icon { name = "arrow-up-right", size = 11 },
+					ui.text { locale.s("ds.threads.plan.earlier", { n = e.n, title = e.title or "" }), literal = true, wrap = false, truncate = true, min_w = 0 },
+				}
+			end, {
+				key = function(e: any): string
+					return e.id
+				end,
+				w_full = true,
+			})
+		)
+		local col: { [any]: any } = {
+			id = `{base}-result`,
+			class = "plan-card-result",
+			w_full = true,
+			min_w = 0,
+			pl = ui.raw(42, "the mockup's result line"),
+			pr = ui.raw(8, "the mockup's result line"),
+			pb = ui.raw(6, "the mockup's result line"),
+			gap = ui.raw(4, "the mockup's result line"),
+		}
+		for i, n in children do
+			col[i] = n
+		end
+		return ui.column(col)
+	end
+	return ui.column {
+		id = base,
+		class = "plan-card-step",
+		w_full = true,
+		min_w = 0,
+		line,
+		ui.column {
+			w_full = true,
+			min_w = 0,
+			overflow = "hidden",
+			layout = "height",
+			layout_clip = true,
+			layout_duration = if reduced then 0 else MOVE_MS,
+			layout_ease = CARD_EASE,
+			ui.presence(function(): string?
+				return if open() then "open" else nil
+			end, result, {
+				w_full = true,
+				min_w = 0,
+				enter = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, delay = 60, duration = 180 },
+				exit = { opacity = 0, duration = if reduced then motion.FADE else 120 },
+			}),
+		},
+	}
+end)
+
+function M.Plan(props: PlanProps): Node
 	local threads = props.threads
 	local function now(): any
 		return if threads.plan then threads.plan() else nil
 	end
-	local function model_of(s: any): string?
-		if not s.model then
-			return nil
-		end
-		return (if threads.model_label then threads.model_label(s.harness, s.model) else nil) or s.model
+	local function approved(): boolean
+		local p = now()
+		return p ~= nil and not p.pending
+	end
+	local function finished(): boolean
+		local p = now()
+		return p ~= nil and not p.pending and p.total > 0 and p.done >= p.total
 	end
 	local steps = ui.computed(function(): { any }
 		local p = now()
 		return if p then p.steps else {}
 	end)
-	return ui.column {
+	local tick = ui.use_state(os.time())
+	local working = ui.computed(function(): boolean
+		for _, s in steps:get() do
+			if s.state == "working" then
+				return true
+			end
+		end
+		return false
+	end)
+	ui.effect(function()
+		if working:get() then
+			tick:set(os.time())
+			ui.every(1000, function()
+				tick:set(os.time())
+			end)
+		end
+	end)
+	local flash = ui.use_state(0)
+	local was_pending = (now() or {}).pending == true
+	ui.effect(function()
+		local p = now()
+		local pending = p ~= nil and p.pending == true
+		if was_pending and not pending and p ~= nil and not motion.reduced_now() then
+			flash:set(1)
+			anime.animate(flash, { value = { 1, 0 }, delay = 270, duration = 630, ease = "out(2)" })
+		end
+		was_pending = pending
+	end)
+	local reduced = motion.reduced_now()
+	local first_foot = true
+	local card = ui.column {
 		id = props.id,
 		class = "plan-card",
 		w_full = true,
@@ -1729,17 +2379,62 @@ function M.Plan(props: { id: string, threads: Threads }): Node
 		border = 1,
 		border_color = "$border",
 		selectable = false,
-		ui.text {
-			function(): string
-				local p = now()
-				return locale.s("ds.threads.plan.head", { n = if p then p.count else 0 })
-			end,
+		ui.row {
+			w_full = true,
+			min_w = 0,
 			px = ui.raw(4, "the mockup's question card"),
-			pb = ui.raw(8, "the mockup's question card"),
-			text_size = ui.raw(13.5, "the mockup's question card"),
-			weight = "$font.weight.medium",
-			wrap = false,
+			pb = ui.raw(6, "the mockup's question card"),
+			gap = ui.raw(8, "the mockup's question card"),
+			items = "center",
+			ui.text {
+				function(): string
+					local p = now()
+					local n = if p then p.count else 0
+					return locale.s(if finished() then "ds.threads.plan.finished" else "ds.threads.plan.head", { n = n })
+				end,
+				id = `{props.id}-head`,
+				grow = 1,
+				min_w = 0,
+				text_size = ui.raw(13.5, "the mockup's question card"),
+				weight = "$font.weight.medium",
+				wrap = false,
+				truncate = true,
+			},
+			ui.show(
+				approved,
+				M.Roll {
+					id = `{props.id}-progress`,
+					value = function(): string
+						local p = now()
+						return if p then `{p.done}/{p.total}` else ""
+					end,
+					font = "$font.mono",
+					text_size = ui.raw(12, "the mockup's plan count"),
+					color = "$text.tertiary",
+				}
+			),
 		},
+		ui.presence(function(): string?
+			return if approved() then "on" else nil
+		end, function(): Node
+			return ui.div {
+				w_full = true,
+				px = ui.raw(4, "the mockup's question card"),
+				pb = ui.raw(6, "the mockup's question card"),
+				ProgressBar {
+					size = "thin",
+					w_full = true,
+					label = locale.t("chat.threads.plan.title"),
+					tone = function(): string
+						return if finished() then "success" else "accent"
+					end :: any,
+					value = function(): number?
+						local p = now()
+						return if p and p.total > 0 then p.done / p.total else 0
+					end,
+				},
+			}
+		end, { w_full = true, enter = { opacity = { 0, 1 }, duration = if reduced then motion.FADE else 200 } }),
 		ui.show(function(): boolean
 			local p = now()
 			return p ~= nil and (p.overview or "") ~= ""
@@ -1755,25 +2450,11 @@ function M.Plan(props: { id: string, threads: Threads }): Node
 			text_size = ui.raw(12.5, "the mockup's question card"),
 			color = "$text.secondary",
 		}),
-		ui.each(steps, function(s: any): Node
-			local model = model_of(s)
-			return ui.row {
-				class = "plan-card-step",
-				w_full = true,
-				min_w = 0,
-				px = ui.raw(4, "the mockup's plan line"),
-				py = ui.raw(5, "the mockup's plan line"),
-				gap = ui.raw(8, "the mockup's plan line"),
-				items = "center",
-				text_size = ui.raw(13, "the mockup's plan line"),
-				ui.text { tostring(s.number), literal = true, shrink = 0, wrap = false, font = "$font.mono", text_size = ui.raw(11, "the mockup's step number"), color = "$text.tertiary" },
-				ui.text { s.title or "", literal = true, grow = 1, min_w = 0, wrap = false, truncate = true },
-				if s.mark then AgentMark.Mark { label = s.mark, mark = s.mark, size = 12, bare = true } else nil,
-				if model then ui.text { model, literal = true, shrink = 0, wrap = false, text_size = ui.raw(12, "the mockup's model"), color = "$text.tertiary" } else nil,
-			}
+		ui.each(steps, function(_s: any, _i: number, row: State<any>): Node
+			return StepRow { plan = props, row = row, tick = tick }
 		end, {
 			key = function(s: any): string
-				return `{s.number}\0{s.title or ""}\0{s.mark or ""}\0{s.model or ""}`
+				return s.id or tostring(s.number)
 			end,
 			w_full = true,
 		}),
@@ -1781,9 +2462,13 @@ function M.Plan(props: { id: string, threads: Threads }): Node
 			local p = now()
 			return if p and p.pending then "pending" else "approved"
 		end, function(which: string): Node
+			local draw = not first_foot
+			first_foot = false
 			if which == "approved" then
 				return ui.row {
 					id = `{props.id}-approved`,
+					w_full = true,
+					justify = "end",
 					px = ui.raw(4, "the mockup's approved line"),
 					pt = ui.raw(6, "the mockup's approved line"),
 					pb = ui.raw(2, "the mockup's approved line"),
@@ -1791,7 +2476,7 @@ function M.Plan(props: { id: string, threads: Threads }): Node
 					items = "center",
 					text_size = ui.raw(12.5, "the mockup's approved line"),
 					color = "$success",
-					Icon { name = "check", size = 14 },
+					Check { ink = "$success", draw = draw and not reduced },
 					ui.text { locale.s("ds.threads.plan.approved"), wrap = false },
 				}
 			end
@@ -1826,7 +2511,104 @@ function M.Plan(props: { id: string, threads: Threads }): Node
 					end,
 				},
 			}
-		end, { w_full = true }),
+		end, {
+			w_full = true,
+			enter = if reduced then { opacity = { 0, 1 }, duration = motion.FADE } else { opacity = { 0, 1 }, y = { 6, 0 }, duration = 200, ease = CARD_EASE },
+			exit = { opacity = 0, duration = if reduced then motion.FADE else 140 },
+		}),
+	}
+	return ui.column {
+		relative = true,
+		w_full = true,
+		min_w = 0,
+		card,
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			rounded = ui.raw(12, "the mockup's question card"),
+			border = 1,
+			border_color = "$accent",
+			outline = 3,
+			outline_color = "$zeron.peer_card.ring",
+			pointer_events = "none",
+			aria_hidden = true,
+			opacity = function(): number
+				return flash:get()
+			end,
+		},
+	}
+end
+
+local function range_of(numbers: { number }): string
+	local sorted = table.clone(numbers)
+	table.sort(sorted)
+	local contiguous = true
+	for i = 2, #sorted do
+		if sorted[i] ~= sorted[i - 1] + 1 then
+			contiguous = false
+		end
+	end
+	if contiguous and #sorted > 1 then
+		return locale.s("ds.threads.started.range", { from = sorted[1], to = sorted[#sorted] })
+	end
+	local words: { string } = {}
+	for _, n in sorted do
+		table.insert(words, tostring(n))
+	end
+	return table.concat(words, ", ")
+end
+
+function M.StepsStarted(props: { id: string, steps: () -> { string }, plan: () -> any }): Node
+	local function lines(): { any }
+		local p = props.plan()
+		local out = {}
+		for _, id in props.steps() do
+			local s = if p and p.by_step then p.by_step[id] else nil
+			if s then
+				table.insert(out, s)
+			end
+		end
+		return out
+	end
+	local function verb(): string
+		local l = lines()
+		if #l == 1 then
+			return locale.s("ds.threads.started.one", { n = l[1].number or 0 })
+		end
+		return locale.s("ds.threads.started.many", { n = #props.steps() })
+	end
+	local function target(): string
+		local l = lines()
+		if #l == 1 then
+			return l[1].title or ""
+		end
+		local numbers: { number } = {}
+		for _, s in l do
+			if s.number then
+				table.insert(numbers, s.number)
+			end
+		end
+		return range_of(numbers)
+	end
+	return ui.row {
+		id = props.id,
+		class = "plan-steps-started",
+		w_full = true,
+		min_w = 0,
+		h = ui.raw(26, "the mockup's tool row"),
+		gap = "$space.2",
+		items = "center",
+		text_size = "$font.size.sm",
+		color = "$text.secondary",
+		label = function(): string
+			return `{verb()} {target()}`
+		end,
+		ui.div { shrink = 0, color = "$text.tertiary", aria_hidden = true, Icon { name = "side-chat", size = 14 } },
+		ui.text { verb, literal = true, shrink = 0, wrap = false },
+		FadeText { target, literal = true, min_w = 0, shrink = 1, color = "$text.primary" },
 	}
 end
 

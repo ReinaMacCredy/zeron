@@ -1389,7 +1389,22 @@
       "fan_asking": "{n, plural, other {# 个代理}}，{k} 个提问中",
       "answer_failed": "回答失败：{err}",
       "working_count": "{n} 个进行中",
-      "approve_plan": "批准计划"
+      "approve_plan": "批准计划",
+      "mission": {
+        "title": "Plan",
+        "label": "Plan, {done} of {total} done",
+        "started": "{title} started",
+        "ready": "{title} ready for review",
+        "done": "{title} done",
+        "failed": "{title} failed",
+        "waiting": "{title} needs you",
+        "stopped": "{title} stopped",
+        "skipped": "{title} skipped",
+        "quiet": "{title} quiet {n}m",
+        "background": "{title} waits on a background command",
+        "running": "{n} running",
+        "finished": "Finished"
+      }
     },
     "profiles": {
       "title": "配置",
@@ -1524,11 +1539,29 @@
         "head": "{n, plural, other {计划 · # 个步骤}}",
         "edit": "编辑计划",
         "approve": "批准并运行",
-        "approved": "已批准"
+        "approved": "已批准",
+        "finished": "{n, plural, one {Plan · # step done} other {Plan · # steps done}}",
+        "open_thread": "Open thread {title}",
+        "earlier": "Attempt {n}: {title}"
       },
       "card": {
         "messages": "{n, plural, other {# 条消息}}",
         "toggle": "来自 {title} 的消息"
+      },
+      "chip": {
+        "attempt": "attempt {n}",
+        "background": "background",
+        "quiet": "quiet {n}m"
+      },
+      "line": {
+        "turn": "{time} · {tools, plural, one {# tool call} other {# tool calls}} · {failed} failed",
+        "background": "Its turn ended; still running: {what}",
+        "quiet": "Only reasoning: no tool call and no text for {n, plural, one {# minute} other {# minutes}}"
+      },
+      "started": {
+        "one": "Started step {n}",
+        "many": "Started {n} steps",
+        "range": "{from} to {to}"
       }
     },
     "annotation": {

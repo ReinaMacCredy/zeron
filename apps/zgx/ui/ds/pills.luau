@@ -3,6 +3,7 @@ local AgentMark = require("@self/agent_mark")
 local locale = require("@self/locale")
 local motion = require("@self/motion")
 local glass = require("@self/glass")
+local ProgressBar = require("@self/progress").ProgressBar
 
 local M = {}
 
@@ -89,6 +90,58 @@ function M.Glyph(props: { state: () -> RunState, frame: any, size: number? }): N
 		enter = { opacity = { 0, 1 }, duration = 160 },
 		exit = { opacity = 0, duration = 160 },
 	})
+end
+
+local SEG_MAX = 16
+local SEG_INK: { [string]: string } = {
+	working = "$accent",
+	readyForReview = "$zeron.tone.success.edge",
+	done = "$success",
+	failed = "$danger",
+	waitingOnYou = "$warning",
+	quiet = "$warning",
+	cancelled = "$text.tertiary",
+	skipped = "$text.tertiary",
+}
+
+function M.Segments(props: { states: () -> { string }, done: () -> number }): Node
+	local reduced = motion.reduced_now()
+	local states = ui.computed(props.states)
+	local places = ui.computed(function(): { number }
+		local out: { number } = {}
+		for i = 1, #states:get() do
+			out[i] = i
+		end
+		return out
+	end)
+	return ui.presence(function(): string
+		return if #states:get() > SEG_MAX then "line" else "segs"
+	end, function(which: string): Node
+		if which == "line" then
+			return ProgressBar {
+				size = "thin",
+				w = 60,
+				value = function(): number?
+					local n = #states:peek()
+					return if n > 0 then props.done() / n else 0
+				end,
+			}
+		end
+		return ui.each(places, function(i: number): Node
+			return ui.presence(function(): string
+				return states:get()[i] or "planned"
+			end, function(st: string): Node
+				return ui.div {
+					class = `pills-plan-seg pills-plan-seg-{st}`,
+					w = ui.raw(9, "the mockup's segment"),
+					h = ui.raw(4, "the mockup's segment"),
+					rounded = ui.raw(2, "the mockup's segment"),
+					bg = SEG_INK[st] or "$border.strong",
+					opacity = if st == "working" and not reduced then ui.loop { from = 1, to = 0.45, duration = 700, yoyo = true, fps = 30 } else nil,
+				}
+			end, { shrink = 0, enter = { opacity = { 0, 1 }, duration = if reduced then motion.FADE else 220 }, exit = { opacity = 0, duration = if reduced then motion.FADE else 220 } })
+		end, { gap = ui.raw(2, "the mockup's segments"), items = "center", shrink = 0 })
+	end, { shrink = 0 })
 end
 
 function M.Pill(props: { [any]: any }): Node
