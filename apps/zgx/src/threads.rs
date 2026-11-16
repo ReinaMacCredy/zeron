@@ -71,6 +71,7 @@ struct Row {
     earlier: Vec<(String, String)>,
     turn: Option<zeron_proto::TurnFacts>,
     activity: Option<Activity>,
+    turn_started_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -136,6 +137,7 @@ fn thread_row(chat: &Chat, kind: &'static str, state: ThreadState, step: Option<
         earlier: Vec::new(),
         turn: None,
         activity: None,
+        turn_started_at: None,
     }
 }
 
@@ -246,6 +248,7 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                         earlier: Vec::new(),
                         turn: None,
                         activity: None,
+                        turn_started_at: None,
                     });
                 }
             }
@@ -259,6 +262,7 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
         }
         for row in rows.iter_mut().filter(|r| r.state == ThreadState::Working) {
             row.activity = row.chat.as_ref().and_then(|id| i.activity.get(id)).cloned();
+            row.turn_started_at = row.chat.as_deref().and_then(i.live).and_then(|s| s.started_at).map(|at| at.timestamp());
         }
         let roles = route_preview::preview_roles(&unstarted);
         out.insert(
@@ -306,6 +310,7 @@ fn row_value(r: &Row) -> Value {
         ("activity", r.activity.as_ref().and_then(|a| a.line.as_deref()).map_or(Value::Nil, Value::from)),
         ("activity_at", r.activity.as_ref().map_or(Value::Nil, |a| Value::from(a.at as f64))),
         ("quiet_since", r.activity.as_ref().and_then(|a| a.quiet_since).map_or(Value::Nil, |at| Value::from(at as f64))),
+        ("turn_started_at", r.turn_started_at.map_or(Value::Nil, |at| Value::from(at as f64))),
         ("turn", r.turn.map_or(Value::Nil, |t| {
             let mut facts = vec![("ms", Value::from(t.ms as f64)), ("tools", Value::from(t.tools as f64)), ("failed", Value::from(t.failed as f64))];
             if t.no_text {
@@ -773,15 +778,18 @@ pub(crate) mod tests {
             "k2": { "activity": "Done.", "activityAt": 1_800_000_100 },
         } });
         let activity = activities(&item);
-        let leads = join(&inputs(&chats, &steps, &HashMap::new(), &HashMap::new(), &|_| None, &activity));
+        let turn = |id: &str| (id == "k1").then(|| serde_json::from_value(json!({ "chatId": id, "deviceId": "mac", "status": "working", "startedAt": "2027-01-15T08:00:00Z", "updatedAt": chrono::Utc::now() })).unwrap());
+        let leads = join(&inputs(&chats, &steps, &HashMap::new(), &HashMap::new(), &turn, &activity));
         let rows: Vec<Value> = leads["lead"].rows.iter().map(row_value).collect();
         let working = rows.iter().find(|r| r.field("chat").map(text).as_deref() == Some("k1")).unwrap();
         assert_eq!(working.field("activity").map(text).as_deref(), Some("Run npm test"));
         assert_eq!(working.field("activity_at").and_then(Value::as_f64), Some(1_800_000_000.));
         assert_eq!(working.field("quiet_since").and_then(Value::as_f64), Some(1_800_000_000.));
+        assert_eq!(working.field("turn_started_at").and_then(Value::as_f64), Some(1_800_000_000.), "its turn's start, in seconds");
         let review = rows.iter().find(|r| r.field("chat").map(text).as_deref() == Some("k2")).unwrap();
         assert_eq!(review.field("state").map(text).as_deref(), Some("readyForReview"));
         assert_eq!(review.field("activity"), Some(&Value::Nil), "only a working row says what it does");
+        assert_eq!(review.field("turn_started_at"), Some(&Value::Nil));
     }
 
     #[test]

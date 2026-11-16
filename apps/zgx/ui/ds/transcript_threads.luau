@@ -2032,7 +2032,8 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 		local c = child()
 		if x.state == "working" then
 			local now = props.tick:get()
-			return if c and c.delegated_at then clock_text(now - c.delegated_at) else ""
+			local at = if type(x.turn_started_at) == "number" then x.turn_started_at elseif c then c.delegated_at else nil
+			return if at then clock_text(now - at) else ""
 		end
 		if type(x.turn) == "table" and type(x.turn.ms) == "number" then
 			return M.elapsed(x.turn.ms / 1000)

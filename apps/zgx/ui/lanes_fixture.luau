@@ -539,6 +539,7 @@ do
 				r.chat = "dg-five"
 				r.key = "owned:dg-five"
 				r.line = "Drafting the notes"
+				r.turn_started_at = os.time() - 3725
 				return r
 			elseif r.step == "s2" then
 				r.state = "failed"
@@ -587,7 +588,7 @@ ui.command { id = "show_plan", title = "A lead's plan in its transcript", run = 
 	plan_shown:set(true)
 end }
 local function plan_tool(id: string): any
-	return { id = id, kind = "mcp", verb = "Called", target = "zeron.plan", call = 'zeron · plan\n{\n  "action": "write"\n}' }
+	return { id = id, kind = "mcp", verb = "Wrote the plan", plan = "write", call = 'zeron · plan\n{\n  "action": "write"\n}' }
 end
 local plan_messages = ui.state("test_plan_messages", {
 	{ id = "lead-0", role = "assistant", text = "", blocks = {

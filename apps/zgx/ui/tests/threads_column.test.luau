@@ -331,6 +331,7 @@ test("threads: a row whose state changes keeps its node; one changing group move
 	expect(app:has("#threads-section-planned")).to_be(false)
 	expect(app:text("#threads-group-working-count")).to_be("2")
 	expect(app:has("#plan-card-step-s5 >> .step-mark-working")).to_be(true)
+	expect(app:tree("#plan-card-step-s5"):match('"(1:02:0%d)"') ~= nil).to_be(true)
 	expect(app:has("#plan-card-step-s2 >> .step-mark-failed")).to_be(true)
 	expect(app:error()).to_be(nil)
 end)

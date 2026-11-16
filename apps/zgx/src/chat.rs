@@ -413,7 +413,7 @@ fn plainly_has_row(entry: &Json) -> bool {
         Some("user") => true,
         // As `blocks_of`: a tool that isn't its output alone, or a thought with words.
         Some("assistant") => entry["parts"].as_array().into_iter().flatten().any(|part| match part["kind"].as_str() {
-            Some("tool") => !display_tool(part),
+            Some("tool") => !display_tool(part) && !tool_search(part),
             Some("reasoning") => !part["text"].as_str().unwrap_or_default().trim().is_empty(),
             _ => false,
         }),
@@ -5349,7 +5349,7 @@ const LIVE_ROWS_MOST: usize = 16;
 fn plain_part(p: &Json) -> bool {
     match p["kind"].as_str() {
         Some("tool") => {
-            !display_tool(p) && !is_agent(p) && p["outputTruncated"].as_bool() != Some(true)
+            !display_tool(p) && !tool_search(p) && !is_agent(p) && p["outputTruncated"].as_bool() != Some(true)
         }
         Some("reasoning") => !p["text"].as_str().unwrap_or_default().trim().is_empty(),
         _ => false,
@@ -6897,6 +6897,9 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
     // between them doesn't part them; anything else does.
     let mut pictures: Vec<&Json> = Vec::new();
     for (ix, &part) in parts.iter().enumerate() {
+        if tool_search(part) {
+            continue;
+        }
         let kind = part["kind"].as_str();
         if kind == Some("image") {
             flush(&mut out, &mut group, group_last);
@@ -7097,7 +7100,7 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
         })
     };
     // (A display tool is no work: its output shows in the reply.)
-    let worked_tool = |p: &Json| p["kind"].as_str() == Some("tool") && !display_tool(p);
+    let worked_tool = |p: &Json| p["kind"].as_str() == Some("tool") && !display_tool(p) && !tool_search(p);
     let is_work = |ix: usize, p: &Json| {
         worked_tool(p) || thought(p) || (said(p) && reply_start.is_none_or(|start| ix < start))
     };
@@ -7477,6 +7480,52 @@ fn is_thread_link(part: &Json) -> bool {
     made && part["subagentRef"].as_str().is_some_and(|r| !r.is_empty())
 }
 
+fn tool_search(part: &Json) -> bool {
+    part["kind"].as_str() == Some("tool") && part["call"]["kind"].as_str() == Some("unknown") && part["call"]["name"].as_str() == Some("ToolSearch")
+}
+
+fn zeron_tool(call: &Json) -> Option<&str> {
+    match call["kind"].as_str()? {
+        "mcp" if call["server"].as_str() == Some("zeron") => call["tool"].as_str()?.rsplit("__").next(),
+        "unknown" => call["name"].as_str()?.strip_prefix("mcp__zeron__"),
+        _ => None,
+    }
+}
+
+const SAID_TOOLS: &[&str] = &["plan", "read_thread", "send_message_to_thread", "task_cancel", "task_status"];
+
+/// (The doc keeps only `plan`'s `action` of these inputs, crates/doc `zeron_badge`: the rest is read from a whole-JSON output.)
+fn zeron_said(part: &Json) -> (String, Option<String>) {
+    let call = &part["call"];
+    let input = &call["input"];
+    let output: Json = part["output"].as_str().and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
+    let arg = |k: &str| input[k].as_str().or(output[k].as_str()).filter(|v| !v.is_empty());
+    let thread = || arg("threadId").and_then(|id| CHATS.with(|c| c.chats.borrow().get(id).and_then(|chat| chat["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned)));
+    let (verb, target) = match zeron_tool(call).unwrap_or_default() {
+        "plan" => match input["action"].as_str() {
+            Some("write") => {
+                let steps = input["steps"].as_array().or(output["steps"].as_array()).map(Vec::len);
+                ("Wrote the plan", steps.map(|n| if n == 1 { "1 step".to_owned() } else { format!("{n} steps") }))
+            }
+            Some("step") => (
+                match arg("state") {
+                    Some("done") => "Marked step done",
+                    Some("skipped") => "Marked step skipped",
+                    Some("open") => "Reopened step",
+                    _ => "Marked step",
+                },
+                None,
+            ),
+            _ => ("Read the plan", None),
+        },
+        "read_thread" => ("Read thread", thread()),
+        "send_message_to_thread" => ("Messaged thread", thread()),
+        "task_cancel" => ("Stopped task", None),
+        _ => ("Checked task", None),
+    };
+    (verb.to_owned(), target)
+}
+
 #[derive(PartialEq)]
 enum Genus {
     Agent,
@@ -7546,6 +7595,7 @@ impl Tally {
     fn of(p: &Json) -> Tally {
         match p["kind"].as_str() {
             Some("reasoning") => Tally::Thought,
+            Some("tool") if tool_search(p) => Tally::None,
             Some("tool") => {
                 if let Some(row) = crate::tool_details::computer_row(p) {
                     return Tally::Computer { app: row.app };
@@ -7872,6 +7922,9 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
             ]));
         }
         "tool" => {
+            if tool_search(part) {
+                return None;
+            }
             if let Some(computer) = crate::tool_details::computer_row(part) {
                 return Some(computer_tool(id, part, computer));
             }
@@ -7901,6 +7954,10 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
                 _ if is_thread_link(part) => ("thread", "Started thread".into(), call["input"]["title"].as_str().map(Into::into)),
                 // (The doc keeps a delegate's `title` alone: crates/doc `zeron_badge`.)
                 _ if is_delegate(part) => ("delegate", "Delegated".into(), call["input"]["title"].as_str().or(call["input"]["task"].as_str()).map(Into::into)),
+                _ if zeron_tool(call).is_some_and(|t| SAID_TOOLS.contains(&t)) => {
+                    let (verb, target) = zeron_said(part);
+                    ("mcp", verb, target)
+                }
                 "mcp" => {
                     let tool = s("tool").unwrap_or_default();
                     let server = s("server").unwrap_or_default();
@@ -7949,6 +8006,9 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
     }
     if part["isError"].as_bool() == Some(true) {
         fields.push(("failed", Value::Bool(true)));
+    }
+    if zeron_tool(&part["call"]) == Some("plan") && part["call"]["input"]["action"].as_str() == Some("write") {
+        fields.push(("plan", Value::from("write")));
     }
     // A subagent's spawn: the doc it runs in (its lane, a panel tab of its
     // own), how it stands, and its tab's title (the shipping app's).
@@ -10244,7 +10304,35 @@ mod tests {
         assert_eq!((f(&patch, "verb"), f(&patch, "target")), ("Patched".into(), "workspace".into()));
         let read = row(call("r", json!({ "kind": "readFile", "path": "/w/src/parse.rs" })));
         assert_eq!((f(&read, "target"), f(&read, "path")), ("parse.rs".into(), "/w/src/parse.rs".into()));
+        let zeron = |tool: &str, input: Json| call("z", json!({ "kind": "mcp", "server": "zeron", "tool": tool, "input": input }));
+        let kept = row(zeron("plan", json!({ "action": "write" })));
+        assert_eq!((f(&kept, "kind"), f(&kept, "verb"), f(&kept, "target"), f(&kept, "plan")), ("mcp".into(), "Wrote the plan".into(), String::new(), "write".into()), "the doc keeps only the action");
+        let whole = row(zeron("plan", json!({ "action": "write", "steps": [{ "title": "a" }, { "title": "b" }, { "title": "c" }] })));
+        assert_eq!((f(&whole, "target"), f(&whole, "plan")), ("3 steps".into(), "write".into()));
+        let lead = row(call("l", json!({ "kind": "unknown", "name": "mcp__zeron__plan", "input": { "action": "write" } })));
+        assert_eq!((f(&lead, "kind"), f(&lead, "verb"), f(&lead, "plan")), ("mcp".into(), "Wrote the plan".into(), "write".into()));
+        let mut marked = zeron("plan", json!({ "action": "step" }));
+        marked["output"] = json!(r#"{"state":"skipped","stepId":"s2"}"#);
+        assert_eq!(f(&row(marked), "verb"), "Marked step skipped");
+        assert_eq!(f(&row(zeron("plan", json!({ "action": "step", "stepId": "s1", "state": "done" }))), "verb"), "Marked step done");
+        assert!(row(zeron("plan", json!({ "action": "step" }))).field("plan").is_none(), "only a write holds the plan card");
+        for (tool, verb) in [("read_thread", "Read thread"), ("send_message_to_thread", "Messaged thread"), ("task_cancel", "Stopped task"), ("task_status", "Checked task")] {
+            let said = row(call("t", json!({ "kind": "mcp", "server": "zeron", "tool": tool })));
+            assert_eq!((f(&said, "verb"), f(&said, "target")), (verb.into(), String::new()), "{tool}");
+        }
+        let search = call("q", json!({ "kind": "unknown", "name": "ToolSearch", "input": { "query": "select:Read" } }));
+        assert!(tool(&search).is_none());
         let reply = |parts: Json| json!({ "id": "a", "role": "assistant", "status": "complete", "parts": parts });
+        assert_eq!(blocks(&reply(json!([search]))).list().len(), 0, "a group of lookups alone draws nothing");
+        let reads = |between: Option<Json>| {
+            let mut parts = vec![call("r1", json!({ "kind": "readFile", "path": "/w/a.rs" }))];
+            parts.extend(between);
+            parts.push(call("r2", json!({ "kind": "readFile", "path": "/w/b.rs" })));
+            blocks(&reply(Json::Array(parts))).list().to_vec()
+        };
+        let (with, without) = (reads(Some(search.clone())), reads(None));
+        assert_eq!(with.len(), 1, "a lookup parts no group");
+        assert_eq!((f(&with[0], "summary"), with[0].field("tools").unwrap().list().len()), (f(&without[0], "summary"), 2));
         let q = |id: &str, header: &str| json!({ "id": id, "header": header, "question": "Which?", "options": ["A", "B"] });
         let two = json!({ "kind": "input", "id": "i", "requestId": "r", "resolved": true, "questions": [q("a", "Scope"), q("b", "Reviewer")],
             "answers": [{ "questionId": "a", "labels": ["A"] }, { "questionId": "b", "labels": [] }] });

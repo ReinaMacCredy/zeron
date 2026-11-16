@@ -114,6 +114,7 @@ function M.card(chat: string?): any
 				quiet_since = r.quiet_since,
 				activity = r.activity,
 				activity_at = r.activity_at,
+				turn_started_at = r.turn_started_at,
 				turn = r.turn,
 			}
 			table.insert(lines, line)
