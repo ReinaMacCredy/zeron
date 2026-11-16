@@ -3051,7 +3051,12 @@ fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
     doc.write_plan(
         "lead",
         &first,
-        &[step("a1", "lead", "One"), step("a2", "lead", "Two")],
+        &[
+            step("a1", "lead", "One"),
+            step("a2", "lead", "Two"),
+            step("a3", "lead", "Three"),
+            step("a4", "lead", "Four"),
+        ],
         false,
         ts(3_000),
     )
@@ -3094,14 +3099,36 @@ fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
     let plans: Vec<u32> = restarted.steps_of("lead").iter().map(|s| s.plan).collect();
     assert_eq!(
         plans.len(),
-        51,
-        "the closed plan's steps stay, and the 50-step cap counts only the plan being written"
+        53,
+        "the closed plan's steps stay, those it never ran too, and the 50-step cap counts only the plan being written"
     );
-    assert_eq!(&plans[..2], [1, 1]);
-    assert!(plans[2..].iter().all(|plan| *plan == 2));
+    assert_eq!(&plans[..4], [1, 1, 1, 1]);
+    assert!(plans[4..].iter().all(|plan| *plan == 2));
     let kept = restarted.chat("lead").unwrap().unwrap().plan.unwrap();
     assert_eq!(kept, second);
     assert_eq!(kept.number(), 2);
+
+    assert!(
+        doc.carry_step("a1", ts(4_500)).is_err(),
+        "a step that ran stays in its plan"
+    );
+    doc.carry_step("a3", ts(4_500)).unwrap();
+    let lead_steps = doc.steps_of("lead");
+    let last = lead_steps.last().unwrap();
+    assert_eq!(
+        (last.id.as_str(), last.plan, last.title.as_str()),
+        ("a3", 2, "Three"),
+        "a carried step joins the current plan after its last step"
+    );
+    assert!(
+        doc.carry_step("a3", ts(4_500)).is_err(),
+        "only a closed plan's step is carried"
+    );
+    assert!(
+        doc.carry_step("a4", ts(4_500)).is_err(),
+        "the 50-step cap counts the carried step"
+    );
+    assert_eq!(doc.task_step("a4").unwrap().plan, 1);
 
     let wide = zeron_proto::ChatPlan {
         overview: "語".repeat(3_000),

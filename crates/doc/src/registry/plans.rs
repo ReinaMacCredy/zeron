@@ -1,7 +1,7 @@
 use super::task_steps::flagged_deleted;
 use super::tasks::{check_images, check_notes, check_step_count, invalid};
 use super::*;
-use zeron_proto::{ChatPlan, TaskStep, TaskStepPatch};
+use zeron_proto::{ChatPlan, TaskStep, TaskStepPatch, pin_order_key_between};
 
 fn check_plan(plan: &ChatPlan) -> Result<(), DocError> {
     check_notes(&plan.overview)?;
@@ -107,7 +107,7 @@ impl RegistryDoc {
         let dropped: Vec<TaskStep> = self
             .current_steps(chat_id, replaced.as_ref())
             .into_iter()
-            .filter(|step| !self.step_started(step))
+            .filter(|step| !plan.is_closed(step.plan) && !self.step_started(step))
             .collect();
         let kept = self
             .current_steps(chat_id, Some(plan))
@@ -169,6 +169,37 @@ impl RegistryDoc {
         }
         self.enqueue_ops(batch);
         Ok(())
+    }
+
+    pub fn carry_step(&mut self, step_id: &str, now: DateTime<Utc>) -> Result<TaskStep, DocError> {
+        let step = self
+            .task_step(step_id)
+            .ok_or_else(|| invalid("Step no longer exists"))?;
+        let chat_id = step.owner_chat_id.clone();
+        let plan = self.chat_plan(&chat_id)?.unwrap_or_default();
+        if !plan.is_closed(step.plan) || self.step_started(&step) {
+            return Err(invalid(
+                "Only a step a closed plan never ran can join the current plan",
+            ));
+        }
+        check_step_count(self.current_steps(&chat_id, Some(&plan)).len() + 1)?;
+        let hlc = self.next_hlc();
+        let key = pin_order_key_between(self.last_step_key(&chat_id).as_deref(), None, &hlc)
+            .map_err(invalid)?;
+        let op = RowOp {
+            kind: KIND_TASK_STEPS.into(),
+            id: step_id.into(),
+            op: OpKind::Update,
+            set: Some(fields([
+                ("plan", json!(plan.number())),
+                ("orderKey", json!(key)),
+                ("updatedAt", json!(now.timestamp_millis())),
+            ])),
+            hlc,
+            clocks: None,
+        };
+        self.enqueue_ops(vec![op]);
+        Ok(step)
     }
 
     pub fn move_plans_to_chats(&mut self) -> usize {
