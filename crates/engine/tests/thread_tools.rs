@@ -5948,6 +5948,70 @@ async fn a_mission_chat_waits_for_approval_only_on_a_plan_from_the_persons_messa
 }
 
 #[tokio::test]
+async fn a_message_read_mid_turn_over_a_plan_that_ran_starts_plan_two() {
+    let rig = rig_with(Duration::from_millis(700), true);
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let config = zeron_proto::ChatConfig {
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        access: zeron_proto::AccessMode::FullAccess,
+        plan: false,
+        instructions: String::new(),
+        profile_id: None,
+        instance_id: None,
+        disabled_tools: Vec::new(),
+        mission: Some(zeron_proto::ChatMission {
+            same_agents: false,
+            approve: true,
+            size: zeron_proto::PlanSize::Medium,
+        }),
+    };
+    rig.core.workspace.set_chat_config("lead", &config).unwrap();
+    let plan = |titles: &[&str]| {
+        let steps: Vec<_> = titles
+            .iter()
+            .map(|title| serde_json::json!({ "title": title }))
+            .collect();
+        serde_json::json!({ "op": "planSteps", "chatId": "lead", "fromChatId": "lead", "steps": steps })
+    };
+    let lead = |rig: &Rig| rig.core.workspace.chat("lead").unwrap().unwrap();
+
+    queue_run(&rig.core, "lead", "c1", "m1", "grade the outputs");
+    wait_for(|| working(&rig.core, "lead"), "the first goal's turn").await;
+    mutate(plan(&["Parse", "Grade"])).await.unwrap();
+    let first = rig.core.workspace.steps_of("lead");
+    mutate(serde_json::json!({
+        "op": "updateTaskStep", "stepId": first[0].id, "patch": { "outcome": "skipped" }, "fromChatId": "lead",
+    }))
+    .await
+    .unwrap();
+    queue_steer(&rig.core, "lead", "s1", "now the cart");
+    wait_for(
+        || rig.steers.lock().unwrap().iter().any(|s| s.contains("now the cart")),
+        "the steer read mid-turn",
+    )
+    .await;
+    mutate(plan(&["Cart"])).await.unwrap();
+    let chat = lead(&rig);
+    let plan_now = chat.plan.clone().unwrap();
+    assert_eq!(
+        (plan_now.number(), plan_now.closed.len()),
+        (2, 1),
+        "a goal read mid-turn closes the plan that ran, as one sent to an idle lead does"
+    );
+    assert_eq!(plan_now.closed[0].until.as_deref(), Some("msg-s1"));
+    assert!(chat.plan_pending, "and its plan waits for the person");
+}
+
+#[tokio::test]
 async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_its_plan() {
     let rig = rig(Duration::from_millis(20));
     let rpc = rig.core.rpc_service();

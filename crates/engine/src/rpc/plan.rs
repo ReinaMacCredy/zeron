@@ -465,7 +465,7 @@ impl EngineRpc {
         let mission = chat.mission();
         if let Some(mission) = mission {
             plan.same_agents = mission.same_agents;
-            if mission_turn {
+            if mission_turn && (closing || before.is_empty()) {
                 plan.size = Some(mission.size);
             }
         }

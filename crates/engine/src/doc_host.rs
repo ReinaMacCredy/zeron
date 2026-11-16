@@ -7886,7 +7886,7 @@ impl DocHost {
         opens: bool,
     ) {
         let person = person && zeron_proto::agent_messages::agent_message_sender(typed).is_none();
-        if !opens || !person || typed == zeron_proto::RESUME_PROMPT {
+        if !person || typed == zeron_proto::RESUME_PROMPT {
             return;
         }
         let command = zeron_proto::invocation::leading_command(typed).is_some()
@@ -7897,7 +7897,10 @@ impl DocHost {
                         && typed[..range.start].trim().is_empty()
                 });
         let mission = !command && sessions.mission(chat_id).is_some();
-        sessions.set_mission_turn(chat_id, mission.then_some(message_id));
+        // A message read mid-turn never clears a goal the lead has not planned for yet.
+        if mission || opens {
+            sessions.set_mission_turn(chat_id, mission.then_some(message_id));
+        }
     }
 
     /// Every fresh harness dispatch crosses this boundary, including
