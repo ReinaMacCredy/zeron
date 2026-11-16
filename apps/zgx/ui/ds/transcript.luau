@@ -310,6 +310,7 @@ local TURN_GAP = 16
 local SEAM_GAP = 6
 local JUMP_H = 30
 local DIM, DIM_MS = 0.38, 160
+local WAIT_GRACE_MS = 500
 local FOLD_MS, FOLD_FADE_MS, FOLD_EASE = 240, 160, "cubicBezier(0.4, 0, 0.2, 1)"
 -- A prompt landing in place: its room opens as the queue's row goes (the deck folds then, and a later start read as a step down and back up), what came with it rises a beat in.
 local LAND_ROOM_MS, LAND_RISE_AT = 220, 80
@@ -629,7 +630,7 @@ end
 -- word and clock, as Zeron's working trailer (transcript.rs); not
 -- delivered, a line to send it again. The reply's own row takes over once
 -- it comes.
-local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, working: any, wait: (() -> any)?, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
+local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?, working: any, wait: (() -> any)?, since: () -> number, turn_state: ((m: Message, sending: boolean) -> TurnLine?)?): Node
 	local function said(): TurnLine?
 		local m = row:get()
 		return if turn_state and m.waiting and m.waiting ~= "failed" then turn_state(m, m.waiting == "sending") else nil
@@ -643,7 +644,7 @@ local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?
 		return if w and wait and wait() then "compaction" elseif s and s.step then "step" elseif s then "said" elseif w then "waiting" else nil
 	end, function(kind: string): Node
 		if kind == "compaction" then
-			return Compaction.Wait { wait = wait :: any }
+			return Compaction.Wait { wait = wait :: any, since = since }
 		end
 		if kind == "said" then
 			return ui.row { w_full = true, mt = "$space.4", turn_line(said) }
@@ -1318,6 +1319,59 @@ local function Transcript(props: Props): Node
 	local count = ui.computed(function(): number
 		return messages:len()
 	end)
+	-- (The wait is held a moment after the session lets it go: its row can come a publish later.)
+	local waits_live = false
+	local wait_last: any = nil
+	local wait_since = ui.now()
+	local wait_turn = 0
+	local wait_held = ui.use_state(false)
+	local handed = ui.use_state(false)
+	local handoffs: { [string]: Compaction.Handoff } = {}
+	local function session_wait(): any
+		return if props.compaction_wait then props.compaction_wait() else nil
+	end
+	ui.effect(function()
+		local w = session_wait()
+		if w then
+			if not waits_live then
+				waits_live = true
+				wait_turn += 1
+				table.clear(handoffs)
+				handed:set(false)
+				wait_held:set(false)
+			end
+			if w.phase == "compacting" and (not wait_last or wait_last.phase ~= "compacting") then
+				wait_since = ui.now()
+			end
+			wait_last = w
+		elseif waits_live then
+			waits_live = false
+			wait_turn += 1
+			local turn = wait_turn
+			wait_held:set(true)
+			ui.after(WAIT_GRACE_MS, function()
+				if wait_turn == turn then
+					-- (A row landed out of view isn't built: shown later, it is settled.)
+					table.clear(handoffs)
+					wait_held:set(false)
+				end
+			end)
+		end
+	end)
+	local function trailing_wait(): any
+		if handed:get() then
+			return nil
+		end
+		local w = session_wait()
+		if w then
+			return w
+		end
+		return if wait_held:get() then wait_last else nil
+	end
+	local compaction_wait = if props.compaction_wait then trailing_wait else nil
+	local function wait_since_of(): number
+		return wait_since
+	end
 	-- A prompt the host adds at the end on its own (a queued message, as a turn or a compaction ends) lands in place.
 	local landing: { id: string, at: number }? = nil
 	local arrived: { [string]: number } = {}
@@ -1332,13 +1386,32 @@ local function Transcript(props: Props): Node
 		end
 		local was, first = tail, not tail_read
 		tail, tail_read = id, true
+		if not first and was and wait_last and (waits_live or wait_held:peek()) then
+			for i = (messages:index_of("id", was) or n) + 1, n do
+				local x = messages:at(i)
+				if x and x.role == "system" and x.line == "compaction" and not handoffs[x.id] then
+					local xid = x.id
+					handoffs[xid] = {
+						phase = wait_last.phase,
+						since = wait_since,
+						held = function(): boolean
+							return session_wait() and true or false
+						end,
+						landed = function()
+							handoffs[xid] = nil
+						end,
+					}
+					handed:set(true)
+				end
+			end
+		end
 		if not first and was and last and last.from_chat ~= nil then
 			local at = messages:index_of("id", was)
 			if at and at < n then
 				arrived[id :: string] = ui.now()
 			end
 		end
-		if first or not last or not was or last.role ~= "user" or last.from_chat ~= nil or SENT:peek()[id] or not at_end:peek() or motion.reduced_now() then
+		if first or not last or not was or last.role ~= "user" or (last.from_chat ~= nil and last.continued_on == nil) or SENT:peek()[id] or not at_end:peek() or motion.reduced_now() then
 			return
 		end
 		local at = messages:index_of("id", was)
@@ -2523,17 +2596,36 @@ local function Transcript(props: Props): Node
 				return 0
 			end
 			if mine then
-				return if sent_here(m.id) then (list.height or 0) - placed(m.id) else 0
+				if sent_here(m.id) then
+					return (list.height or 0) - placed(m.id)
+				end
+				if state:get().continued_on == nil then
+					return 0
+				end
 			end
-			if i < 2 then
-				return 0
-			end
+			-- (Rows landing under the reply keep its room: dropping it threw the whole view down by the room, 437 pt at a compaction.)
 			local p = pin:get()
-			local prompt = messages:at(i - 1)
-			if not prompt or prompt.id ~= p.id or not sent_here(prompt.id) then
-				return 0
+			local used = 0
+			for k = i - 1, 1, -1 do
+				local x = messages:at(k)
+				if not x then
+					return 0
+				end
+				if x.role == "user" and x.continued_on == nil then
+					if not sent_here(x.id) then
+						return 0
+					end
+					local r = runways[x.id]
+					local h = if x.id == p.id then p.h elseif r then r.own() else nil
+					return if h then math.max(0, (list.height or 0) - placed(x.id) - h - used) else 0
+				end
+				local r = runways[x.id]
+				if not r then
+					return 0
+				end
+				used += r.own()
 			end
-			return math.max(0, (list.height or 0) - placed(prompt.id) - p.h)
+			return 0
 		end
 		local function last(): boolean
 			return index:get() == count:get()
@@ -2653,10 +2745,10 @@ local function Transcript(props: Props): Node
 			end
 			return ui.show(function(): boolean
 				return not told()
-			end, body, ui.column {
+			end, body, landed(ui.column {
 				w_full = true,
-				if mine then waiting_line(state, props.on_retry, props.working, props.compaction_wait, props.turn_state) else nil,
-			})
+				if mine then waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state) else nil,
+			}))
 		end
 		local function folded(): number?
 			local f = fold:get()
@@ -2783,6 +2875,7 @@ local function Transcript(props: Props): Node
 						m = function(): any
 							return state:get()
 						end,
+						from = handoffs[m.id],
 					}
 					elseif m.role == "system" and m.line == "claude_command" and m.context then ContextCard {
 						report = function(): any
@@ -2893,7 +2986,7 @@ local function Transcript(props: Props): Node
 							end else nil,
 						},
 						strip(m, state, hovered, branch_actions(m, state)),
-						waiting_line(state, props.on_retry, props.working, props.compaction_wait, props.turn_state),
+						waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state),
 					})
 					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
@@ -2902,9 +2995,16 @@ local function Transcript(props: Props): Node
 					if not last() or (mine and state:get().waiting ~= nil) then
 						return nil
 					end
-					return if props.compaction_wait and props.compaction_wait() then "wait" else nil
+					return if compaction_wait and compaction_wait() then "wait" else nil
 				end, function(): Node
-					return Compaction.Wait { wait = props.compaction_wait :: any }
+					-- (Handed to its row, it goes at once: the row stands where it was.)
+					return ui.column {
+						w_full = true,
+						opacity = function(): number
+							return if handed:get() then 0 else 1
+						end,
+						Compaction.Wait { wait = compaction_wait :: any, since = wait_since_of },
+					}
 				end, { w_full = true, exit = { opacity = 0, duration = 120 } }),
 				layer.Here(m.id),
 			},

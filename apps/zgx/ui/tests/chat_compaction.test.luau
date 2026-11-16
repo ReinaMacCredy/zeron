@@ -266,6 +266,60 @@ test("compaction: a compaction never moves the reading place or the composer", f
 	expect(app:error()).to_be(nil)
 end)
 
+test("compaction: landing under a turn sent here, its row takes the wait's place and nothing above moves, whichever the host says first", function()
+	local landed = row("c7", { text = "Agent compacted", kept = { pre = 406500, post = 19100, ms = 53000 } })
+	for _, order in { "together", "row first", "wait first" } do
+		local app = opened()
+		app:type('role:textbox "Message"', "Rise into place")
+		app:key("Enter")
+		app:frames(60)
+		local ms = app:state("chat.messages")
+		local prompt = "#" .. ms[#ms].id:gsub("%-", "%%-") .. " "
+		app:command("engine_copy")
+		app:frames(20)
+		app:command("start_reply")
+		app:frames(5)
+		app:command("stream_words")
+		app:frames(5)
+		app:command("end_reply")
+		wait_for(app, { phase = "compacting" })
+		local _, top = box(app, "", prompt)
+		local _, line = box(app, "#compaction-wait", " status ")
+		expect(top ~= nil and line ~= nil).to_be(true)
+		local function goes()
+			app:set_state("test_patch", { compaction_wait = false })
+			app:command("patch_open")
+		end
+		local function lands()
+			app:set_state("test_rows", { landed })
+			app:command("push_rows")
+		end
+		local steps = if order == "together"
+			then { [1] = { lands, goes } }
+			elseif order == "row first" then { [1] = { lands }, [4] = { goes } }
+			else { [1] = { goes }, [4] = { lands } }
+		for f = 1, 40 do
+			for _, step in steps[f] or {} do
+				step()
+			end
+			app:frames(1)
+			local _, y = box(app, "", prompt)
+			expect(`{order} f{f}: prompt {y}`).to_be(`{order} f{f}: prompt {top}`)
+			local _, at = box(app, "#transcript", "#c7%-head ")
+			if at then
+				expect(`{order} f{f}: line {at}`).to_be(`{order} f{f}: line {line}`)
+				local _, waits = app:tree("#transcript"):gsub("#compaction%-wait ", "")
+				expect(`{order} f{f}: {waits} waits`).never.to_be(`{order} f{f}: 2 waits`)
+			end
+		end
+		settle(app)
+		expect(app:has("#compaction-wait")).to_be(false)
+		expect(app:tree("#c7-head")).to_contain("Agent compacted")
+		expect(clocks(app)).to_be(0)
+		expect(app:error()).to_be(nil)
+	end
+end)
+
 test("compaction: a message that waits out a compaction shows as its row, not only in the folded pill", function()
 	local app = opened()
 	patch(app, { running = true, queue = { { id = "q1", text = "Queued in the turn" } } })
