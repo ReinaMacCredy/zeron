@@ -684,6 +684,10 @@ function M.new(opts: {
 		end
 		-- A press on the card's buttons moves the keys off the field; only one outside it commits.
 		local function left()
+			-- The window sent to the back blurs the field too: the comment stays open for the way back.
+			if ui.window.active:peek() == false then
+				return
+			end
 			ui.after(0, function()
 				if pressing then
 					pressing = false
