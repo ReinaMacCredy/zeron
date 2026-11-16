@@ -8,6 +8,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -L "$ROOT/target" ]; then
+  echo "run-macos-dev: $ROOT/target is on the RAM disk, too small for an app build; run scripts/seed-worktree-target.sh --ssd first" >&2
+  exit 1
+fi
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 DEV_ROOT="${ZERON_DEV_ROOT:-$ROOT/target/macos-dev}"

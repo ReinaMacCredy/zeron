@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Seed a fresh worktree's target/debug and apps/zgx/target with copy-on-write
-# clones of the main checkout's build artifacts, so third-party crates are not
-# rebuilt, turn incremental compilation off there, and trash other worktrees'
-# cold targets.
-# Usage: scripts/seed-worktree-target.sh [main-checkout] [worktree]
+# Point a fresh worktree's target/ and apps/zgx/target at the RAM disk, where
+# checks and narrow tests cost no SSD writes, turn incremental compilation off
+# there, and trash other worktrees' cold targets. With --ssd, seed them on disk
+# instead with copy-on-write clones of the main checkout's build artifacts, for
+# a worktree that has to build the app or run a whole test suite.
+# Usage: scripts/seed-worktree-target.sh [--ssd] [main-checkout] [worktree]
 
 set -euo pipefail
 
 SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SSD=0
+if [ "${1:-}" = --ssd ]; then
+  SSD=1
+  shift
+fi
 ROOT="${1:-${ZERON_PROJECT_ROOT:-$(git -C "$SCRIPTS" worktree list --porcelain | sed -n '1s/^worktree //p')}}"
 WORKTREE="${2:-${ZERON_WORKTREE_PATH:-$PWD}}"
 
@@ -25,8 +31,22 @@ if [ ! -e "$WORKTREE/.cargo/config.toml" ]; then
   echo "seed: wrote $WORKTREE/.cargo/config.toml (incremental off)"
 fi
 
+ram() {
+  local target="$WORKTREE/$1" dest="$RAM/$(basename "$WORKTREE")/$2"
+  if [ -e "$target" ] && [ ! -L "$target" ]; then
+    echo "seed: $target already exists on disk; skipping"
+    return
+  fi
+  ln -sfn "$dest" "$target"
+  echo "seed: $target -> $dest"
+}
+
 seed() {
   local src="$ROOT/$1" target="$WORKTREE/$1" profile
+  if [ -L "$target" ]; then
+    rm -rf "$(readlink "$target")"
+    rm "$target"
+  fi
   if [ -e "$target" ]; then
     echo "seed: $target already exists; skipping"
     return
@@ -57,5 +77,12 @@ seed() {
   echo "seed: cloned $src into $target in $((SECONDS - start))s"
 }
 
-seed target debug
-seed apps/zgx/target debug release
+if [ "$SSD" = 1 ]; then
+  seed target debug
+  seed apps/zgx/target debug release
+else
+  RAM="$("$SCRIPTS/ram-target.sh" --path)"
+  ram target target
+  ram apps/zgx/target zgx-target
+  "$SCRIPTS/ram-target.sh" >/dev/null
+fi
