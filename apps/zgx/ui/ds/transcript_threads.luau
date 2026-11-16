@@ -6,6 +6,7 @@ local locale = require("@self/locale")
 local Button = require("@self/button")
 local motion = require("@self/motion")
 local ProgressBar = require("@self/progress").ProgressBar
+local SessionStats = require("@self/session_stats")
 
 local M = {}
 
@@ -1738,6 +1739,10 @@ function M.Chip(props: { text: string | () -> string, id: string? }): Node
 	}
 end
 
+function M.quiet(s: any): boolean
+	return s.state == "working" and type(s.quiet_since) == "number"
+end
+
 local function quiet_minutes(since: number): number
 	return math.max(1, math.floor(status.since(since) / 60))
 end
@@ -1750,7 +1755,7 @@ function M.chips(s: any): { { k: string, text: string } }
 	if s.state == "working" and type(s.background) == "table" and #s.background > 0 then
 		table.insert(out, { k = "background", text = locale.s("ds.threads.chip.background") })
 	end
-	if s.state == "working" and type(s.quiet_since) == "number" then
+	if M.quiet(s) then
 		table.insert(out, { k = "quiet", text = locale.s("ds.threads.chip.quiet", { n = quiet_minutes(s.quiet_since) }) })
 	end
 	return out
@@ -1916,25 +1921,15 @@ function M.step_said(s: any, hb: Handback?): string?
 	return if text ~= "" then first_lines(text, 6) else nil
 end
 
-local function clock_text(secs: number): string
-	secs = math.max(0, math.floor(secs))
-	local h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
-	if h > 0 then
-		return string.format("%d:%02d:%02d", h, m, s)
-	end
-	return string.format("%d:%02d", m, s)
-end
-
 local function mark_kind(s: any): string
 	local st = s.state
-	if st == "working" then
-		return if type(s.quiet_since) == "number" then "quiet" else "working"
+	if M.quiet(s) then
+		return "quiet"
 	elseif st == "readyForReview" then
 		return "review"
 	end
 	return st or "planned"
 end
-M.mark_kind = mark_kind
 
 local CHECK_INK = { review = "$text.secondary", done = "$success" }
 
@@ -2013,6 +2008,7 @@ end
 export type PlanProps = {
 	id: string,
 	threads: Threads,
+	card: (() -> any)?,
 	handback: ((step: string) -> Handback?)?,
 	body: ((text: string, key: string?) -> Node)?,
 	found: ((key: string) -> boolean)?,
@@ -2083,7 +2079,7 @@ local StepRow = ui.component(function(props: { plan: PlanProps, row: State<any>,
 		if x.state == "working" then
 			local now = props.tick:get()
 			local at = if type(x.turn_started_at) == "number" then x.turn_started_at elseif c then c.delegated_at else nil
-			return if at then clock_text(now - at) else ""
+			return if at then SessionStats.clock((now - at) * 1000) else ""
 		end
 		if type(x.turn) == "table" and type(x.turn.ms) == "number" then
 			return M.elapsed(x.turn.ms / 1000)
@@ -2379,8 +2375,11 @@ end)
 
 function M.Plan(props: PlanProps): Node
 	local threads = props.threads
+	local card_now = ui.computed(function(): any
+		return if props.card then props.card() elseif threads.plan then threads.plan() else nil
+	end)
 	local function now(): any
-		return if threads.plan then threads.plan() else nil
+		return card_now:get()
 	end
 	local function approved(): boolean
 		local p = now()

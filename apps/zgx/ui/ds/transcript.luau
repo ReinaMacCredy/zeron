@@ -841,7 +841,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		if (b.kind == "tools" or b.kind == "work") and top and view and view.plan_call and view.threads then
 			local plan_call, threads = view.plan_call, view.threads
 			local function card(): Node
-				return Threads.Plan { id = "plan-card", threads = threads, handback = view.handback, body = view.plan_body, found = view.plan_found }
+				return Threads.Plan { id = "plan-card", threads = threads, card = view.plan, handback = view.handback, body = view.plan_body, found = view.plan_found }
 			end
 			return ui.presence(function(): string
 				local id = plan_call()
@@ -1291,8 +1291,11 @@ local function Transcript(props: Props): Node
 			return { key = key, query = f.query, current = f.current, reveal = reveal }
 		end
 	end
-	local function plan_card(): any
+	local card = ui.computed(function(): any
 		return if plan_call and plan_call() and threads and threads.plan then (threads.plan :: any)() else nil
+	end)
+	local function plan_card(): any
+		return card:get()
 	end
 	local handbacks = ui.computed(function(): { [string]: Threads.Handback }
 		local p = plan_card()

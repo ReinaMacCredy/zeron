@@ -87,7 +87,7 @@ local function steps_of(chat: string?): ({ any }, any)
 	return out, plan
 end
 
-function M.card(chat: string?): any
+local function build_card(chat: string?): any
 	local steps, plan = steps_of(chat)
 	if not plan then
 		return nil
@@ -140,6 +140,21 @@ function M.card(chat: string?): any
 		done = progress.done or 0,
 		total = progress.total or #steps,
 	}
+end
+
+local cards: { [string]: { entry: any, card: any } } = {}
+
+function M.card(chat: string?): any
+	local entry = M.of(chat)
+	local hit = if chat then cards[chat] else nil
+	if hit and hit.entry == entry then
+		return hit.card
+	end
+	local card = build_card(chat)
+	if chat then
+		cards[chat] = if entry then { entry = entry, card = card } else nil
+	end
+	return card
 end
 
 function M.plan_running(chat: string?): boolean
@@ -724,7 +739,7 @@ local function line_of(r: any): string
 end
 
 local function mark_kind(r: any): string
-	return if r.state == "working" and type(r.quiet_since) == "number" then "quiet" else r.state
+	return if Transcript.quiet(r) then "quiet" else r.state
 end
 
 local function RowView(ctx: Ctx, now: () -> any): Node

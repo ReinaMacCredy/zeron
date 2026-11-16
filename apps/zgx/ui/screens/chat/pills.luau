@@ -1076,12 +1076,10 @@ local EVENT: { [string]: string } = {
 }
 
 local function event_kind(step: any): string
-	if step.state == "working" then
-		if type(step.quiet_since) == "number" then
-			return "quiet"
-		elseif type(step.background) == "table" and #step.background > 0 then
-			return "background"
-		end
+	if Steps.quiet(step) then
+		return "quiet"
+	elseif step.state == "working" and type(step.background) == "table" and #step.background > 0 then
+		return "background"
 	end
 	return step.state or "planned"
 end
@@ -1107,8 +1105,11 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	local function plan_live(): boolean
 		return main and Threads.plan_running(bind.id())
 	end
-	local function mission(): any
+	local mission_now = ui.computed(function(): any
 		return if main then Threads.card(bind.id()) else nil
+	end)
+	local function mission(): any
+		return mission_now:get()
 	end
 	local event = ui.use_state("")
 	local seen: { [string]: string }? = nil
@@ -1361,7 +1362,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 				local c = mission()
 				local out: { string } = {}
 				for _, step in (if c then c.steps else {}) do
-					table.insert(out, if step.state == "working" and step.quiet_since then "quiet" else step.state or "planned")
+					table.insert(out, if Steps.quiet(step) then "quiet" else step.state or "planned")
 				end
 				return out
 			end,
