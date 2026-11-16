@@ -158,8 +158,19 @@ function M.card(chat: string?): any
 end
 
 function M.plan_running(chat: string?): boolean
-	local entry = M.of(chat)
-	return entry ~= nil and entry.plan ~= nil and entry.plan.pending ~= true and #(entry.plan.order or {}) > 0
+	local c = M.card(chat)
+	if not c or c.pending or c.count == 0 then
+		return false
+	end
+	if c.done < c.total then
+		return true
+	end
+	for _, s in c.steps do
+		if s.state == "working" then
+			return true
+		end
+	end
+	return false
 end
 
 function M.working(chat: string?): number

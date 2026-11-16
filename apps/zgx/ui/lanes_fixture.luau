@@ -653,6 +653,40 @@ local MORE: { any } = {
 	{ id = "h-many", role = "user", from_chat = "dg-ask", steps = { "dg-review", "dg-ask" }, clock = "4:30 PM", text = 'Step "Add CSV export to orders" (stepId s1) finished a turn on its thread dg-review.\nTurn: 1m 2s, 2 tool calls, 0 failed.\n\n> The CSV has a header row now.\n\nStep "Add rate \\"limiting\\"" (taskStepId s2) was cancelled on its thread dg-ask.\n\nRead them with read_thread, then mark each step done or skipped with the plan tool, action "step", or tell its thread what is still missing with send_message_to_thread.' },
 	{ id = "h-mixed", role = "user", from_chat = "dg-ask", steps = { "dg-ask" }, wake = { "dg-fail" }, clock = "4:31 PM", text = 'Step "Add rate limiting to checkout" (stepId s2) failed on its thread dg-ask.\n\n> Redis is not reachable.\n\nDelegated task dg-fail ("Fix flaky cart total test") completed.\n\n> The flaky test is fixed.\n\nRead it with read_thread, then send the thread a fix with send_message_to_thread, run the step again with delegate_task and stepId s2, or mark it skipped with the plan tool. Use task_status with taskId dg-fail to read the result.' },
 }
+ui.command { id = "plan_retry", title = "The lead starts step 2 twice, then a start of step 5 fails", run = function()
+	local now = table.clone(plan_messages:peek())
+	local failed = delegate_tool("d-6", "", "Write the release notes", "s5")
+	failed.delegate = nil
+	failed.failed = true
+	table.insert(now, { id = "lead-3", role = "assistant", text = "", blocks = {
+		{ id = "b4", kind = "tools", tools = { delegate_tool("d-4", "dg-ask", "Add rate limiting to checkout", "s2"), delegate_tool("d-5", "dg-ask", "Add rate limiting to checkout", "s2") } },
+		{ id = "b5", kind = "text", text = "Step 5 next." },
+		{ id = "b6", kind = "tools", tools = { failed } },
+	} })
+	plan_messages:set(now)
+end }
+ui.command { id = "plan_long", title = "The plan's reply says a lot before the plan, and the chat goes on after it", run = function()
+	local words = {}
+	for i = 1, 40 do
+		table.insert(words, `Paragraph {i} of why the plan is shaped this way.`)
+	end
+	local now = {}
+	for _, m in plan_messages:peek() do
+		if m.id == "lead-1" then
+			m = table.clone(m)
+			m.blocks = table.clone(m.blocks)
+			m.blocks[1] = { id = "b1", kind = "text", text = table.concat(words, "\n\n") }
+		end
+		table.insert(now, m)
+	end
+	for i = 1, 12 do
+		table.insert(now, { id = `after-{i}`, role = "assistant", text = "", blocks = { { id = `a{i}`, kind = "text", text = `Later reply {i}.` } } })
+	end
+	plan_messages:set(now)
+end }
+ui.command { id = "go_plan", title = "The Plan pill's click", run = function()
+	require("@ds/transcript").to_plan()
+end }
 ui.command { id = "plan_more", title = "Two steps hear back in one message; a wake mixes a step and a plain task", run = function()
 	local now = table.clone(plan_messages:peek())
 	for _, m in MORE do

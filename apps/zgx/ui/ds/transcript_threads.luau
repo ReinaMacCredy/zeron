@@ -2007,6 +2007,7 @@ end
 
 export type PlanProps = {
 	id: string,
+	ref: Ref?,
 	threads: Threads,
 	card: (() -> any)?,
 	handback: ((step: string) -> Handback?)?,
@@ -2574,6 +2575,7 @@ function M.Plan(props: PlanProps): Node
 		}),
 	}
 	return ui.column {
+		ref = props.ref,
 		relative = true,
 		w_full = true,
 		min_w = 0,

@@ -1028,13 +1028,15 @@ return ui.component(function(props: Props): Node
 			local out: { any } = {}
 			local run: any = nil
 			for _, t in tools:get() do
-				local step = if p and t.kind == "delegate" then step_of(t, p) else nil
+				local step = if p and t.kind == "delegate" and not t.failed then step_of(t, p) else nil
 				if step then
 					if not run then
 						run = { key = `steps:{t.id}`, steps = {} }
 						table.insert(out, run)
 					end
-					table.insert(run.steps, step)
+					if not table.find(run.steps, step) then
+						table.insert(run.steps, step)
+					end
 				else
 					run = nil
 					table.insert(out, { key = t.id, tool = t })

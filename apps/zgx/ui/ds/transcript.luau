@@ -309,6 +309,7 @@ local TAIL = 32
 local TURN_GAP = 16
 local SEAM_GAP = 6
 local JUMP_H = 30
+local LAND_GAP = 12
 local DIM, DIM_MS = 0.38, 160
 local WAIT_GRACE_MS = 500
 local FOLD_MS, FOLD_FADE_MS, FOLD_EASE = 240, 160, "cubicBezier(0.4, 0, 0.2, 1)"
@@ -797,6 +798,7 @@ type View = {
 	threads: Threads.Threads?,
 	plan_call: (() -> string?)?,
 	plan: (() -> any?)?,
+	plan_ref: Ref?,
 	handback: ((step: string) -> Threads.Handback?)?,
 	plan_body: ((text: string, key: string?) -> Node)?,
 	plan_found: ((key: string) -> boolean)?,
@@ -841,7 +843,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		if (b.kind == "tools" or b.kind == "work") and top and view and view.plan_call and view.threads then
 			local plan_call, threads = view.plan_call, view.threads
 			local function card(): Node
-				return Threads.Plan { id = "plan-card", threads = threads, card = view.plan, handback = view.handback, body = view.plan_body, found = view.plan_found }
+				return Threads.Plan { id = "plan-card", ref = view.plan_ref, threads = threads, card = view.plan, handback = view.handback, body = view.plan_body, found = view.plan_found }
 			end
 			return ui.presence(function(): string
 				local id = plan_call()
@@ -1294,6 +1296,7 @@ local function Transcript(props: Props): Node
 	local card = ui.computed(function(): any
 		return if plan_call and plan_call() and threads and threads.plan then (threads.plan :: any)() else nil
 	end)
+	local plan_ref = ui.ref()
 	local function plan_card(): any
 		return card:get()
 	end
@@ -2211,7 +2214,8 @@ local function Transcript(props: Props): Node
 		})
 		going = this
 	end
-	local function go_to(id: string)
+	-- (`within`: a part of the row to land on instead of its top, once both are laid out.)
+	local function go_to(id: string, within: Ref?)
 		local index = messages:index_of("id", id)
 		if not index or not list:peek() then
 			return
@@ -2223,17 +2227,32 @@ local function Transcript(props: Props): Node
 				table.insert(above, m.id)
 			end
 		end
-		glide_to(function(): number
-			return row_top(id, above)
-		end, function()
+		local function goal(): number
+			local top = row_top(id, above)
+			local r = rows[id]
+			local row_el, el = r and r.outer:peek(), within and within:peek()
+			if row_el and el and row_el.y ~= nil and el.y ~= nil then
+				return math.max(0, top + (el.y :: number) - (row_el.y :: number) - LAND_GAP)
+			end
+			return top
+		end
+		glide_to(goal, function()
 			local r = rows[id]
 			if r and r.outer:peek() then
-				offset:set(math.max(0, row_top(id, above)))
+				offset:set(math.max(0, goal()))
 				return
 			end
 			local now, el = messages:index_of("id", id), list:peek()
 			if now and el then
 				el:scroll_to_row(now, { align = "start" })
+				if within then
+					ui.after(0, function()
+						local back = rows[id]
+						if back and back.outer:peek() then
+							offset:set(goal())
+						end
+					end)
+				end
 			end
 		end)
 	end
@@ -2283,7 +2302,7 @@ local function Transcript(props: Props): Node
 		for i = messages:len(), 1, -1 do
 			local x = messages:at(i)
 			if x and Threads.holds({ blocks = x.blocks, tools = x.tools }, id) then
-				go_to(x.id)
+				go_to(x.id, plan_ref)
 				return
 			end
 		end
@@ -3075,7 +3094,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state),
 					})
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, handback = function(step: string): Threads.Handback?
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, plan_ref = plan_ref, handback = function(step: string): Threads.Handback?
 							return handbacks:get()[step]
 						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
