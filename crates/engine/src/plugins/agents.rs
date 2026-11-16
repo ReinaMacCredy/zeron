@@ -1216,8 +1216,7 @@ impl Agents {
             ));
         }
         let access = match args.get("access") {
-            None if sandbox == zeron_proto::SandboxLevel::ReadOnly => zeron_proto::AccessMode::Supervised,
-            None => zeron_proto::AccessMode::default(),
+            None => zeron_proto::AccessMode::Supervised,
             Some(value) => serde_json::from_value::<zeron_proto::AccessMode>(value.clone()).map_err(|_| {
                 Refused::new(
                     reason::BAD_CALL,
