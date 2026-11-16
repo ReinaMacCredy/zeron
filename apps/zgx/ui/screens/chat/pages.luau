@@ -10,6 +10,7 @@ local references = require("@ds/references")
 local HtmlPicks = require("@ds/html_picks")
 local store = require("@app/screens/chat/store")
 local queued = require("@app/screens/chat/queued")
+local Held = require("@app/screens/chat/held")
 
 local M = {}
 
@@ -31,22 +32,23 @@ local function picks_in(text: string): { any }
 	return picks
 end
 
--- (`after`: the transcript's last message then; the steered one lands past it.)
-local function landed(messages: { any }, e: any): boolean
-	local past = e.after == nil
+local function carrying(messages: { any }, picks: { any }): number
+	local n = 0
 	for _, m in messages do
-		if past and m.role == "user" then
-			for _, a in m.attachments or {} do
-				for _, p in e.picks do
-					if a.kind == "pick" and a.card == p.card and (a.group or "") == p.group and a.code == p.code then
-						return true
-					end
-				end
+		local has = false
+		for _, a in (if m.role == "user" then m.attachments else nil) or {} do
+			for _, p in picks do
+				has = has or (a.kind == "pick" and a.card == p.card and (a.group or "") == p.group and a.code == p.code)
 			end
 		end
-		past = past or m.id == e.after
+		n += if has then 1 else 0
 	end
-	return false
+	return n
+end
+
+-- (A minute on it counts as lost: its picks open again rather than stay locked for good.)
+local function landed(messages: { any }, e: any): boolean
+	return carrying(messages, e.picks) > e.had or os.time() - e.at > 60
 end
 
 -- What `M.unsteer` takes, should the message not go.
@@ -64,8 +66,7 @@ function M.steer(chat: string, text: string): string?
 	end
 	steers += 1
 	local id = `steered:{steers}`
-	local last = messages[#messages]
-	table.insert(list, { id = id, picks = picks, after = if last then last.id else nil })
+	table.insert(list, { id = id, picks = picks, had = carrying(messages, picks), at = os.time() })
 	STEERED:set_key({ chat }, list)
 	return id
 end
@@ -110,6 +111,9 @@ function M.with_queue(chat: string?, messages: { any }, except: string?): { any 
 		if r.sending then
 			add(r)
 		end
+	end
+	for _, h in Held.of(chat) do
+		add({ id = Held.PREFIX .. h.id, text = h.req.text })
 	end
 	for _, e in STEERED:get()[chat] or {} do
 		if not landed(messages, e) then
