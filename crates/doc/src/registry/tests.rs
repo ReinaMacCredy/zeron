@@ -2877,6 +2877,7 @@ fn plan_steps_sync_in_order_under_their_chat() {
         order_key: Some(zeron_proto::pin_order_key_between(None, Some(&first), "n").unwrap()),
         chat_id: Some(Some("child-3".into())),
         outcome: Some(Some(zeron_proto::StepOutcome::Done)),
+        earlier: Some(vec!["child-1".into()]),
         ..Default::default()
     };
     assert!(a.update_task_step("s3", &to_front, ts(3_000)).unwrap());
@@ -2884,6 +2885,7 @@ fn plan_steps_sync_in_order_under_their_chat() {
     assert_eq!(step_ids(&b, "lead"), ["s3", "s1", "s2"]);
     let moved = b.task_step("s3").unwrap();
     assert_eq!(moved.chat_id.as_deref(), Some("child-3"));
+    assert_eq!(moved.earlier, ["child-1"]);
     assert_eq!(moved.outcome, Some(zeron_proto::StepOutcome::Done));
     let reopen = zeron_proto::TaskStepPatch {
         outcome: Some(None),

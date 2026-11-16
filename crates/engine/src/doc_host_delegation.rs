@@ -893,12 +893,15 @@ impl DocHost {
             cwd,
             delegation,
         )?;
-        let bind = |chat_id: Option<String>| zeron_proto::TaskStepPatch {
+        let bind = |chat_id: Option<String>, earlier: Vec<String>| zeron_proto::TaskStepPatch {
             chat_id: Some(chat_id),
+            earlier: Some(earlier),
             ..Default::default()
         };
         if let Some(step) = &step {
-            let bound = workspace.update_task_step(&step.id, &bind(Some(chat_id.clone())));
+            let mut earlier = step.earlier.clone();
+            earlier.extend(step.chat_id.clone().filter(|old| !earlier.contains(old)));
+            let bound = workspace.update_task_step(&step.id, &bind(Some(chat_id.clone()), earlier));
             if !matches!(bound, Ok(true)) {
                 workspace.delete_chat(&chat_id).ok();
                 self.purge_chat(&chat_id);
@@ -928,7 +931,9 @@ impl DocHost {
             .await
         {
             if let Some(step) = &step {
-                workspace.update_task_step(&step.id, &bind(None)).ok();
+                workspace
+                    .update_task_step(&step.id, &bind(step.chat_id.clone(), step.earlier.clone()))
+                    .ok();
             }
             workspace.update_chat_delegation(&chat_id, |d| {
                 d.status = DelegationStatus::Failed;

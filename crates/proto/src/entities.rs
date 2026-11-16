@@ -1039,6 +1039,12 @@ pub fn thread_link(chat: &Chat, steps: &[TaskStep]) -> Option<ThreadLink> {
             .filter(|step| !step.deleted && step.chat_id.as_deref() == Some(chat.id.as_str()))
             .filter(|step| step.owner_chat_id == parent)
             .max_by_key(|step| step.outcome.is_none())
+            .or_else(|| {
+                steps
+                    .iter()
+                    .filter(|step| !step.deleted && step.owner_chat_id == parent)
+                    .find(|step| step.earlier.contains(&chat.id))
+            })
             .map(|step| step.id.clone())
     };
     if let Some(source) = &chat.forked_from_chat_id {
@@ -1116,6 +1122,8 @@ pub struct TaskStep {
         deserialize_with = "lenient_option"
     )]
     pub target: Option<RouteTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1188,6 +1196,8 @@ pub struct TaskStepPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub target: Option<Option<RouteTarget>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earlier: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3735,6 +3745,14 @@ mod tests {
         assert_eq!(
             link(&opened, &[gone]).map(|l| l.kind),
             Some(LinkKind::OpenedFrom)
+        );
+        let mut rerun = bound.clone();
+        rerun.chat_id = Some("c2".into());
+        rerun.earlier = vec!["c".into()];
+        assert_eq!(
+            link(&delegated, std::slice::from_ref(&rerun)).and_then(|l| l.step_id),
+            Some("s1".into()),
+            "an earlier attempt stays linked to the step it ran"
         );
         let mut fork = opened.clone();
         fork.forked_from_chat_id = Some("source".into());

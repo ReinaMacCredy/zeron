@@ -5266,6 +5266,21 @@ async fn a_step_thread_stopped_before_its_first_reply_settles_and_the_step_runs_
     .await;
     let again = run_step(core, &step).await;
     assert_ne!(again, thread, "the lead starts the step again");
+    let rerun = core.workspace.task_step(&step.id).unwrap();
+    assert_eq!(rerun.chat_id.as_deref(), Some(again.as_str()));
+    assert_eq!(
+        rerun.earlier,
+        [thread.clone()],
+        "attempt 1 stays on its step"
+    );
+    let first = core.workspace.chat(&thread).unwrap().unwrap();
+    assert!(!first.archived, "an earlier attempt is not archived");
+    assert_eq!(
+        zeron_proto::thread_link(&first, &core.workspace.steps_of("task-lead"))
+            .and_then(|link| link.step_id),
+        Some(step.id.clone()),
+        "attempt 1 still links to its step"
+    );
     rig.core.shutdown().await;
 }
 

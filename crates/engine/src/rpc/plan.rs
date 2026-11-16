@@ -394,6 +394,11 @@ impl EngineRpc {
                 notes: step.notes,
                 order_key: String::new(),
                 turn: None,
+                earlier: before
+                    .iter()
+                    .find(|old| old.chat_id.is_some() && old.chat_id == step.thread_id)
+                    .map(|old| old.earlier.clone())
+                    .unwrap_or_default(),
                 chat_id: step.thread_id,
                 outcome: None,
                 created_at: now,
@@ -714,6 +719,7 @@ impl EngineRpc {
                     role,
                     route: None,
                     target,
+                    earlier: Vec::new(),
                 });
                 changes.push(format!("New step \"{title}\" (stepId {id}){with}."));
                 continue;
@@ -817,6 +823,7 @@ mod tests {
             role: None,
             route: None,
             target: None,
+            earlier: Vec::new(),
         }
     }
 

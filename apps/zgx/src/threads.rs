@@ -65,6 +65,8 @@ struct Row {
     locked: bool,
     updated: Option<i64>,
     background: Vec<String>,
+    attempt: Option<usize>,
+    earlier: Vec<(String, String)>,
 }
 
 struct Inputs<'a> {
@@ -106,6 +108,8 @@ fn thread_row(chat: &Chat, kind: &'static str, state: ThreadState, step: Option<
         locked: step.is_some(),
         updated: Some(chat.last_message_at.unwrap_or(chat.created_at).timestamp()),
         background: Vec::new(),
+        attempt: None,
+        earlier: Vec::new(),
     }
 }
 
@@ -121,7 +125,7 @@ fn background(chat: &Chat, session: Option<&Session>, now: chrono::DateTime<chro
 fn join(i: &Inputs) -> HashMap<String, Lead> {
     let steps: Vec<&TaskStep> = i.steps.iter().filter(|s| !s.deleted).collect();
     let mut leads: HashSet<&str> = steps.iter().map(|s| s.owner_chat_id.as_str()).collect();
-    let mut wanted: HashSet<&str> = steps.iter().filter_map(|s| s.chat_id.as_deref()).collect();
+    let mut wanted: HashSet<&str> = steps.iter().flat_map(|s| s.chat_id.iter().chain(&s.earlier)).map(String::as_str).collect();
     for (id, peers) in i.peers {
         if !peers.is_empty() {
             leads.insert(id);
@@ -182,6 +186,8 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
             match thread_of(s) {
                 Some(t) if shows.get(t.id.as_str()) == Some(&ix) => rows.push(Row {
                     background: background(t, (i.live)(&t.id).as_ref(), i.now),
+                    attempt: Some(s.earlier.len() + 1),
+                    earlier: s.earlier.iter().filter_map(|id| chats.get(id.as_str())).map(|c| (c.id.clone(), c.display_title())).collect(),
                     ..thread_row(t, "owned", states[ix], Some((s, ix + 1)))
                 }),
                 Some(_) => {}
@@ -209,11 +215,14 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                         locked: s.outcome.is_some(),
                         updated: None,
                         background: Vec::new(),
+                        attempt: None,
+                        earlier: Vec::new(),
                     });
                 }
             }
         }
-        let mut own: Vec<&Chat> = children.get(lead_id).into_iter().flatten().copied().filter(|c| !shows.contains_key(c.id.as_str())).collect();
+        let attempts: HashSet<&str> = plan.iter().flat_map(|s| &s.earlier).map(String::as_str).collect();
+        let mut own: Vec<&Chat> = children.get(lead_id).into_iter().flatten().copied().filter(|c| !shows.contains_key(c.id.as_str()) && !attempts.contains(c.id.as_str())).collect();
         own.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
         rows.extend(own.into_iter().map(|c| thread_row(c, "owned", zeron_proto::chat_state(c, indicator(c)), None)));
         for peer in i.peers.get(lead_id).into_iter().flatten().filter_map(|id| chats.get(id.as_str())).filter(|c| !c.archived) {
@@ -261,6 +270,8 @@ fn row_value(r: &Row) -> Value {
         ("locked", Value::Bool(r.locked)),
         ("updated", r.updated.map_or(Value::Nil, |at| Value::from(at as f64))),
         ("background", strings_value(&r.background)),
+        ("attempt", r.attempt.map_or(Value::Nil, |n| Value::from(n as f64))),
+        ("earlier", if r.earlier.is_empty() { Value::Nil } else { Value::List(r.earlier.iter().map(|(id, title)| Value::record([("id", Value::from(id.as_str())), ("title", Value::from(title.as_str()))])).collect()) }),
     ])
 }
 
@@ -665,6 +676,36 @@ pub(crate) mod tests {
         assert_eq!(rows[1], ("owned", Some(3), "k1".to_string(), ThreadState::Working));
         assert_eq!(&rows[4..], [("owned", None, "done".to_string(), ThreadState::Done), ("owned", None, "free".to_string(), ThreadState::ReadyForReview)]);
         assert_eq!(leads["lead"].states[0], ThreadState::Done);
+    }
+
+    #[test]
+    fn a_rerun_step_numbers_its_attempt_and_its_earlier_thread_is_no_row_of_its_own() {
+        let mut chats = vec![chat("lead", json!({ "plan": {} }))];
+        chats.push(owned("try1", "lead", "completed"));
+        chats.push(owned("try2", "lead", "running"));
+        let mut steps = plan("lead", &[Some("try2")]);
+        steps.iter_mut().find(|s| s.id == "s1").unwrap().earlier = vec!["try1".into()];
+        let idle_with_battery = |id: &str| {
+            (id == "try2").then(|| {
+                serde_json::from_value(json!({
+                    "chatId": id, "deviceId": "mac", "status": "idle", "updatedAt": chrono::Utc::now(),
+                    "backgroundTasks": [{ "id": "bg", "command": "node battery.js", "description": "Run the battery" }],
+                }))
+                .unwrap()
+            })
+        };
+        let leads = joined(Json::Array(chats), &steps, HashMap::new(), &idle_with_battery);
+        let lead = &leads["lead"];
+        assert!(lead.rows.iter().all(|r| r.chat.as_deref() != Some("try1")), "{:?}", summary(lead));
+        let row = row_value(&lead.rows[0]);
+        assert_eq!(row.field("chat").map(text).as_deref(), Some("try2"));
+        assert_eq!(row.field("state").map(text).as_deref(), Some("working"));
+        assert_eq!(row.field("attempt").and_then(Value::as_f64), Some(2.));
+        let earlier = row.field("earlier").unwrap().list();
+        assert_eq!(earlier.len(), 1);
+        assert_eq!(earlier[0].field("id").map(text).as_deref(), Some("try1"));
+        assert_eq!(earlier[0].field("title").map(text).as_deref(), Some("try1"));
+        assert_eq!(row.field("background").unwrap().list().iter().map(text).collect::<Vec<_>>(), ["Run the battery"]);
     }
 
     #[test]
