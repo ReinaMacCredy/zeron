@@ -3173,6 +3173,7 @@ local function Transcript(props: Props): Node
 						UserMessage {
 							id = m.id,
 							text = m.text,
+							steered = m.steered,
 							chat_mark = chat_mark,
 							attachments = m.attachments,
 							-- (Its pictures follow the message: sent from here,

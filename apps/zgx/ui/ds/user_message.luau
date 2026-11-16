@@ -66,6 +66,8 @@ export type Props = {
 	session: (() -> string?)?,
 	editing: (() -> boolean)?,
 	editor: ((bubble: { w: number, h: number }) -> Node)?,
+	-- Rows steered as one (src/chat.rs `said`): each its own bubble, with what it carried.
+	steered: { { text: string, attachments: { Attachment }? } }?,
 	-- It lands in a transcript on its own (ds/transcript): what came with it rises after this long, its words a beat later.
 	rise: number?,
 }
@@ -303,7 +305,7 @@ local RISE_MS = 180
 local RISE_BY = 8
 local RISE_WORDS = 80
 
-return ui.component(function(props: Props): Node
+local One = ui.component(function(props: Props): Node
 	-- Open: kept by id when it has one (else this bubble's own).
 	local own = ui.use_state(false)
 	local id = props.id
@@ -615,4 +617,39 @@ return ui.component(function(props: Props): Node
 			elseif props.text == "" then nil
 			else words(), RISE_WORDS),
 	}
+end)
+
+return ui.component(function(props: Props): Node
+	local parts = props.steered
+	if not parts or #parts < 2 then
+		return One(props)
+	end
+	local function bubbles(): Node
+		local list: { Node } = {
+			ui.text { locale.t("ds.user_message.steered"), selectable = false, text_size = "$font.size.xs", color = "$text.tertiary" },
+		}
+		for _, p in parts do
+			table.insert(list, One {
+				text = p.text,
+				attachments = p.attachments,
+				chat_mark = props.chat_mark,
+				open = props.open,
+				link_menu = props.link_menu,
+				session = props.session,
+				find = props.find,
+				wash = props.wash,
+				rise = props.rise,
+			})
+		end
+		return ui.column { w_full = true, items = "end", gap = ui.raw(3, "rows steered as one sit as close as one message"), list }
+	end
+	local editing = props.editing
+	if not editing or not props.editor then
+		return bubbles()
+	end
+	return ui.presence(function(): string
+		return if editing() then "edit" else "words"
+	end, function(k: string): Node
+		return if k == "edit" then One(props) else bubbles()
+	end, { w_full = true })
 end)

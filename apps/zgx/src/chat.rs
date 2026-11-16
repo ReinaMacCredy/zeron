@@ -683,18 +683,13 @@ impl Pending {
             );
         }
         // (Its passages as chips, as the sent message shows them.)
-        let (words, chats) = split_chats(&self.words);
-        let (words, comments) = split_comments(&words);
-        let (words, badges) = quote_badges(&words);
-        let (words, quotes) = split_quotes(&words);
-        let (words, picks) = split_annotations(&words);
-        let (words, chosen) = page_picks(&words);
-        let badges: Vec<Value> = badges.into_iter().chain(chosen).collect();
+        let Said { words, quotes, picks, comments, badges, chats, steered } = said(&self.words);
         Value::record([
             ("id", Value::from(self.id.as_str())),
             ("role", Value::from("user")),
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &badges, &chats)),
+            ("steered", steered),
             ("waiting", Value::from(self.waiting)),
             // Still in the engine's outbox, its files uploading: nothing has
             // gone to its chat yet (a Cloud machine isn't woken for it).
@@ -4256,25 +4251,81 @@ fn whole_of(rows: &[SteerRow]) -> (String, Vec<String>) {
     (words, rows.iter().flat_map(|r| r.paths.clone()).collect())
 }
 
-/// Each row's picks after all the words, where the one message's readers look for them.
+// Unseen in a bubble and by the agent: what tells rows steered as one from a numbered list someone typed.
+const STEERED: char = '\u{2063}';
+
+/// Each row whole behind the mark, the last Open pages block alone kept.
 fn joined(rows: &[SteerRow]) -> String {
-    let parts: Vec<_> = rows.iter().map(|r| zeron_proto::html_render::split_picks(&r.text)).collect();
-    let mut out = numbered(&parts.iter().map(|p| p.0.to_owned()).collect::<Vec<_>>());
-    let blocks = parts.iter().flat_map(|p| p.1.iter().copied());
-    for block in blocks.chain(parts.iter().rev().find_map(|p| p.2)) {
-        out.push_str("\n\n");
-        out.push_str(block);
-    }
-    out
+    let mut open = false;
+    let mut parts: Vec<&str> = rows
+        .iter()
+        .rev()
+        .map(|r| {
+            let text = r.text.trim();
+            match zeron_proto::html_render::split_picks(text).2 {
+                Some(block) if std::mem::replace(&mut open, true) => text[..text.len() - block.len()].trim_end(),
+                _ => text,
+            }
+        })
+        .collect();
+    parts.reverse();
+    let parts: Vec<String> = parts.iter().enumerate().map(|(i, t)| format!("{STEERED}{}. {t}", i + 1)).collect();
+    parts.join("\n\n")
 }
 
-fn numbered(texts: &[String]) -> String {
-    texts
-        .iter()
+fn steered_parts(text: &str) -> Option<Vec<&str>> {
+    let parts: Vec<&str> = text
+        .strip_prefix(STEERED)?
+        .split(&format!("\n\n{STEERED}"))
         .enumerate()
-        .map(|(i, t)| format!("{}. {}", i + 1, t.trim()))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .map(|(i, part)| part.strip_prefix(&format!("{}. ", i + 1)))
+        .collect::<Option<_>>()?;
+    (parts.len() > 1).then_some(parts)
+}
+
+struct Said {
+    words: String,
+    quotes: Vec<(String, String)>,
+    picks: Vec<Pick>,
+    comments: Vec<(String, String)>,
+    badges: Vec<Value>,
+    chats: Vec<(String, String)>,
+    steered: Value,
+}
+
+fn said_once(text: &str) -> Said {
+    let (words, chats) = split_chats(text);
+    let (words, comments) = split_comments(&words);
+    let (words, badges) = quote_badges(&words);
+    let (words, quotes) = split_quotes(&words);
+    let (words, picks) = split_annotations(&words);
+    let (words, chosen) = page_picks(&words);
+    let badges = badges.into_iter().chain(chosen).collect();
+    Said { words, quotes, picks, comments, badges, chats, steered: Value::Nil }
+}
+
+/// What a sent message says and carries; rows steered as one each keep theirs, in `steered`.
+fn said(text: &str) -> Said {
+    let Some(parts) = steered_parts(text) else { return said_once(text) };
+    let mut all = Said { words: String::new(), quotes: vec![], picks: vec![], comments: vec![], badges: vec![], chats: vec![], steered: Value::Nil };
+    let mut bubbles = Vec::new();
+    let mut words = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let one = said_once(part);
+        bubbles.push(Value::record([
+            ("text", Value::from(one.words.as_str())),
+            ("attachments", carried_value(&[], &one.quotes, &one.picks, &one.comments, &one.badges, &one.chats)),
+        ]));
+        words.push(format!("{}. {}", i + 1, one.words));
+        all.quotes.extend(one.quotes);
+        all.picks.extend(one.picks);
+        all.comments.extend(one.comments);
+        all.badges.extend(one.badges);
+        all.chats.extend(one.chats);
+    }
+    all.words = words.join("\n\n");
+    all.steered = Value::List(bubbles.into());
+    all
 }
 
 fn row_paths(row: &Json) -> Vec<String> {
@@ -6310,13 +6361,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // (An Appshot's context isn't what the person said: its picture
             // says which app instead.)
             let (words, shots) = crate::appshots::split_appshots(&words);
-            let (words, chats) = split_chats(&words);
-            let (words, comments) = split_comments(&words);
-            let (words, badges) = quote_badges(&words);
-            let (words, quotes) = split_quotes(&words);
-            let (words, picks) = split_annotations(&words);
-            let (words, chosen) = page_picks(&words);
-            let badges: Vec<Value> = badges.into_iter().chain(chosen).collect();
+            let Said { words, quotes, picks, comments, badges, chats, steered } = said(&words);
             for p in entry["parts"].as_array().into_iter().flatten() {
                 if p["kind"].as_str() == Some("image")
                     && let Some(path) = p["path"].as_str()
@@ -6332,6 +6377,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("role", Value::from("user")),
                 ("text", Value::from(words.as_str())),
                 ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments, &badges, &chats), &shots)),
+                ("steered", steered),
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
                 ("created", Value::Num(created)),
                 ("copy", copy_value(&words)),
@@ -9303,29 +9349,32 @@ mod tests {
 
     #[test]
     fn rows_steered_as_one_are_numbered_blocks() {
-        assert_eq!(numbered(&["  first \n".into(), "second".into()]), "1. first\n\n2. second");
         let row = |text: &str| SteerRow { id: String::new(), text: text.into(), paths: Vec::new() };
         let open = format!("{}\n\"Later\": C (Rail)", zeron_proto::html_render::OPEN_PAGES);
-        let whole = whole_of(&[
-            row(&format!("A2\n\nĐã chọn trong \"Frame\":\nA = A2 (Top)\nChưa chọn: B (Tabs)\n\n{open}")),
-            row("plain"),
-            row("B1\n\nĐã chọn trong \"Frame\":\nB = B1 (Edge)"),
-        ])
-        .0;
+        let first = format!("A2\n\nĐã chọn trong \"Frame\":\nA = A2 (Top)\nChưa chọn: B (Tabs)\n\n{open}");
+        let whole = whole_of(&[row(&first), row("  plain \n"), row(&format!("B1\n\nĐã chọn trong \"Frame\":\nB = B1 (Edge)\n\n{open}"))]).0;
         assert_eq!(
             whole,
-            format!("1. A2\n\n2. plain\n\n3. B1\n\nĐã chọn trong \"Frame\":\nA = A2 (Top)\nChưa chọn: B (Tabs)\n\nĐã chọn trong \"Frame\":\nB = B1 (Edge)\n\n{open}")
+            format!("{STEERED}1. A2\n\nĐã chọn trong \"Frame\":\nA = A2 (Top)\nChưa chọn: B (Tabs)\n\n{STEERED}2. plain\n\n{STEERED}3. B1\n\nĐã chọn trong \"Frame\":\nB = B1 (Edge)\n\n{open}")
         );
+        let all = said(&whole);
+        assert_eq!(all.words, "1. A2\n\n2. plain\n\n3. B1");
+        let codes = |v: &Value| -> Vec<String> {
+            v.field("attachments").unwrap().list().iter().map(|c| c.field("code").map(text).unwrap_or_default()).collect()
+        };
+        let bubbles = all.steered.list();
+        assert_eq!(bubbles.iter().map(|b| text_of(b, "text")).collect::<Vec<_>>(), ["A2", "plain", "B1"]);
+        assert_eq!((codes(&bubbles[0]), codes(&bubbles[1]), codes(&bubbles[2])), (vec!["A2".to_owned()], vec![], vec!["B1".to_owned()]));
+        assert_eq!(all.badges.len(), 2, "the message carries every row's picks");
+        assert!(matches!(said("1. typed\n\n2. list").steered, Value::Nil), "a numbered list someone typed is one bubble");
         let open = format!("again\n\n{}\n\"Khung app\": A (Kiểu góc)", zeron_proto::html_render::OPEN_PAGES);
         assert_eq!(page_picks(&open).0, "again");
-        let chips: Vec<String> = page_picks(&whole).1.iter().map(|c| c.field("code").map(text).unwrap_or_default()).collect();
-        assert_eq!(chips, ["A2", "B1"]);
     }
 
     #[test]
     fn steer_all_sends_only_the_rows_that_came_off() {
         let row = |text: &str| SteerRow { id: text.into(), text: text.into(), paths: vec![] };
-        assert_eq!(whole_of(&[row("a"), row("b")]).0, "1. a\n\n2. b");
+        assert_eq!(whole_of(&[row("a"), row("b")]).0, format!("{STEERED}1. a\n\n{STEERED}2. b"));
         assert_eq!(whole_of(&[row("b")]).0, "b");
     }
 

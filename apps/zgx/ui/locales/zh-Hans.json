@@ -899,7 +899,8 @@
       "selections": "{n} 处选中内容",
       "selected_numbered": "{n}. 选中的文本",
       "selected": "选中的文本",
-      "user_comment": "用户评论：{comment}"
+      "user_comment": "用户评论：{comment}",
+      "steered": "一并引导"
     },
     "reply_picture": {
       "not_a_picture": "不是可显示的图片",
@@ -1036,7 +1037,11 @@
       "queue": "队列",
       "plan": "计划",
       "plan_count": "计划 {count}",
-      "n_queued": "{n} 条排队"
+      "n_queued": "{n} 条排队",
+      "steer_n": "将 {n} 条合并引导",
+      "steer_n_short": "引导 {n} 条",
+      "stays": "保留",
+      "stays_file": "保留 · 含文件"
     },
     "composer_mentions": {
       "files": "文件",

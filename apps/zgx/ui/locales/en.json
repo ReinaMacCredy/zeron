@@ -899,7 +899,8 @@
       "selections": "{n, plural, one {# selection} other {# selections}}",
       "selected_numbered": "{n}. Selected text",
       "selected": "Selected text",
-      "user_comment": "User comment: {comment}"
+      "user_comment": "User comment: {comment}",
+      "steered": "Steered together"
     },
     "reply_picture": {
       "not_a_picture": "Not a picture this can show",
@@ -1036,7 +1037,11 @@
       "queue": "Queue",
       "plan": "Plan",
       "plan_count": "Plan {count}",
-      "n_queued": "{n} queued"
+      "n_queued": "{n} queued",
+      "steer_n": "Steer {n} as one",
+      "steer_n_short": "Steer {n}",
+      "stays": "stays",
+      "stays_file": "stays · has a file"
     },
     "composer_mentions": {
       "files": "Files",

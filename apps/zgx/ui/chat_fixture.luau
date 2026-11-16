@@ -800,6 +800,20 @@ stub.queue = function(id: string, op: any, failed: (() -> ())?): any
 		return nil
 	end)
 end
+ui.command {
+	id = "steered_as_one",
+	title = "Two rows steered as one join the transcript",
+	run = function()
+		local pick = { kind = "pick", name = "Top", card = "Frame", group = "A", code = "A2", label = "Top" }
+		store.messages:push {
+			id = "all1",
+			role = "user",
+			text = "1. First ask\n\n2. Second ask",
+			attachments = { pick },
+			steered = { { text = "First ask", attachments = {} }, { text = "Second ask", attachments = { pick } } },
+		}
+	end,
+}
 -- The engine's copy of a steered message landing (a moment after the
 -- steer): the queued row's id is its prompt's in the transcript, and it
 -- leaves the queue.
