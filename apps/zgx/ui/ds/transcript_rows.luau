@@ -1221,7 +1221,7 @@ M.ClaudeCard = ui.component(function(props: { key: string, now: () -> any, find:
 	end, { w_full = true })
 end)
 
-M.ConfigSummary = ui.component(function(props: { key: string, now: () -> any, find: Find? }): Node
+M.ConfigSummary = ui.component(function(props: { key: string, now: () -> any, find: Find?, on_reopen: (() -> ())? }): Node
 	return ui.row {
 		class = "claude-config-summary",
 		w_full = true,
@@ -1239,6 +1239,25 @@ M.ConfigSummary = ui.component(function(props: { key: string, now: () -> any, fi
 		found { key = `{props.key}:0`, text = function(): string
 			return props.now().text or ""
 		end, find = props.find, wrap = true, grow = 1 },
+		if props.on_reopen
+			then ui.button {
+				class = "claude-config-reopen",
+				label = locale.t("ds.transcript_rows.config_reopen_label"),
+				shrink = 0,
+				h = ui.raw(24, "gpui's summary row"),
+				px = ui.raw(10, "gpui's summary row"),
+				py = 0,
+				rounded = ui.raw(7, "gpui's summary row"),
+				border = 1,
+				border_color = "$border",
+				bg = "#00000000",
+				color = "$text.primary",
+				hover = { bg = "$hover" },
+				weight = "$font.weight.regular",
+				on_click = props.on_reopen,
+				ui.text { locale.t("ds.transcript_rows.config_reopen"), wrap = false },
+			}
+			else nil,
 	}
 end)
 

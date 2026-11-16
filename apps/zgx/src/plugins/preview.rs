@@ -85,6 +85,7 @@ pub const BLOCKED: &[&str] = &[
     "threads.edit",
     "threads.mark",
     "threads.retry",
+    "threads.carry",
     "chat.respond",
     // (Lets an agent use this computer.)
     "chat.answer_computer",
@@ -92,6 +93,9 @@ pub const BLOCKED: &[&str] = &[
     "chat.steer_all",
     "chat.limit",
     "chat.compact",
+    // (A /config write runs Claude Code and rewrites its settings file.)
+    "claude_panel.set",
+    "claude_panel.close",
     "chat.set_work_tree",
     "chat.queue_edit",
     "chat.queue_finish",

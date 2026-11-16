@@ -2116,7 +2116,20 @@ fn mission_value(config: &Json) -> Value {
     if !m.is_object() {
         return Value::Nil;
     }
-    Value::record([("same_agents", Value::Bool(m["sameAgents"].as_bool() == Some(true))), ("approve", Value::Bool(m["approve"].as_bool() != Some(false)))])
+    Value::record([
+        ("same_agents", Value::Bool(m["sameAgents"].as_bool() == Some(true))),
+        ("approve", Value::Bool(m["approve"].as_bool() != Some(false))),
+        ("size", Value::from(plan_size(m["size"].as_str()))),
+    ])
+}
+
+fn plan_size(size: Option<&str>) -> &'static str {
+    match size {
+        Some("small") => "small",
+        Some("large") => "large",
+        Some("unlimited") => "unlimited",
+        _ => "medium",
+    }
 }
 
 /// A chat just made here (`sessions.create`), as the engine's list will
@@ -4687,7 +4700,11 @@ pub(crate) fn agent_icon(harness: &str) -> Option<String> {
 }
 
 pub(crate) fn chat_config(id: &str) -> Option<Json> {
-    CHATS.with(|chats| chats.chat(id)).map(|c| c["config"].clone())
+    chat_row(id).map(|c| c["config"].clone())
+}
+
+pub(crate) fn chat_row(id: &str) -> Option<Json> {
+    CHATS.with(|chats| chats.chat(id))
 }
 
 /// A new chat's picks as a config (`model`, `effort`, `access`, `options`,
@@ -4786,6 +4803,10 @@ fn merged_config(config: &Json, args: &Value) -> Json {
             c["mission"] = json!({
                 "sameAgents": mission.field("same_agents").is_some_and(Value::truthy),
                 "approve": mission.field("approve").is_none_or(Value::truthy),
+                "size": plan_size(match mission.field("size") {
+                    Some(Value::Str(size)) => Some(size.as_ref()),
+                    _ => None,
+                }),
             });
         } else if let Some(map) = c.as_object_mut() {
             map.remove("mission");
@@ -9582,7 +9603,11 @@ mod tests {
         assert_eq!((config["harness"].as_str(), config["model"].as_str()), (Some("codex"), Some("gpt-6.1")));
         let on = zgx_script::Value::from_json(r#"{"mission":{"same_agents":true},"plan":false}"#).unwrap();
         let config = super::merged_config(&row["config"], &on);
-        assert_eq!(config["mission"], serde_json::json!({ "sameAgents": true, "approve": true }));
+        assert_eq!(config["mission"], serde_json::json!({ "sameAgents": true, "approve": true, "size": "medium" }));
+        let large = zgx_script::Value::from_json(r#"{"mission":{"size":"large"}}"#).unwrap();
+        assert_eq!(super::merged_config(&row["config"], &large)["mission"]["size"], "large");
+        let odd = zgx_script::Value::from_json(r#"{"mission":{"size":"huge"}}"#).unwrap();
+        assert_eq!(super::merged_config(&row["config"], &odd)["mission"]["size"], "medium");
         let off = zgx_script::Value::from_json(r#"{"mission":false}"#).unwrap();
         assert!(super::merged_config(&config, &off).get("mission").is_none());
         assert!(!super::mission_offered(&row, &config), "a side chat offers no mission");

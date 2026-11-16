@@ -63,6 +63,15 @@ impl DocHost {
         if workspace.chat(lead)?.is_some_and(|chat| chat.plan_pending) {
             return Err(unapproved());
         }
+        if step.chat_id.is_none()
+            && workspace
+                .chat(lead)?
+                .is_some_and(|chat| !chat.in_current_plan(&step))
+        {
+            return Err(refused(
+                "This step belongs to a closed plan and never ran; write it into the current plan first",
+            ));
+        }
         if step.outcome.is_some() {
             return Err(refused(
                 "This step is already marked done or skipped; reopen it with the plan tool first",

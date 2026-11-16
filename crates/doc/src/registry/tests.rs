@@ -3051,7 +3051,12 @@ fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
     doc.write_plan(
         "lead",
         &first,
-        &[step("a1", "lead", "One"), step("a2", "lead", "Two")],
+        &[
+            step("a1", "lead", "One"),
+            step("a2", "lead", "Two"),
+            step("a3", "lead", "Three"),
+            step("a4", "lead", "Four"),
+        ],
         false,
         ts(3_000),
     )
@@ -3094,14 +3099,36 @@ fn a_closed_plan_keeps_its_steps_and_the_next_plan_counts_only_its_own() {
     let plans: Vec<u32> = restarted.steps_of("lead").iter().map(|s| s.plan).collect();
     assert_eq!(
         plans.len(),
-        51,
-        "the closed plan's steps stay, and the 50-step cap counts only the plan being written"
+        53,
+        "the closed plan's steps stay, those it never ran too, and the 50-step cap counts only the plan being written"
     );
-    assert_eq!(&plans[..2], [1, 1]);
-    assert!(plans[2..].iter().all(|plan| *plan == 2));
+    assert_eq!(&plans[..4], [1, 1, 1, 1]);
+    assert!(plans[4..].iter().all(|plan| *plan == 2));
     let kept = restarted.chat("lead").unwrap().unwrap().plan.unwrap();
     assert_eq!(kept, second);
     assert_eq!(kept.number(), 2);
+
+    assert!(
+        doc.carry_step("a1", ts(4_500)).is_err(),
+        "a step that ran stays in its plan"
+    );
+    doc.carry_step("a3", ts(4_500)).unwrap();
+    let lead_steps = doc.steps_of("lead");
+    let last = lead_steps.last().unwrap();
+    assert_eq!(
+        (last.id.as_str(), last.plan, last.title.as_str()),
+        ("a3", 2, "Three"),
+        "a carried step joins the current plan after its last step"
+    );
+    assert!(
+        doc.carry_step("a3", ts(4_500)).is_err(),
+        "only a closed plan's step is carried"
+    );
+    assert!(
+        doc.carry_step("a4", ts(4_500)).is_err(),
+        "the 50-step cap counts the carried step"
+    );
+    assert_eq!(doc.task_step("a4").unwrap().plan, 1);
 
     let wide = zeron_proto::ChatPlan {
         overview: "語".repeat(3_000),
@@ -3154,6 +3181,43 @@ fn an_oversize_plan_is_refused_on_its_chat_and_writes_nothing() {
     assert!(doc.steps_of("lead").is_empty());
     assert!(doc.set_chat_plan("lead", Some(&wide), true).is_err());
     assert!(!doc.chat("lead").unwrap().unwrap().plan_pending);
+
+    let sized = |size| zeron_proto::ChatPlan {
+        size,
+        ..Default::default()
+    };
+    let steps = |prefix: &str, n: usize| -> Vec<zeron_proto::TaskStep> {
+        (0..n)
+            .map(|i| step(&format!("{prefix}{i}"), "lead", "Step"))
+            .collect()
+    };
+    let small = sized(Some(zeron_proto::PlanSize::Small));
+    let err = doc
+        .write_plan("lead", &small, &steps("a", 6), false, ts(3_000))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("This mission is Small: a plan holds up to 5 steps. Merge steps and write again."),
+        "{err}"
+    );
+    assert!(doc.steps_of("lead").is_empty(), "the refused write keeps nothing");
+    doc.write_plan("lead", &small, &steps("b", 5), false, ts(3_000))
+        .unwrap();
+    doc.edit_plan("lead", None, &[], &steps("c", 3), &[], ts(3_000))
+        .expect("the person's edit is not held to the size");
+    assert_eq!(doc.steps_of("lead").len(), 8);
+
+    let err = doc
+        .write_plan("lead", &sized(None), &steps("d", 51), false, ts(3_000))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("up to 50 steps"), "a plan written before sizes keeps the ceiling: {err}");
+    let unlimited = sized(Some(zeron_proto::PlanSize::Unlimited));
+    doc.write_plan("lead", &unlimited, &steps("e", 51), false, ts(3_000))
+        .expect("an unlimited mission has no ceiling");
+    doc.edit_plan("lead", None, &[], &steps("f", 2), &[], ts(3_000))
+        .expect("nor does the person's edit of it");
+    assert_eq!(doc.steps_of("lead").len(), 53);
 }
 
 fn old_row(kind: &str, id: &str, fields: Value, ms: i64) -> RegistryRow {
@@ -3232,6 +3296,7 @@ fn the_mover_puts_an_old_plan_on_its_lead_chat_once_and_keeps_the_task_row() {
             overview: "Sync the app".into(),
             plan_doc: true,
             same_agents: true,
+            size: None,
             images: vec!["/tmp/a.png".into()],
             resources: vec!["port:5173".into()],
             closed: Vec::new(),

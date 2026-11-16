@@ -1,7 +1,7 @@
 use super::task_steps::flagged_deleted;
-use super::tasks::{check_images, check_notes, check_step_count, invalid};
+use super::tasks::{check_images, check_notes, check_plan_size, check_step_count, invalid};
 use super::*;
-use zeron_proto::{ChatPlan, TaskStep, TaskStepPatch};
+use zeron_proto::{ChatPlan, TaskStep, TaskStepPatch, pin_order_key_between};
 
 fn check_plan(plan: &ChatPlan) -> Result<(), DocError> {
     check_notes(&plan.overview)?;
@@ -107,14 +107,14 @@ impl RegistryDoc {
         let dropped: Vec<TaskStep> = self
             .current_steps(chat_id, replaced.as_ref())
             .into_iter()
-            .filter(|step| !self.step_started(step))
+            .filter(|step| !plan.is_closed(step.plan) && !self.step_started(step))
             .collect();
         let kept = self
             .current_steps(chat_id, Some(plan))
             .into_iter()
             .filter(|step| self.step_started(step))
             .count();
-        check_step_count(kept + steps.len())?;
+        check_plan_size(kept + steps.len(), plan.size)?;
         let mut plan_op = self.plan_op(chat_id, Some(plan))?;
         if pending && let Some(set) = plan_op.set.as_mut() {
             set.insert("planPending".into(), json!(true));
@@ -143,8 +143,12 @@ impl RegistryDoc {
         deletes: &[String],
         now: DateTime<Utc>,
     ) -> Result<(), DocError> {
-        let current = self.current_steps(chat_id, self.chat_plan(chat_id)?.as_ref());
-        check_step_count((current.len() + creates.len()).saturating_sub(deletes.len()))?;
+        let stored = self.chat_plan(chat_id)?;
+        let current = self.current_steps(chat_id, stored.as_ref());
+        check_step_count(
+            (current.len() + creates.len()).saturating_sub(deletes.len()),
+            plan.or(stored.as_ref()).and_then(|plan| plan.size),
+        )?;
         let mut batch: Vec<RowOp> = match plan {
             Some(plan) => vec![self.plan_op(chat_id, Some(plan))?],
             None => Vec::new(),
@@ -169,6 +173,37 @@ impl RegistryDoc {
         }
         self.enqueue_ops(batch);
         Ok(())
+    }
+
+    pub fn carry_step(&mut self, step_id: &str, now: DateTime<Utc>) -> Result<TaskStep, DocError> {
+        let step = self
+            .task_step(step_id)
+            .ok_or_else(|| invalid("Step no longer exists"))?;
+        let chat_id = step.owner_chat_id.clone();
+        let plan = self.chat_plan(&chat_id)?.unwrap_or_default();
+        if !plan.is_closed(step.plan) || self.step_started(&step) {
+            return Err(invalid(
+                "Only a step a closed plan never ran can join the current plan",
+            ));
+        }
+        check_step_count(self.current_steps(&chat_id, Some(&plan)).len() + 1, plan.size)?;
+        let hlc = self.next_hlc();
+        let key = pin_order_key_between(self.last_step_key(&chat_id).as_deref(), None, &hlc)
+            .map_err(invalid)?;
+        let op = RowOp {
+            kind: KIND_TASK_STEPS.into(),
+            id: step_id.into(),
+            op: OpKind::Update,
+            set: Some(fields([
+                ("plan", json!(plan.number())),
+                ("orderKey", json!(key)),
+                ("updatedAt", json!(now.timestamp_millis())),
+            ])),
+            hlc,
+            clocks: None,
+        };
+        self.enqueue_ops(vec![op]);
+        Ok(step)
     }
 
     pub fn move_plans_to_chats(&mut self) -> usize {
@@ -216,6 +251,7 @@ impl RegistryDoc {
                 overview: text(&task, "plan").unwrap_or_default(),
                 plan_doc: flag(&task, "planDoc"),
                 same_agents: flag(&task, "sameAgents"),
+                size: None,
                 images: list(&task, "images"),
                 resources: list(&task, "resources"),
                 closed: Vec::new(),

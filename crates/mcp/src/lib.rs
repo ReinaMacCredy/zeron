@@ -456,14 +456,13 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "plan",
-            "description": "This chat's plan: steps, each run on a thread this chat owns. `write` replaces the steps that have not started with `steps` [{title, notes, role, target, threadId}] and keeps the rest; `overview` and `resources` (port:<n>, slot:<name>, path:<path in the project>; [] clears) replace theirs when given. A step's `threadId` hands it to a thread this chat delegated that runs no open step. Replaced steps' images move to the same-titled step or the overview (`imagesMoved`). Run a step with delegate_task and its `stepId`. `step` marks `stepId` `state` done, skipped or open; a step is done only once marked, a closed plan's step too. A `write` in the turn of the person's new goal, when no step of the current plan is planned or working, closes that plan and starts the next: its steps are numbered from 1, so your step 1 is the person's step 1. `read` returns the current plan: `plan` (its number), `overview`, `planPending` (run no step until the person approves) and each step's `status` (planned, working, waitingOnYou, readyForReview, failed, cancelled, done or skipped), `threadId` and `target`, plus `closedPlans` (`plan`, `done`, `total`, `toReview`).",
+            "description": "This chat's plan: steps, each run on a thread this chat owns. `write` replaces the steps that have not started with `steps` [{title, notes, role, target, threadId}] and keeps the rest; `overview` and `resources` (port:<n>, slot:<name>, path:<path in the project>; [] clears) replace theirs when given. A mission's size caps the current plan's steps after a `write` (Small 5, Medium 10, Large 50, Unlimited none); merge steps when refused. A step's `threadId` hands it to a thread this chat delegated that runs no open step. Replaced steps' images move to the same-titled step or the overview (`imagesMoved`). Run a step with delegate_task and its `stepId`. `step` marks `stepId` `state` done, skipped or open; a step is done only once marked, a closed plan's step too. A `write` in the turn of the person's new goal, when a step of the current plan has started and none is working, closes that plan and starts the next: its steps are numbered from 1, so your step 1 is the person's step 1; a plan none of whose steps started is replaced instead. `read` returns the current plan: `plan` (its number), `overview`, `planPending` (run no step until the person approves) and each step's `status` (planned, working, waitingOnYou, readyForReview, failed, cancelled, done or skipped), `threadId` and `target`, plus `closedPlans` (`plan`, `done`, `total`, `toReview`, and `notRun`: the steps that plan never ran, [{stepId, title}]; to do one, write it into the current plan).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["write", "step", "read"] },
                     "steps": {
                         "type": "array",
-                        "maxItems": zeron_doc::TASK_STEPS_MAX,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -3948,18 +3947,27 @@ fn plan_json(chat: &Chat, all: &[(TaskStep, ThreadState)]) -> Value {
             .closed
             .iter()
             .map(|old| {
-                let states: Vec<ThreadState> = closed
+                let own: Vec<&&(TaskStep, ThreadState)> = closed
                     .iter()
                     .filter(|(step, _)| step.plan == old.number)
-                    .map(|(_, status)| *status)
                     .collect();
+                let states: Vec<ThreadState> = own.iter().map(|(_, status)| *status).collect();
                 let progress = zeron_proto::plan_progress(&states);
-                json!({
+                let mut entry = json!({
                     "plan": old.number,
                     "done": progress.done,
                     "total": progress.total,
                     "toReview": states.iter().filter(|s| **s == ThreadState::ReadyForReview).count(),
-                })
+                });
+                let not_run: Vec<Value> = own
+                    .iter()
+                    .filter(|(_, status)| *status == ThreadState::Planned)
+                    .map(|(step, _)| json!({ "stepId": step.id, "title": step.title }))
+                    .collect();
+                if !not_run.is_empty() {
+                    entry["notRun"] = json!(not_run);
+                }
+                entry
             })
             .collect();
     }
@@ -5875,7 +5883,7 @@ mod tests {
             "number": 1, "overview": "The API", "writtenAt": "2026-09-18T09:00:00Z",
             "closedAt": "2026-09-18T11:00:00Z", "until": "m9",
         }] });
-        for step in &mut fake.task_steps[2..] {
+        for step in &mut fake.task_steps[3..] {
             step["plan"] = json!(2);
         }
         let rig = rig(fake);
@@ -5890,12 +5898,13 @@ mod tests {
             .iter()
             .map(|s| s["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["s3", "s4", "s5", "s6"], "only the current plan's steps");
+        assert_eq!(ids, ["s4", "s5", "s6"], "only the current plan's steps");
         assert_eq!(read["plan"], 2);
         assert_eq!(read["overview"], "Then the docs");
         assert_eq!(
             read["closedPlans"],
-            json!([{ "plan": 1, "done": 1, "total": 2, "toReview": 0 }])
+            json!([{ "plan": 1, "done": 1, "total": 3, "toReview": 0, "notRun": [{ "stepId": "s3", "title": "Docs" }] }]),
+            "a closed plan names the steps it never ran"
         );
         let listed = rig
             .tools
@@ -5904,7 +5913,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             listed["tasks"][0]["progress"],
-            json!({ "done": 0, "total": 3 }),
+            json!({ "done": 0, "total": 2 }),
             "a to-do's progress counts its lead's current plan"
         );
     }

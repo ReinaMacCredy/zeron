@@ -41,6 +41,7 @@ M.escape_stops = ui.persist("settings_escape_stops", false)
 -- open on its home). On by default: an empty panel is one nobody's using.
 M.close_panel_with_last_tab = ui.persist("settings_close_panel_with_last_tab", true)
 M.compact_transcript = ui.persist("settings_compact_transcript", false)
+M.mission_defaults = ui.persist("settings_mission_defaults", { same_agents = false, approve = true, size = "medium" })
 -- (Told to the host, which lays a reply being written out compact only while
 -- the transcript shows it so: src/chat.rs `compact_shown`.)
 local compact_shown = ui.shared("chat.compact", false)

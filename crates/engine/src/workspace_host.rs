@@ -1792,6 +1792,10 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.edit_plan(chat_id, plan, updates, creates, deletes, Utc::now()))?)
     }
 
+    pub fn carry_step(&self, step_id: &str) -> Result<TaskStep, EngineError> {
+        Ok(self.mutate(|doc| doc.carry_step(step_id, Utc::now()))?)
+    }
+
     pub fn set_chat_plan(
         &self,
         chat_id: &str,

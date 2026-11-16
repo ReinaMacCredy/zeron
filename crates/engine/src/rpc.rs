@@ -1297,6 +1297,8 @@ enum MutateParams {
         same_agents: bool,
         #[serde(default)]
         plan_doc: bool,
+        #[serde(default)]
+        size: zeron_proto::PlanSize,
     },
     #[serde(rename_all = "camelCase")]
     AssignTask {
@@ -1314,6 +1316,8 @@ enum MutateParams {
         same_agents: bool,
         #[serde(default)]
         plan_doc: bool,
+        #[serde(default)]
+        size: zeron_proto::PlanSize,
         #[serde(default)]
         attach_plan: bool,
         #[serde(default)]
@@ -1353,6 +1357,8 @@ enum MutateParams {
     ApprovePlan { chat_id: String },
     #[serde(rename_all = "camelCase")]
     RetryStep { step_id: String },
+    #[serde(rename_all = "camelCase")]
+    CarryStep { step_id: String },
     #[serde(rename_all = "camelCase")]
     EditPlan {
         chat_id: String,
@@ -3675,12 +3681,14 @@ impl EngineRpc {
                 approve_plan,
                 same_agents,
                 plan_doc,
+                size,
             } => {
                 let lead = orchestrate.then_some(tasks::Lead {
                     approve_plan,
                     same_agents,
                     plan_doc,
                     attach: false,
+                    size,
                 });
                 self.start_task(&task_id, &chat_id, space_id, config, lead)
                     .await
@@ -3695,6 +3703,7 @@ impl EngineRpc {
                 approve_plan,
                 same_agents,
                 plan_doc,
+                size,
                 attach_plan,
                 claim,
             } => {
@@ -3705,6 +3714,7 @@ impl EngineRpc {
                     same_agents,
                     plan_doc,
                     attach: attach_plan,
+                    size,
                 });
                 self.assign_task(&task_id, &chat_id, send, from_chat_id.as_deref(), lead, claim)
                     .await
@@ -3733,6 +3743,7 @@ impl EngineRpc {
             } => self.update_task_step(&step_id, &patch, from_chat_id.as_deref()),
             MutateParams::ApprovePlan { chat_id } => self.approve_plan(&chat_id).await.map(drop),
             MutateParams::RetryStep { step_id } => self.retry_step(&step_id).await,
+            MutateParams::CarryStep { step_id } => self.carry_step(&step_id).await.map(drop),
             MutateParams::EditPlan {
                 chat_id,
                 overview,

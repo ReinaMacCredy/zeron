@@ -295,7 +295,7 @@ pub fn stale_engine_reply(error: &str, sent: RenderInput<'_>) -> Option<String> 
     })
 }
 
-pub const PICK_GUIDE: &str = "Options: when the person is to decide between options (A/B variants, including toggles that switch what the page shows), make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\", and data-zeron-desc for a one-line description; data-zeron-group-label names a group. Controls that only change the view, such as Reset or slow motion, stay plain buttons. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message. A page stays open until every group is picked and sent, or until it is closed: once the person answers a page or moves past it, in words or with a newer page, pass its title in `close` (with a new page or alone), and leave a page they haven't answered open.";
+pub const PICK_GUIDE: &str = "Options: when the person is to decide between options (A/B variants, including toggles that switch what the page shows), make each option a <button> with data-zeron-pick=\"A2\" (its code), data-zeron-group=\"A\" (one pick per group; leave it out for options picked freely) and data-zeron-label=\"Floating tab\", and data-zeron-desc for a one-line description; the person sees each group by name, so wrap its buttons in an element with data-zeron-group-label=\"Plan size\"; without it they see the raw group code. Controls that only change the view, such as Reset or slow motion, stay plain buttons. A click puts the pick in the person's composer; the host marks chosen buttons data-zeron-chosen and sent ones data-zeron-locked, and fills an element with data-zeron-count. You receive the picks with their message. A page stays open until every group is picked and sent, or until it is closed: once the person answers a page or moves past it, in words or with a newer page, pass its title in `close` (with a new page or alone), and leave a page they haven't answered open.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
@@ -1116,11 +1116,15 @@ pub const RENDERED_MESSAGE: &str = "Shown to the reader above your reply. Don't 
 
 const UNPICKED_HINT: &str = "The page has buttons but none carries data-zeron-pick: if any of them is an option the person decides between, add the pick attributes and show the page again.";
 
+const UNNAMED_GROUP_HINT: &str = "Its pick groups have no data-zeron-group-label, so the person sees their raw codes: wrap each group's buttons in an element that names it and show the page again.";
+
 pub fn rendered_message(html: &str) -> String {
     let page = html.to_ascii_lowercase();
     let clickable = page.contains("<button") || page.contains("role=\"button\"");
     if clickable && !page.contains("data-zeron-pick") {
         format!("{RENDERED_MESSAGE} {UNPICKED_HINT}")
+    } else if !pick_groups(html).is_empty() && !page.contains("data-zeron-group-label") {
+        format!("{RENDERED_MESSAGE} {UNNAMED_GROUP_HINT}")
     } else {
         RENDERED_MESSAGE.to_owned()
     }
@@ -1308,7 +1312,9 @@ mod tests {
             rendered_message("<body><button>A · fixed</button><button>B · fluid</button></body>");
         assert!(unpicked.starts_with(RENDERED_MESSAGE) && unpicked.contains("data-zeron-pick"));
         let picked = "<button data-zeron-pick=\"A1\" data-zeron-group=\"A\">A</button><button>Reset</button>";
-        assert_eq!(rendered_message(picked), RENDERED_MESSAGE);
+        assert!(rendered_message(picked).contains("data-zeron-group-label"));
+        let named = format!("<div data-zeron-group-label=\"Layout\">{picked}</div>");
+        assert_eq!(rendered_message(&named), RENDERED_MESSAGE);
         assert_eq!(rendered_message("<svg><rect/></svg>"), RENDERED_MESSAGE);
     }
 

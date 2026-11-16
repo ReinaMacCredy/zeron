@@ -678,6 +678,10 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         crate::plugins::preview::refuse("threads.retry")?;
         mutate(json!({ "op": "retryStep", "stepId": args.field("step").map(text).unwrap_or_default() })).await
     });
+    host.async_action("threads.carry", |args| async move {
+        crate::plugins::preview::refuse("threads.carry")?;
+        mutate(json!({ "op": "carryStep", "stepId": args.field("step").map(text).unwrap_or_default() })).await
+    });
 }
 
 #[cfg(test)]
@@ -873,28 +877,31 @@ pub(crate) mod tests {
         let chats = json!([chat("lead", json!({ "plan": { "overview": "Then the bench", "closed": [closed] } })), owned("k1", "lead", "completed"), owned("k2", "lead", "completed")]);
         let mut steps = plan("lead", &[Some("k1"), Some("k2")]);
         for s in steps.iter_mut() {
-            s.plan = if s.id == "s1" || s.id == "s2" { 1 } else { 2 };
+            s.plan = if ["s1", "s2", "s3"].contains(&s.id.as_str()) { 1 } else { 2 };
             s.updated_at = "2026-11-14T11:30:00Z".parse().unwrap();
         }
         steps.iter_mut().find(|s| s.id == "s2").unwrap().outcome = Some(zeron_proto::StepOutcome::Done);
         let leads = joined(chats, &steps, HashMap::new(), &|_| None);
         let lead = &leads["lead"];
-        assert_eq!(summary(lead), (2..5).map(|i| ("step", Some(i - 1), TITLES[i].to_string(), ThreadState::Planned)).collect::<Vec<_>>(), "the current plan numbers from 1, and the closed plan's threads have no row in the groups");
+        assert_eq!(summary(lead), (3..5).map(|i| ("step", Some(i - 2), TITLES[i].to_string(), ThreadState::Planned)).collect::<Vec<_>>(), "the current plan numbers from 1, and the closed plan's steps have no row in the groups");
         let value = lead_value(lead);
         let plan_of = value.field("plan").unwrap();
         let num = |v: &Value, k: &str| v.field(k).and_then(Value::as_f64);
         assert_eq!(num(plan_of, "number"), Some(2.));
-        assert_eq!([num(plan_of.field("progress").unwrap(), "done"), num(plan_of.field("progress").unwrap(), "total")], [Some(0.), Some(3.)], "the closed plan's review step is not in the current progress");
-        assert_eq!(num(plan_of, "review"), Some(1.));
-        assert_eq!(plan_of.field("order").unwrap().list().iter().map(text).collect::<Vec<_>>(), ["s3", "s4", "s5"]);
+        assert_eq!([num(plan_of.field("progress").unwrap(), "done"), num(plan_of.field("progress").unwrap(), "total")], [Some(0.), Some(2.)], "the closed plan's steps are not in the current progress");
+        assert_eq!(num(plan_of, "review"), Some(1.), "a step the closed plan never ran is not to review");
+        assert_eq!(plan_of.field("order").unwrap().list().iter().map(text).collect::<Vec<_>>(), ["s4", "s5"]);
         let closed = plan_of.field("closed").unwrap().list();
         assert_eq!(closed.len(), 1);
         let old = &closed[0];
-        assert_eq!([num(old, "number"), num(old, "done"), num(old, "total"), num(old, "review"), num(old, "ran")], [Some(1.), Some(1.), Some(2.), Some(1.), Some(5400.)]);
+        assert_eq!([num(old, "number"), num(old, "done"), num(old, "total"), num(old, "review"), num(old, "ran")], [Some(1.), Some(1.), Some(3.), Some(1.), Some(5400.)]);
         assert_eq!([old.field("overview").map(text), old.field("until").map(text)], [Some("Grade them".into()), Some("m2".into())]);
         let rows = old.field("rows").unwrap().list();
         let row = |r: &Value| (r.field("chat").map(text), num(r, "number"), num(r, "plan"), r.field("state").map(text));
-        assert_eq!(rows.iter().map(row).collect::<Vec<_>>(), [(Some("k1".into()), Some(1.), Some(1.), Some("readyForReview".into())), (Some("k2".into()), Some(2.), Some(1.), Some("done".into()))]);
+        assert_eq!(
+            rows.iter().map(row).collect::<Vec<_>>(),
+            [(Some("k1".into()), Some(1.), Some(1.), Some("readyForReview".into())), (Some("k2".into()), Some(2.), Some(1.), Some("done".into())), (None, Some(3.), Some(1.), Some("planned".into()))]
+        );
     }
 
     #[test]

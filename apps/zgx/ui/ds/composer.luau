@@ -128,7 +128,7 @@ export type Props = {
 	-- plan mode (explore and propose before changing anything).
 	access: State<string?>?,
 	plan: State<boolean>?,
-	mission: { value: State<any>, shown: () -> boolean, planned: () -> boolean }?,
+	mission: { value: State<any>, shown: () -> boolean, planned: () -> boolean, defaults: (() -> any)? }?,
 	-- The model (a ModelPicker: its agents' tabs, its models, its reasoning,
 	-- Fast mode and its other options' picks).
 	model: State<string?>,
@@ -318,6 +318,7 @@ export type Props = {
 	limit: (() -> any)?,
 	side_tab: any?,
 	pills: Node?,
+	panel: Node?,
 	-- How far the pill row's pills reach from its left, as laid out: it rises over the deck's folded pill only when they would meet it.
 	pills_reach: (() -> number)?,
 	-- How far the pill row stands raised, for the room the conversation keeps under it.
@@ -413,7 +414,9 @@ local function head_gap(): number
 	local v = ui.theme.get("zeron.composer.chip.below")
 	return if type(v) == "number" then v else 12
 end
-local MISSION = { same_agents = false, approve = true }
+local MISSION = { same_agents = false, approve = true, size = "medium" }
+local SIZES = { { value = "small", n = 5 }, { value = "medium", n = 10 }, { value = "large", n = 50 }, { value = "unlimited" } }
+local SIZE_KEYS = "alt+tab"
 local OPTIONS, OPTION_H, SEND_LABEL_PAD = 32, 24, 7
 local MISSION_EASE = "cubicBezier(.2,.8,.2,1)"
 ui.theme.tokens { ["zeron.composer.mission.key"] = "mix({border}, {accent}, 0.5)" }
@@ -1389,7 +1392,7 @@ return ui.component(function(props: Props): Node
 			if mode == "plan" and props.plan and props.plan:peek() ~= on then
 				props.plan:set(on)
 			elseif mode == "mission" and mission and (type(mission.value:peek()) == "table") ~= on then
-				mission.value:set(if on then table.clone(MISSION) else false)
+				mission.value:set(if on then table.clone(if mission.defaults then mission.defaults() else MISSION) else false)
 			end
 			if on and mode == "plan" and mission and mission.value:peek() ~= false then
 				mission.value:set(false)
@@ -2290,6 +2293,105 @@ return ui.component(function(props: Props): Node
 			mission.value:set(v)
 		end
 	end
+	local function size_now(): string
+		local now = mission_now()
+		return if now and now.size then now.size else "medium"
+	end
+	local function set_size(v: string)
+		local now = mission_now()
+		if mission and now and now.size ~= v then
+			local m = table.clone(now)
+			m.size = v
+			mission.value:set(m)
+		end
+	end
+	local function step_size(by: number)
+		local at = 2
+		for i, s in SIZES do
+			if s.value == size_now() then
+				at = i
+			end
+		end
+		set_size(SIZES[(at - 1 + by) % #SIZES + 1].value)
+	end
+	local function size_word(v: string): string
+		return locale.s(`ds.composer.mission.size_{v}`)
+	end
+	local size_pick = ui.use_state(size_now())
+	ui.effect(function()
+		size_pick:set(size_now())
+	end)
+	local function size_items(): { Dropdown.Item }
+		local items: { Dropdown.Item } = {}
+		for _, s in SIZES do
+			table.insert(items, {
+				value = s.value,
+				label = size_word(s.value),
+				tag = if s.n then locale.s("ds.composer.mission.size_steps", { n = s.n }) else locale.s("ds.composer.mission.size_no_limit"),
+			})
+		end
+		return items
+	end
+	local function size_option(): Node
+		return Dropdown {
+			value = size_pick,
+			items = size_items,
+			search = false,
+			label = locale.t("ds.composer.mission.size") :: any,
+			width = 232,
+			placement = { side = "top", align = "start", offset = 6 },
+			on_choose = function(v: string)
+				set_size(v)
+				return nil
+			end,
+			trailing_item = function(item: Dropdown.Item): Node
+				return ui.div {
+					self = "center",
+					shrink = 0,
+					opacity = function(): number
+						return if size_pick:get() == item.value then 1 else 0
+					end,
+					Icon { name = "check", size = 12 },
+				}
+			end,
+			on_key = function(e: any): boolean
+				if e.key == "Tab" and e.alt and not e.cmd and not e.ctrl then
+					step_size(if e.shift then -1 else 1)
+					return true
+				end
+				return false
+			end,
+			extra = ui.row {
+				gap = "$space.1",
+				px = "$space.1",
+				items = "center",
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+				Kbd { keys = SIZE_KEYS, look = "plain", tone = "quiet" },
+				ui.text { locale.t("ds.composer.mission.size_next"), shrink = 0 },
+			},
+			trigger = function(menu: Dropdown.Menu): Node
+				return Button {
+					id = "composer-mission-size",
+					tone = "ghost",
+					size = "xs",
+					gap = "$space.1",
+					shrink = 1,
+					min_w = 0,
+					label = function(): string
+						return locale.s("ds.composer.mission.size_label", { value = size_word(size_now()) })
+					end,
+					on_click = menu.toggle,
+					Icon { name = "list", size = 12 },
+					ui.text { locale.t("ds.composer.mission.size"), shrink = 0 },
+					ui.text { function(): string
+						return size_word(size_now())
+					end, color = "$text.primary", truncate = true, min_w = 0 },
+					Kbd { keys = SIZE_KEYS, look = "plain", tone = "quiet" },
+				}
+			end,
+		}
+	end
 	local function mission_options(): Node
 		return ui.row {
 			w_full = true,
@@ -2310,6 +2412,7 @@ return ui.component(function(props: Props): Node
 			end, function()
 				flip_option("approve")
 			end),
+			size_option(),
 		}
 	end
 
@@ -3016,6 +3119,10 @@ return ui.component(function(props: Props): Node
 						return true
 					end
 					if unit and unit.keys(e) then
+						return true
+					end
+					if e.key == "Tab" and e.alt and not e.cmd and not e.ctrl and mission_on() then
+						step_size(if e.shift then -1 else 1)
 						return true
 					end
 					if e.key == "Tab" and e.shift and not e.cmd and not e.alt and not e.ctrl and mission_offered() then
@@ -3880,6 +3987,7 @@ return ui.component(function(props: Props): Node
 		gap = 0,
 		relative = true,
 		if props.pills then ui.div { w_full = true, h = 0, shrink = 0, opacity = dimmed, y = risen(), pill_row() } else nil,
+		if props.panel then ui.div { w_full = true, h = 0, shrink = 0, relative = true, props.panel } else nil,
 		ui.column {
 			w_full = true,
 			y = risen(),
