@@ -155,9 +155,61 @@ pub struct RoutingSettings {
     pub fallback: Vec<RouteTarget>,
     pub mid_run: MidRun,
     pub native: NativePolicy,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_notes: BTreeMap<String, String>,
+}
+
+pub const DEFAULT_MODEL_NOTES: [(&str, &str); 8] = [
+    (
+        "claude-haiku-5-5",
+        "Cheapest. Search, logs, summaries, classification.",
+    ),
+    (
+        "claude-sonnet-5-5",
+        "Low cost. Well-scoped coding from a spec, bug fixes, repeated review and investigation. Start at medium.",
+    ),
+    (
+        "claude-opus-5-5",
+        "Mid cost. Everyday engineering, multi-part features, UI work, computer use and screenshots. Start at medium.",
+    ),
+    (
+        "claude-fable-5-2",
+        "High cost. Major refactors, architecture, leading many agents, deep research. Start at medium.",
+    ),
+    (
+        "gpt-6-luna",
+        "Cheapest. Narrow, high-volume work with a checkable result: search, logs, summaries.",
+    ),
+    (
+        "gpt-6.1-sol",
+        "Low cost. Complex coding and long agent runs; the default GPT coding model. Start at medium.",
+    ),
+    (
+        "gpt-6.1-terra",
+        "Low cost. Code review, screenshots and visual checks, precise computer use, writing. Start at medium.",
+    ),
+    (
+        "gpt-6-astra",
+        "Highest cost. Only when Sol at high is not enough.",
+    ),
+];
+
+pub fn default_model_note(model: &str) -> Option<&'static str> {
+    DEFAULT_MODEL_NOTES
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, note)| *note)
 }
 
 impl RoutingSettings {
+    pub fn model_note<'a>(&'a self, model: &str) -> Option<&'a str> {
+        self.model_notes
+            .get(model)
+            .map(String::as_str)
+            .or_else(|| default_model_note(model))
+            .filter(|note| !note.trim().is_empty())
+    }
+
     pub fn route(&self, role: Role) -> &RoleRoute {
         static OFF: RoleRoute = RoleRoute::Off;
         self.roles.get(&role).unwrap_or(&OFF)
@@ -214,6 +266,10 @@ pub struct Preview {
     pub base: Option<RouteTarget>,
     pub rows: Vec<Row>,
     pub guidance: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub quotas: BTreeMap<String, QuotaState>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_notes: BTreeMap<String, String>,
 }
 
 impl Row {

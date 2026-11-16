@@ -393,6 +393,10 @@ local answers: { [string]: (arg: any) -> any } = {
 				if m == "SetRoutingSettings" and type(roles) == "table" and (roles[1] ~= nil or next(roles) == nil) then
 					return settled(nil, "invalid type: sequence, expected a map")
 				end
+				local notes = arg.params.modelNotes
+				if m == "SetRoutingSettings" and type(notes) == "table" and next(notes) == nil then
+					return settled(nil, "invalid type: sequence, expected a map")
+				end
 				engine[get] = table.clone(arg.params)
 				if m == "SetRoutingSettings" then
 					engine[get].roles = roles or {}
@@ -429,6 +433,10 @@ local answers: { [string]: (arg: any) -> any } = {
 			rows = rows,
 			quota = { codex = { fraction = 0.42, resets_at = 1893456000000, name = "Codex" } },
 		})
+	end,
+	-- Settings → Routing's built-in model notes (proto's DEFAULT_MODEL_NOTES): one of the models here has one.
+	["settings.model_note_defaults"] = function(): any
+		return settled({ opus = "Mid cost. Everyday engineering." })
 	end,
 	-- Providers' auto-resume (src/settings.rs reads it off WatchLimitResumes).
 	["settings.auto_resume"] = function(): any

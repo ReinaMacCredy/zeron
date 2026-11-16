@@ -7,7 +7,7 @@ use std::{
 use serde_json::{Value as Json, json};
 use zeron_proto::route_preview;
 use zeron_proto::routing::Preview;
-use zeron_proto::{Chat, ChatIndicator, Session, TaskStep, ThreadState};
+use zeron_proto::{Chat, ChatIndicator, RouteTarget, Session, TaskStep, ThreadState};
 use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Shared, Value};
 
@@ -38,6 +38,7 @@ struct Lead {
     has_plan: bool,
     pending: bool,
     overview: String,
+    agent: Option<RouteTarget>,
     steps: Vec<(String, String)>,
     states: Vec<ThreadState>,
     rows: Vec<Row>,
@@ -58,6 +59,8 @@ struct Row {
     model: Option<String>,
     line: Option<String>,
     role: Option<String>,
+    target: Option<RouteTarget>,
+    routed: Option<RouteTarget>,
     spec: Option<String>,
     locked: bool,
     updated: Option<i64>,
@@ -96,6 +99,8 @@ fn thread_row(chat: &Chat, kind: &'static str, state: ThreadState, step: Option<
         model: config.and_then(|c| c.model.clone()),
         line: first_line(chat.last_message_preview.as_deref()),
         role: step.and_then(|(s, _)| s.role.clone()),
+        target: step.and_then(|(s, _)| s.target.clone()),
+        routed: None,
         spec: step.map(|(s, _)| s.notes.clone()),
         locked: step.is_some(),
         updated: Some(chat.last_message_at.unwrap_or(chat.created_at).timestamp()),
@@ -167,7 +172,8 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                 Some(t) if shows.get(t.id.as_str()) == Some(&ix) => rows.push(thread_row(t, "owned", states[ix], Some((s, ix + 1)))),
                 Some(_) => {}
                 None => {
-                    let target = targets.next().flatten();
+                    let routed = targets.next().flatten();
+                    let target = s.target.clone().or_else(|| routed.clone());
                     let harness = target.as_ref().map(|t| t.harness.as_str().to_owned());
                     let model = target.and_then(|t| t.model);
                     rows.push(Row {
@@ -183,6 +189,8 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                         model,
                         line: first_line(Some(&s.notes)),
                         role: s.role.clone(),
+                        target: s.target.clone(),
+                        routed,
                         spec: Some(s.notes.clone()),
                         locked: s.outcome.is_some(),
                         updated: None,
@@ -203,6 +211,7 @@ fn join(i: &Inputs) -> HashMap<String, Lead> {
                 has_plan: lead.has_plan(),
                 pending: lead.plan_pending,
                 overview: lead.plan.as_ref().map(|p| p.overview.clone()).unwrap_or_default(),
+                agent: lead_target,
                 steps: plan.iter().map(|s| (s.id.clone(), s.title.clone())).collect(),
                 states,
                 rows,
@@ -231,9 +240,20 @@ fn row_value(r: &Row) -> Value {
         ("model", opt(&r.model)),
         ("line", opt(&r.line)),
         ("role", opt(&r.role)),
+        ("target", r.target.as_ref().map_or(Value::Nil, target_value)),
+        ("routed", r.routed.as_ref().map_or(Value::Nil, target_value)),
         ("spec", opt(&r.spec)),
         ("locked", Value::Bool(r.locked)),
         ("updated", r.updated.map_or(Value::Nil, |at| Value::from(at as f64))),
+    ])
+}
+
+fn target_value(t: &RouteTarget) -> Value {
+    let harness = t.harness.as_str();
+    Value::record([
+        ("harness", Value::from(harness)),
+        ("model", t.model.as_deref().map_or(Value::Nil, |m| Value::from(format!("{harness}/{m}").as_str()))),
+        ("effort", t.reasoning.and_then(|r| serde_json::to_value(r).ok()).and_then(|r| r.as_str().map(Value::from)).unwrap_or(Value::Nil)),
     ])
 }
 
@@ -243,6 +263,7 @@ fn lead_value(lead: &Lead) -> Value {
         Value::record([
             ("overview", Value::from(lead.overview.as_str())),
             ("pending", Value::Bool(lead.pending)),
+            ("agent", lead.agent.as_ref().map_or(Value::Nil, target_value)),
             ("order", Value::List(lead.steps.iter().map(|(id, _)| Value::from(id.as_str())).collect())),
             ("progress", Value::record([("done", Value::from(progress.done as f64)), ("total", Value::from(progress.total as f64))])),
         ])
@@ -405,6 +426,11 @@ fn edit_params(args: &Value) -> Json {
             if s.field("images").is_some() {
                 step["images"] = json!(strings(s.field("images")));
             }
+            match s.field("target") {
+                Some(Value::Bool(false)) => step["target"] = Json::Null,
+                Some(t @ Value::Map(_)) => step["target"] = target_params(t),
+                _ => {}
+            }
             step
         }).collect::<Vec<_>>(),
     });
@@ -415,6 +441,24 @@ fn edit_params(args: &Value) -> Json {
         params["overviewImages"] = json!(strings(args.field("overview_images")));
     }
     params
+}
+
+fn target_params(t: &Value) -> Json {
+    let field = |key: &str| t.field(key).map(text).filter(|v| !v.is_empty());
+    let mut harness = field("harness");
+    let mut model = field("model");
+    if let Some((h, m)) = model.clone().as_deref().and_then(|v| v.split_once('/')) {
+        harness = Some(h.to_owned());
+        model = Some(m.to_owned());
+    }
+    let mut target = json!({ "harness": harness });
+    if let Some(model) = model {
+        target["model"] = json!(model);
+    }
+    if let Some(effort) = field("effort") {
+        target["reasoning"] = json!(effort);
+    }
+    target
 }
 
 fn mark_params(args: &Value) -> Result<Json, String> {

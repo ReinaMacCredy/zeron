@@ -64,7 +64,7 @@ Right-click a row, or use its **…** button, for:
 
 ## A plan
 
-When the work has several parts, the lead writes a plan: an overview and a list of steps, each with a title, a brief, and the role that decides where it runs (see [Routing](zeron://docs/routing)). The plan arrives in the lead's transcript as a card, **Plan · 5 steps**, with the overview and the numbered steps.
+When the work has several parts, the lead writes a plan: an overview and a list of steps, each with a title, a brief, the role that decides where it runs, and usually the model and effort the lead chose from the [model notes](zeron://docs/routing) (see [Routing](zeron://docs/routing)). The plan arrives in the lead's transcript as a card, **Plan · 5 steps**, with the overview and the numbered steps.
 
 ![A plan card waiting for approval, and the Plan bar above the Planned steps](mission-plan.jpg)
 
@@ -86,6 +86,7 @@ Click **Edit** on the **Plan** bar, or **Edit plan** on the card. The editor ope
 
 - **Overview** is the text every step is read against.
 - Under **Steps**, drag a step by its grip to reorder it, type in its title to rename it, pick its role from the menu under the title, click the chevron to edit its brief, and click **×** to remove it. **Add step** adds one at the end.
+- The model chip beside the role picks the agent, model and reasoning a step runs on, ahead of its role's route; **Default model** in the role menu hands it back to the route, or to the lead's agent. A started step shows the model its thread runs on.
 - A step that has started shows its state in place of the grip. It keeps its place and cannot be removed, and a change to its brief is sent to its thread.
 - Images on the overview and on a step stay with them when you save.
 

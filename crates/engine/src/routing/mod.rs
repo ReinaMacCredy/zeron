@@ -201,7 +201,14 @@ pub(crate) mod tests {
         });
         settings.mid_run = MidRun::After10s;
         settings.native = NativePolicy::Off;
+        settings
+            .model_notes
+            .insert("claude-opus-5-5".into(), "Mine.".into());
+        settings
+            .model_notes
+            .insert("claude-haiku-5-5".into(), String::new());
         let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["modelNotes"]["claude-opus-5-5"], "Mine.");
         assert_eq!(
             json["roles"]["worker"],
             serde_json::json!({"kind": "target", "harness": "codex", "model": "gpt-6-luna", "reasoning": "medium"})
@@ -215,6 +222,16 @@ pub(crate) mod tests {
         assert_eq!(json["native"], "off");
         let back: RoutingSettings = serde_json::from_value(json).unwrap();
         assert_eq!(back, settings);
+        assert_eq!(back.model_note("claude-opus-5-5"), Some("Mine."));
+        assert_eq!(back.model_note("claude-haiku-5-5"), None, "an emptied note says nothing");
+        assert_eq!(
+            back.model_note("gpt-6.1-sol"),
+            zeron_proto::routing::default_model_note("gpt-6.1-sol")
+        );
+        assert!(
+            serde_json::to_value(RoutingSettings::default()).unwrap()["modelNotes"].is_null(),
+            "no notes, no field"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::tasks::{failed, refused};
 use super::*;
-use zeron_proto::{Chat, ChatPlan, TaskStep, TaskStepPatch};
+use zeron_proto::{Chat, ChatPlan, RouteTarget, TaskStep, TaskStepPatch};
 
 const MAX_RESOURCE_KEYS: usize = 16;
 
@@ -85,6 +85,22 @@ pub(super) struct PlanEdit {
     pub images: Option<Vec<String>>,
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default, deserialize_with = "zeron_proto::present_nullable")]
+    pub target: Option<Option<RouteTarget>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PlannedStep {
+    pub title: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub target: Option<RouteTarget>,
 }
 
 const REORDER_REFUSED: &str =
@@ -122,14 +138,46 @@ fn canonical_role(name: &str) -> Option<String> {
     crate::routing::Role::parse(name).map(|role| role.name().to_string())
 }
 
-fn carry_roles(before: &[TaskStep], steps: &mut [TaskStep]) {
-    for step in steps.iter_mut().filter(|step| step.role.is_none()) {
-        let title = step.title.trim();
-        let mut namesakes = before
-            .iter()
-            .filter(|old| old.title.trim() == title && old.role.is_some());
-        if let (Some(old), None) = (namesakes.next(), namesakes.next()) {
-            step.role = old.role.clone();
+fn namesake<'a, T: 'a>(
+    before: impl IntoIterator<Item = &'a TaskStep>,
+    title: &str,
+    field: impl Fn(&'a TaskStep) -> &'a Option<T>,
+) -> Option<&'a T> {
+    let mut namesakes = before
+        .into_iter()
+        .filter(|old| old.title.trim() == title.trim())
+        .filter_map(|old| field(old).as_ref());
+    match (namesakes.next(), namesakes.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
+    }
+}
+
+fn target_change(target: Option<&RouteTarget>) -> String {
+    let Some(target) = target else {
+        return "has no agent of its own again: it runs where its role routes, else on yours."
+            .into();
+    };
+    let model = target
+        .model
+        .as_deref()
+        .map_or(String::new(), |model| format!(" {model}"));
+    let reasoning = target.reasoning.map_or(String::new(), |level| {
+        format!(" at {} reasoning", level.label())
+    });
+    format!(
+        "runs on {}{model}{reasoning}: start it with delegate_task and its stepId, without target or profile.",
+        target.harness.display_name()
+    )
+}
+
+fn carry_choices(before: &[TaskStep], steps: &mut [TaskStep]) {
+    for step in steps.iter_mut() {
+        if step.role.is_none() {
+            step.role = namesake(before, &step.title, |old| &old.role).cloned();
+        }
+        if step.target.is_none() {
+            step.target = namesake(before, &step.title, |old| &old.target).cloned();
         }
     }
 }
@@ -300,7 +348,7 @@ impl EngineRpc {
     pub(super) fn plan_steps(
         &self,
         chat_id: &str,
-        steps: Vec<(String, String, Option<String>, Option<String>)>,
+        steps: Vec<PlannedStep>,
         overview: Option<String>,
         resources: Option<Vec<String>>,
         from_chat_id: Option<&str>,
@@ -318,8 +366,9 @@ impl EngineRpc {
         {
             return Err(refused(OVERVIEW_TOO_LONG));
         }
-        if steps.iter().any(|(_, _, _, role)| {
-            role.as_deref()
+        if steps.iter().any(|step| {
+            step.role
+                .as_deref()
                 .is_some_and(|role| canonical_role(role).is_none())
         }) {
             return Err(refused(&format!(
@@ -327,7 +376,8 @@ impl EngineRpc {
                 crate::routing::Role::names()
             )));
         }
-        let threads: Vec<Option<String>> = steps.iter().map(|(_, _, id, _)| id.clone()).collect();
+        let threads: Vec<Option<String>> =
+            steps.iter().map(|step| step.thread_id.clone()).collect();
         self.check_step_threads(chat_id, &threads)?;
         let resources = resources
             .map(|keys| checked_keys(&keys))
@@ -337,24 +387,25 @@ impl EngineRpc {
         let now = chrono::Utc::now();
         let mut steps: Vec<TaskStep> = steps
             .into_iter()
-            .map(|(title, notes, thread, role)| TaskStep {
+            .map(|step| TaskStep {
                 id: crate::new_id(),
                 owner_chat_id: chat_id.to_string(),
-                title,
-                notes,
+                title: step.title,
+                notes: step.notes,
                 order_key: String::new(),
                 turn: None,
-                chat_id: thread,
+                chat_id: step.thread_id,
                 outcome: None,
                 created_at: now,
                 updated_at: now,
                 deleted: false,
                 images: Vec::new(),
-                role: role.as_deref().and_then(canonical_role),
+                role: step.role.as_deref().and_then(canonical_role),
                 route: None,
+                target: step.target,
             })
             .collect();
-        carry_roles(&before, &mut steps);
+        carry_choices(&before, &mut steps);
         let (moved, orphans) = carry_images(
             &before,
             |step| self.workspace.step_started(step),
@@ -640,14 +691,12 @@ impl EngineRpc {
                     n => format!(" with {}", count_images(n)),
                 };
                 let role = edit.role.as_deref().and_then(canonical_role).or_else(|| {
-                    let mut namesakes = removed
-                        .iter()
-                        .filter(|old| old.title.trim() == title && old.role.is_some());
-                    match (namesakes.next(), namesakes.next()) {
-                        (Some(old), None) => old.role.clone(),
-                        _ => None,
-                    }
+                    namesake(removed.iter().copied(), &title, |old| &old.role).cloned()
                 });
+                let target = match edit.target {
+                    Some(target) => target,
+                    None => namesake(removed.iter().copied(), &title, |old| &old.target).cloned(),
+                };
                 let now = chrono::Utc::now();
                 creates.push(TaskStep {
                     id: id.clone(),
@@ -664,6 +713,7 @@ impl EngineRpc {
                     images,
                     role,
                     route: None,
+                    target,
                 });
                 changes.push(format!("New step \"{title}\" (stepId {id}){with}."));
                 continue;
@@ -692,6 +742,7 @@ impl EngineRpc {
                     .and_then(canonical_role)
                     .filter(|role| step.role.as_deref() != Some(role.as_str()))
                     .map(Some),
+                target: edit.target.filter(|target| *target != step.target),
                 ..Default::default()
             };
             let text = match (patch.title.is_some(), patch.notes.is_some()) {
@@ -704,9 +755,16 @@ impl EngineRpc {
                 (Some(text), Some(note)) => Some(format!("{text}, and has {note}")),
                 (Some(text), None) => Some(text),
                 (None, Some(note)) => Some(format!("has {note}")),
-                (None, None) if patch.role.is_some() => None,
+                (None, None) if patch.role.is_some() || patch.target.is_some() => None,
                 (None, None) => continue,
             };
+            if let Some(target) = &patch.target {
+                changes.push(format!(
+                    "Step \"{}\" (stepId {id}) {}",
+                    step.title,
+                    target_change(target.as_ref())
+                ));
+            }
             updates.push((id.clone(), patch));
             if let Some(what) = what {
                 changes.push(format!("Step \"{}\" (stepId {id}) {what}.", step.title));
@@ -758,6 +816,7 @@ mod tests {
             images: Vec::new(),
             role: None,
             route: None,
+            target: None,
         }
     }
 

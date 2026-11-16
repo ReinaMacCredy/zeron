@@ -101,9 +101,9 @@ pub(crate) fn mission_brief(mission: zeron_proto::ChatMission) -> String {
 
 fn lead_brief(task_id: Option<&str>, lead: Lead, reads: bool) -> String {
     let mut lines = vec![if lead.plan_doc {
-        "Write the plan with the plan tool: action \"write\", overview, steps [{title, notes, role}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
+        "Write the plan with the plan tool: action \"write\", overview, steps [{title, notes, role, target}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done. Keep each step small enough for one agent."
     } else {
-        "Write the plan with the plan tool: action \"write\", steps [{title, notes, role}]. Keep each step small enough for one agent."
+        "Write the plan with the plan tool: action \"write\", steps [{title, notes, role, target}]. Keep each step small enough for one agent."
     }];
     if lead.attach {
         lines.push(
@@ -123,10 +123,10 @@ fn lead_brief(task_id: Option<&str>, lead: Lead, reads: bool) -> String {
     lines.push(if lead.same_agents {
         "Run every step on your own harness and model: do not pass target or profile to delegate_task."
     } else {
-        "Give each step a role (worker, validator, research, design or general); Zeron runs it on the route set in Settings > Routing. Pass target only when a step needs a specific harness or model."
+        "Give each step a role (worker, validator, research, design or general). Choose each step's model and effort from the notes in orchestrator_capabilities, the cheapest that is enough, and write it as the step's target in the plan, with a one-line reason in its notes; a step with no target runs on its role's route in Settings > Routing."
     });
     lines.push(
-        "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the plan tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with delegate_task and the same stepId.",
+        "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the plan tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with delegate_task and the same stepId. When a step fails, first make sure it can verify its own work, then raise its effort one level, then move it to the next model up at a lower effort.",
     );
     lines.push(if task_id.is_some() {
         "When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true."

@@ -68,6 +68,13 @@ pub fn preview(inputs: &Inputs) -> Preview {
             inputs.settings,
             Some(base.model.as_deref().unwrap_or(base.harness.display_name())),
         ),
+        quotas: inputs
+            .offered
+            .iter()
+            .map(|harness| (harness.as_str().to_string(), (inputs.quota)(*harness)))
+            .filter(|(_, quota)| quota.known)
+            .collect(),
+        model_notes: inputs.settings.model_notes.clone(),
     }
 }
 

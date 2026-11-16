@@ -28,7 +28,7 @@ Routes apply only when a child is created. Changing the table never moves a chat
 
 ## What wins over a route
 
-An agent can still choose: a `profile`, a `target.harness` or a `target.model` in its `delegate_task` call, or a harness or model for a plan's step, always wins over the route. The child's chip then reads **chosen by agent** and names the route it skipped. A reasoning level alone keeps the route and only changes the reasoning.
+An agent can still choose: a `profile`, a `target.harness` or a `target.model` in its `delegate_task` call, or a harness or model for a plan's step, always wins over the route; a plan step's own agent that is out of quota falls back as a routed one does. The child's chip then reads **chosen by agent** and names the route it skipped. A reasoning level alone keeps the route and only changes the reasoning.
 
 Tasks started with **Same as lead** skip routing for their steps. Code review children keep their own reviewer from [Settings > Agents > Code review](zeron://settings/code-review).
 
@@ -40,6 +40,10 @@ Before a routed child starts, Zeron checks the routed agent's quota from what Us
 - **Next in fallback list**: the first agent in **Fallback list** that has quota. Out-of-quota entries are struck through. When none has quota, the child waits.
 - **Wait for reset**: the child is created and holds its task until 15 seconds after the reset, then starts.
 - **Ask me**: the agent is told the route is out of quota and asks you which of the three to take.
+
+## Model notes
+
+**Model notes** gives each model one line on its cost and what it suits, such as **Low cost. Code review, screenshots and visual checks, precise computer use, writing. Start at medium.** Agents read the notes, each agent's quota and a few rules from `orchestrator_capabilities`, and pick the cheapest model and effort that is enough for each child, a native sub-agent included, instead of their own model. Common models come with a note; type over one to change it, **Reset** brings the built-in note back, and a model without a note shows an empty field to fill in.
 
 ## When a child hits its limit mid-run
 

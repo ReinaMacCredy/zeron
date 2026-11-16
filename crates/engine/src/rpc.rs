@@ -1310,7 +1310,7 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     PlanSteps {
         chat_id: String,
-        steps: Vec<PlannedStep>,
+        steps: Vec<plan::PlannedStep>,
         #[serde(default)]
         overview: Option<String>,
         #[serde(default)]
@@ -1355,18 +1355,6 @@ enum MutateParams {
 
 fn approve_plan_default() -> bool {
     true
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PlannedStep {
-    title: String,
-    #[serde(default)]
-    notes: String,
-    #[serde(default)]
-    thread_id: Option<String>,
-    #[serde(default)]
-    role: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2225,6 +2213,7 @@ impl EngineRpc {
         &self,
         owner_chat_id: &str,
         request: &crate::routing::Request,
+        pinned: Option<crate::routing::Resolved>,
         step: bool,
         choice: Option<crate::routing::quota::QuotaChoice>,
     ) -> Result<crate::routing::quota::Gated, RpcError> {
@@ -2236,7 +2225,9 @@ impl EngineRpc {
             .map(|config| crate::routing::target_of(&config));
         let offered: Vec<HarnessId> = self.registry.offered().iter().map(|d| d.id).collect();
         let settings = self.registry.routing_settings();
-        let resolved = crate::routing::resolve(request, owner.as_ref(), &settings, &offered);
+        let resolved = pinned.unwrap_or_else(|| {
+            crate::routing::resolve(request, owner.as_ref(), &settings, &offered)
+        });
         let quota = self.sessions.quota().clone();
         let now = crate::now_ms();
         Ok(crate::routing::quota::gate(
@@ -2257,20 +2248,23 @@ impl EngineRpc {
     fn route_delegation(
         &self,
         mut p: crate::doc_host::DelegateTaskParams,
+        pinned: Option<crate::routing::Resolved>,
     ) -> Result<Result<crate::doc_host::DelegateTaskParams, serde_json::Value>, RpcError> {
-        let Some(role) = p.role.as_deref().and_then(crate::routing::Role::parse) else {
+        let role = p.role.as_deref().and_then(crate::routing::Role::parse);
+        if role.is_none() && pinned.is_none() {
             return Ok(Ok(p));
-        };
+        }
         let gated = self.resolve_route(
             &p.owner_chat_id,
             &crate::routing::Request {
-                role: Some(role),
+                role,
                 chosen: &p.chosen,
                 harness: p.harness,
                 model: p.model.as_deref(),
                 reasoning: p.reasoning,
                 profile: p.profile.profile_id.is_some(),
             },
+            pinned,
             p.step_id.is_some(),
             p.quota_choice,
         )?;
@@ -2309,13 +2303,39 @@ impl EngineRpc {
             .and_then(|step| self.workspace.chat(&step.owner_chat_id).ok().flatten())
             .and_then(|lead| lead.plan)
             .is_some_and(|plan| plan.same_agents);
-        p.role = match same_agents {
+        let call_picked =
+            p.profile.profile_id.is_some() || p.harness.is_some() || p.model.is_some();
+        let chosen = step
+            .as_ref()
+            .and_then(|step| step.target.clone())
+            .filter(|_| !call_picked);
+        let pinned = chosen.map(|target| crate::routing::Resolved {
+            harness: Some(target.harness),
+            model: target.model.clone(),
+            reasoning: p.reasoning.or(target.reasoning),
+            route: Some(zeron_proto::ChildRoute {
+                source: zeron_proto::ChildRoute::ROUTED.to_string(),
+                role: Some(
+                    step.as_ref()
+                        .and_then(|step| step.role.clone())
+                        .unwrap_or_else(|| "step".to_string()),
+                ),
+                table: Some(target),
+                ..Default::default()
+            }),
+        });
+        let asked = pinned.as_ref().and_then(|pinned| pinned.route.clone());
+        p.role = match same_agents || pinned.is_some() {
             true => None,
             false => p.role.or_else(|| step.and_then(|step| step.role)),
         };
-        let mut p = self.route_delegation(p)?.map_err(|_| {
+        let mut p = self.route_delegation(p, pinned)?.map_err(|_| {
             RpcError::Failed("a step runs on a thread, not a native sub-agent".into())
         })?;
+        // The step's own pick ran as asked: no route to record, as an explicit target has none.
+        if asked.is_some() && p.route == asked {
+            p.route = None;
+        }
         p.role = None;
         Ok(p)
     }
@@ -3679,20 +3699,9 @@ impl EngineRpc {
                 overview,
                 resources,
                 from_chat_id,
-            } => {
-                let steps = steps
-                    .into_iter()
-                    .map(|step| (step.title, step.notes, step.thread_id, step.role))
-                    .collect();
-                self.plan_steps(
-                    &chat_id,
-                    steps,
-                    overview,
-                    resources,
-                    from_chat_id.as_deref(),
-                )
-                .map(drop)
-            }
+            } => self
+                .plan_steps(&chat_id, steps, overview, resources, from_chat_id.as_deref())
+                .map(drop),
             MutateParams::UpdateTaskStep {
                 step_id,
                 patch,
@@ -5399,7 +5408,7 @@ impl RpcService for EngineRpc {
                     self.doc_host
                         .refuse_unapproved_mission(&p.owner_chat_id)
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
-                    match self.route_delegation(p)? {
+                    match self.route_delegation(p, None)? {
                         Ok(p) => p,
                         Err(native) => return Ok(RpcReply::Value(native)),
                     }
@@ -6485,10 +6494,6 @@ impl RpcService for EngineRpc {
                     from_chat_id,
                 } = p
                 {
-                    let steps = steps
-                        .into_iter()
-                        .map(|step| (step.title, step.notes, step.thread_id, step.role))
-                        .collect();
                     let images_moved = self
                         .plan_steps(
                             &chat_id,

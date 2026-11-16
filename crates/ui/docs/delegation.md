@@ -10,7 +10,7 @@ Ask in your own words, and name the agent and model you want when it matters:
 
 Without a name, the child runs where [Settings > Agents > Routing](zeron://settings/routing) sends its role, or, when that role is **Off**, on this chat's agent, model and reasoning level. The agent gives each child a role: **worker** to write and change code, **validator** to review and test, **research** to read and report, **design** to shape an approach, or **general**. See [Routing](zeron://docs/routing).
 
-The agent looks up what it can use with Zeron's `orchestrator_capabilities` tool: every agent installed and turned on in [Settings > Providers](zeron://settings/providers), with its models from the same list as the model picker, your agent profiles, and the limits below. For each agent it lists the models in use and the first eight, says how many it left out, and searches the rest when the agent asks for one by name; any model in the list can be used. An agent that is not installed or is turned off cannot run a child. When the agent picks another agent without naming a model, the child gets that agent's default model; a model that agent does not offer is refused.
+The agent looks up what it can use with Zeron's `orchestrator_capabilities` tool: every agent installed and turned on in [Settings > Providers](zeron://settings/providers), with its models from the same list as the model picker, your agent profiles, and the limits below. For each agent it lists the models in use and the first eight, says how many it left out, and searches the rest when the agent asks for one by name; any model in the list can be used. An agent that is not installed or is turned off cannot run a child. Each model comes with its one-line note from [Settings > Agents > Routing](zeron://settings/routing), so the agent can pick the cheapest model and effort that fits the task rather than its own. When the agent picks another agent without naming a model, the child gets that agent's default model; a model that agent does not offer is refused.
 
 For work on its own agent and model, an agent such as Claude Code may still use its built-in subagents. It uses a Zeron child for another agent, for a model its own subagents cannot run, or when you ask for one.
 
@@ -31,6 +31,8 @@ When the agent needs the result before it can go on, it can wait for the child i
 ## Delegated task chips
 
 When an agent delegates, a chip appears in the transcript with the child's agent, title, model, and status: **Running**, **Completed**, **Failed**, or **Stopped**. When the child is done, the chip shows how long it took, and the parent chat gets a row such as **Delegated task “Audit” finished**, or **failed** or **stopped**, with **Open subagent**. Children that finish within half a second of each other share one row, such as **2 delegated tasks finished: Audit, Lint**, without the **Open subagent** button. The parent's agent gets each child's final reply in that message, cut short after 4,000 characters.
+
+Messages a delegated thread sends back while it works are grouped: consecutive messages from one thread are one card in the parent's transcript, with the thread's title, its model, a live dot or its outcome, and the newest message's first two lines. Click the card's header to read every message in order, or its title to open the thread. A finished row that comes right after that card is not drawn on its own; the card's badge says how the task ended.
 
 ![A delegated task's finished row with Open subagent](delegation-finished.jpg)
 

@@ -209,6 +209,28 @@ local function trim(s: string?): string
 	return string.match(s or "", "^%s*(.-)%s*$") or ""
 end
 
+local function pick_of(t: any): any
+	return if type(t) == "table" and t.harness then { harness = t.harness, model = t.model, effort = t.effort } else nil
+end
+
+local function same_pick(a: any, b: any): boolean
+	if a == nil or b == nil then
+		return a == b
+	end
+	return a.harness == b.harness and a.model == b.model and a.effort == b.effort
+end
+
+local function live_row(chat: string, id: string?): any
+	if id then
+		for _, r in M.rows(chat) do
+			if r.step == id then
+				return r
+			end
+		end
+	end
+	return nil
+end
+
 local function new_draft(chat: string): any?
 	local steps, plan = steps_of(chat)
 	if not plan then
@@ -225,19 +247,17 @@ local function new_draft(chat: string): any?
 	for _, s in steps do
 		local r = s.row
 		if r then
-			base[s.id] = { title = r.step_title or r.title, spec = r.spec or "", role = r.role }
+			base[s.id] = { title = r.step_title or r.title, spec = r.spec or "", role = r.role, target = pick_of(r.target) }
 			table.insert(list, {
 				key = s.id,
 				id = s.id,
 				title = r.step_title or r.title,
 				spec = r.spec or "",
 				role = r.role,
+				target = pick_of(r.target),
 				locked = r.locked == true,
 				fixed = s.at <= fixed,
 				state = r.state,
-				mark = r.mark,
-				model = r.model,
-				harness = r.harness,
 			})
 		end
 	end
@@ -292,7 +312,8 @@ function M.edit(chat: string?)
 		return
 	end
 	M.open(chat)
-	if not drafts:peek()[chat] then
+	local d = drafts:peek()[chat]
+	if not d or (M.changes(d)) == 0 then
 		local all = table.clone(drafts:peek())
 		all[chat] = new_draft(chat)
 		drafts:set(all)
@@ -348,6 +369,9 @@ function M.changes(d: any): (number, boolean)
 			if s.role ~= b.role then
 				n += 1
 			end
+			if not same_pick(s.target, b.target) then
+				n += 1
+			end
 		elseif title ~= "" then
 			n += 1
 		end
@@ -365,14 +389,15 @@ function M.edit_args(chat: string, d: any): any
 		local title, spec = trim(s.title), trim(s.spec)
 		if s.id then
 			local b = d.base[s.id]
-			if title ~= b.title or spec ~= trim(b.spec) or s.role ~= b.role then
-				table.insert(steps, { id = s.id, title = title, spec = spec, role = s.role })
+			local moved = not same_pick(s.target, b.target)
+			if title ~= b.title or spec ~= trim(b.spec) or s.role ~= b.role or moved then
+				table.insert(steps, { id = s.id, title = title, spec = spec, role = s.role, target = if moved then s.target or false else nil })
 			end
 			if not s.fixed then
 				table.insert(tail, s.id)
 			end
 		elseif title ~= "" then
-			table.insert(steps, { title = title, spec = spec, role = s.role })
+			table.insert(steps, { title = title, spec = spec, role = s.role, target = s.target })
 		end
 	end
 	local order: { string } = {}
@@ -1147,20 +1172,39 @@ local function caps(key: string): Node
 	}
 end
 
-local function role_menu(chat: string, key: string, now: () -> any): Node
+local function default_model(chat: string, s: any): string?
+	if not s then
+		return nil
+	end
+	local d = drafts:get()[chat]
+	local b = if d and s.id then d.base[s.id] else nil
+	local r = live_row(chat, s.id)
+	if b and b.role == s.role and r and r.routed then
+		return r.routed.model
+	end
+	local routed = routes:get()
+	local x = if s.role and type(routed) == "table" and routed.roles then routed.roles[s.role] else nil
+	if x and x.kind == "target" then
+		return if x.model then `{x.harness}/{x.model}` else nil
+	end
+	local entry = M.of(chat)
+	local agent = entry and entry.plan and entry.plan.agent
+	return agent and agent.model
+end
+
+local function role_menu(chat: string, key: string, now: () -> any, pick: { model: State<string?>, effort: State<string?> }): Node
 	local open = ui.use_state(false)
 	local first = now() or {}
 	local locked = first.locked == true
 	local dk = dom_id(key)
+	local function ran(): any
+		return live_row(chat, first.id) or first
+	end
+	local function started(): boolean
+		return locked or ran().locked == true
+	end
 	local function said(): string
-		local s = now()
-		if not s then
-			return ""
-		end
-		local base = drafts:get()[chat]
-		local b = if base and s.id then base.base[s.id] else nil
-		local model = if b and b.role == s.role then model_word(s.harness, s.model) else nil
-		return model or route_word(s.role) or ""
+		return if started() then model_word(ran().harness, ran().model) or "" else ""
 	end
 	local anchor = ui.button {
 		id = `threads-edit-role-{dk}`,
@@ -1168,7 +1212,7 @@ local function role_menu(chat: string, key: string, now: () -> any): Node
 			local s = now()
 			return locale.s("chat.threads.edit.role", { title = if s then s.title else "" })
 		end,
-		disabled = locked,
+		disabled = started,
 		bg = "#00000000",
 		h = 22,
 		px = ui.raw(4, "the mockup's role button"),
@@ -1180,11 +1224,20 @@ local function role_menu(chat: string, key: string, now: () -> any): Node
 		hover = if locked then {} else { bg = "$hover", color = "$text.primary" },
 		cursor = if locked then "default" else "pointer",
 		on_click = function()
-			if not locked then
+			if not started() then
 				open:set(not open:peek())
 			end
 		end,
-		if first.mark then Mark { name = first.mark :: any, size = 12, bare = true } else nil,
+		ui.show(
+			started,
+			Mark {
+				name = function(): any
+					return ran().mark
+				end :: any,
+				size = 12,
+				bare = true,
+			}
+		),
 		ui.text {
 			function(): string
 				local s = now()
@@ -1202,7 +1255,9 @@ local function role_menu(chat: string, key: string, now: () -> any): Node
 			wrap = false,
 			color = "$text.tertiary",
 		}),
-		if locked then nil else Icon { name = "lucide-chevron-down", size = 12 },
+		ui.show(function(): boolean
+			return not started()
+		end, Icon { name = "lucide-chevron-down", size = 12 }),
 	}
 	local rows: { any } = {}
 	for _, role in ROLES do
@@ -1233,13 +1288,98 @@ local function role_menu(chat: string, key: string, now: () -> any): Node
 			end,
 		})
 	end
+	local default_row = Menu.Row {
+		id = `threads-edit-model-{dk}-default`,
+		label = locale.s("chat.threads.edit.default_model"),
+		role = "menuitemradio",
+		checked = function(): boolean
+			local s = now()
+			return s ~= nil and s.target == nil
+		end,
+		trail = {
+			ui.text {
+				function(): string
+					local v = default_model(chat, now())
+					return if v then model_word(nil, v) or "" else ""
+				end,
+				literal = true,
+				wrap = false,
+				text_size = ui.raw(11.5, "the mockup's role menu"),
+				color = "$text.tertiary",
+			},
+		},
+		on_click = function()
+			open:set(false)
+			ui.batch(function()
+				pick.model:set(nil)
+				pick.effort:set(nil)
+			end)
+			change_step(chat, key, function(s)
+				s.target = nil
+			end)
+		end,
+	}
 	return ui.menu(Menu.panel {
 		open = open,
 		anchor = anchor,
 		placement = { side = "bottom", align = "start", offset = 4 },
 		w = 240,
 		Menu.Group(rows),
+		Menu.Rule(),
+		Menu.Group { default_row },
 	})
+end
+
+local function model_chip(chat: string, key: string, now: () -> any, pick: { model: State<string?>, effort: State<string?> }): Node
+	local store = require("@app/screens/chat/store") :: any
+	local function shown(): string?
+		return pick.model:get() or default_model(chat, now())
+	end
+	local primed = false
+	ui.effect(function()
+		local m, e = pick.model:get(), pick.effort:get()
+		if not primed then
+			primed = true
+			return
+		end
+		local v = m or (if e then default_model(chat, now()) else nil)
+		local chosen = if v then { harness = string.match(v, "^([^/]+)/") or v, model = v, effort = e } else nil
+		local s = now()
+		if s and not same_pick(s.target, chosen) then
+			change_step(chat, key, function(x)
+				x.target = chosen
+			end)
+		end
+	end)
+	return ds.ModelPicker {
+		model = pick.model,
+		effort = pick.effort,
+		harnesses = function(): { any }
+			local c: any = store.catalog:get()
+			return c.tabs or c.harnesses or {}
+		end,
+		models = function(): { any }
+			return store.catalog:get().models or {}
+		end,
+		default_model = function(): string?
+			local s = now()
+			return if s and s.target and not s.target.model then nil else default_model(chat, s)
+		end,
+		model_label = function(): string?
+			local v = shown()
+			if v then
+				return string.match(v, "^[^/]+/(.+)$") or v
+			end
+			local s = now()
+			return if s and s.target then Transcript.harness_name(s.target.harness) else nil
+		end,
+		looking = function(): boolean
+			return store.catalog:get().complete ~= true
+		end,
+		label = locale.s("chat.threads.edit.model", { title = (now() or {}).title or "" }),
+		tone = "chip",
+		placement = { side = "bottom", align = "start", offset = 4 },
+	}
 end
 
 local StepRow = ui.component(function(props: { chat: string, key: string, number: () -> number }): Node
@@ -1281,6 +1421,10 @@ local StepRow = ui.component(function(props: { chat: string, key: string, number
 	end)
 	local locked = first.locked == true
 	local movable = not locked and not first.fixed
+	local pick = {
+		model = ui.use_state(if first.target then first.target.model else nil),
+		effort = ui.use_state(if first.target then first.target.effort else nil),
+	}
 	local hovered = ui.use_state(false)
 	local function open(): boolean
 		local s = now()
@@ -1464,7 +1608,18 @@ local StepRow = ui.component(function(props: { chat: string, key: string, number
 					end,
 				},
 		},
-		ui.row { pl = ui.raw(42, "the mockup's editor row"), role_menu(chat, key, now) },
+		ui.row {
+			pl = ui.raw(42, "the mockup's editor row"),
+			items = "center",
+			role_menu(chat, key, now, pick),
+			if locked
+				then nil
+				else ui.show(function(): boolean
+					local s = now()
+					local r = if s then live_row(chat, s.id) else nil
+					return not (r and r.locked == true)
+				end, model_chip(chat, key, now, pick)),
+		},
 		ui.show(
 			open,
 			ui.column {

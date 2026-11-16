@@ -36,6 +36,8 @@ struct RawTaskStep {
     role: Option<String>,
     #[serde(default)]
     route: Option<serde_json::Value>,
+    #[serde(default)]
+    target: Option<serde_json::Value>,
 }
 
 impl From<RawTaskStep> for TaskStep {
@@ -57,6 +59,9 @@ impl From<RawTaskStep> for TaskStep {
             route: raw
                 .route
                 .and_then(|route| serde_json::from_value(route).ok()),
+            target: raw
+                .target
+                .and_then(|target| serde_json::from_value(target).ok()),
         }
     }
 }
@@ -77,6 +82,7 @@ fn step_fields(step: &TaskStep, title: String, order_key: String) -> BTreeMap<St
         ("images", json!(step.images)),
         ("role", opt_str(step.role.as_deref())),
         ("route", json!(step.route)),
+        ("target", json!(step.target)),
     ])
 }
 
@@ -274,6 +280,9 @@ impl RegistryDoc {
         }
         if let Some(route) = &patch.route {
             set.insert("route".into(), json!(route));
+        }
+        if let Some(target) = &patch.target {
+            set.insert("target".into(), json!(target));
         }
         set.insert("updatedAt".into(), json!(now.timestamp_millis()));
         let op = RowOp {

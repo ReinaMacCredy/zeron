@@ -303,16 +303,16 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     .await;
     let header = |id: &str| {
         format!(
-            "Shop backend\n\nYou lead this task (task id {id}). Break it into steps and run each step on its own thread.\n\n1. Write the plan with the plan tool: action \"write\", steps [{{title, notes, role}}]. Keep each step small enough for one agent.\n"
+            "Shop backend\n\nYou lead this task (task id {id}). Break it into steps and run each step on its own thread.\n\n1. Write the plan with the plan tool: action \"write\", steps [{{title, notes, role, target}}]. Keep each step small enough for one agent.\n"
         )
     };
     let run = "Run each step on its own thread with delegate_task: task set to what the step must do, stepId set to the step's id. Steps that do not depend on each other can run at the same time.";
-    let tail = "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the plan tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with delegate_task and the same stepId.\n{n}. When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.";
+    let tail = "Zeron messages you when a step's thread finishes a turn or fails. Read the thread with read_thread, then mark the step done or skipped with the plan tool, action \"step\", send the thread a fix with send_message_to_thread, or start the step over with delegate_task and the same stepId. When a step fails, first make sure it can verify its own work, then raise its effort one level, then move it to the next model up at a lower effort.\n{n}. When every step is done, check the whole result, tell the person what was built, and mark the task completed with the tasks tool, action \"update\", completed true.";
     assert_eq!(
         prompts.lock().unwrap().as_slice(),
         [
             format!(
-                "{}2. Then stop. The person reviews the plan and approves it; you get a message when it is approved.\n3. {run}\n4. Give each step a role (worker, validator, research, design or general); Zeron runs it on the route set in Settings > Routing. Pass target only when a step needs a specific harness or model.\n5. {}",
+                "{}2. Then stop. The person reviews the plan and approves it; you get a message when it is approved.\n3. {run}\n4. Give each step a role (worker, validator, research, design or general). Choose each step's model and effort from the notes in orchestrator_capabilities, the cheapest that is enough, and write it as the step's target in the plan, with a one-line reason in its notes; a step with no target runs on its role's route in Settings > Routing.\n5. {}",
                 header("t1"),
                 tail.replace("{n}", "6")
             ),
@@ -350,7 +350,7 @@ async fn an_orchestrated_start_briefs_its_lead_and_a_failed_send_keeps_the_link(
     .await;
     let doc_brief = prompts.lock().unwrap()[2].clone();
     assert!(
-        doc_brief.contains("action \"write\", overview, steps [{title, notes, role}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done."),
+        doc_brief.contains("action \"write\", overview, steps [{title, notes, role, target}]. The overview is the goal, the approach, and how you will check the result. Each step's notes are its spec: what it builds, where, and how to tell it is done."),
         "{doc_brief}"
     );
     assert!(lead("lead-4").plan.unwrap().plan_doc);

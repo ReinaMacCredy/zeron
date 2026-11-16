@@ -1110,6 +1110,12 @@ pub struct TaskStep {
         deserialize_with = "lenient_option"
     )]
     pub route: Option<ChildRoute>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_option"
+    )]
+    pub target: Option<RouteTarget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1176,6 +1182,12 @@ pub struct TaskStepPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub route: Option<Option<ChildRoute>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub target: Option<Option<RouteTarget>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

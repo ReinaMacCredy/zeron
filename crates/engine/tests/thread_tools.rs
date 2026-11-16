@@ -1902,6 +1902,85 @@ async fn a_planned_step_role_routes_its_thread_and_survives_a_replan() {
         "a same-agents mission skips routing"
     );
     assert_eq!(delegation(&rig.core, &thread).route, None);
+
+    let chosen = serde_json::json!({ "harness": "claude-code", "model": "claude-opus-5-5", "reasoning": "high" });
+    let lead2_docs = step_titled("lead-2", "Write the docs");
+    for (lead, step) in [("lead-1", &docs), ("lead-2", &lead2_docs)] {
+        mutate(serde_json::json!({
+            "op": "editPlan", "chatId": lead,
+            "steps": [{ "stepId": step.id, "title": step.title, "target": chosen }],
+        }))
+        .await;
+    }
+    let docs = step_titled("lead-1", "Write the docs");
+    assert_eq!(
+        docs.target.as_ref().and_then(|t| t.model.as_deref()),
+        Some("claude-opus-5-5")
+    );
+    let thread = run("lead-1", &docs).await["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let config = rig
+        .core
+        .workspace
+        .chat(&thread)
+        .unwrap()
+        .unwrap()
+        .config
+        .unwrap();
+    assert_eq!(
+        (config.harness, config.model.as_deref(), config.reasoning),
+        (
+            HarnessId::ClaudeCode,
+            Some("claude-opus-5-5"),
+            Some(ReasoningLevel::High)
+        ),
+        "the step's own agent beats its worker route"
+    );
+    assert_eq!(delegation(&rig.core, &thread).route, None);
+    let thread = call(
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": "lead-2", "task": "do the docs", "stepId": lead2_docs.id, "harness": "mock" }),
+    )
+    .await["taskId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child = rig.core.workspace.chat(&thread).unwrap().unwrap();
+    assert_eq!(
+        child.config.map(|c| c.harness),
+        Some(HarnessId::Mock),
+        "a target on the call beats the step's own agent"
+    );
+
+    mutate(serde_json::json!({
+        "op": "editPlan", "chatId": "lead-1",
+        "steps": [{ "title": "Write the changelog", "target": chosen }],
+    }))
+    .await;
+    let changelog = step_titled("lead-1", "Write the changelog");
+    let mut routing = rig.core.registry.routing_settings();
+    routing.out_of_quota = zeron_engine::routing::OutOfQuota::Ask;
+    rig.core.registry.set_routing_settings(routing).unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    rig.core
+        .sessions
+        .quota()
+        .note_limit(HarnessId::ClaudeCode, Some(now + 3_600_000), now);
+    let Err(asked) = zeron_rpc::RpcService::handle(
+        &*rpc,
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": "lead-1", "task": "do the changelog", "stepId": changelog.id }),
+    )
+    .await
+    else {
+        panic!("a step on an exhausted harness started");
+    };
+    assert!(
+        asked.to_string().contains("quota_exhausted"),
+        "a step's own agent out of quota takes the routed path: {asked}"
+    );
     rig.core.shutdown().await;
 }
 

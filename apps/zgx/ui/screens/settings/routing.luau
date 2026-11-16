@@ -35,6 +35,7 @@ search.index(M.ID, ui.t("settings.routing.title"), ui.t("settings.routing.terms"
 	{ key = "mid_run", title = ui.t("settings.routing.mid_run.label"), section = ui.t("settings.routing.quota_section"), terms = ui.t("settings.routing.mid_run.terms") },
 	{ key = "native", title = ui.t("settings.routing.native.label"), section = ui.t("settings.routing.native_section"), terms = ui.t("settings.routing.native.terms") },
 	{ key = "guidance", title = ui.t("settings.routing.guidance.label"), section = ui.t("settings.routing.native_section"), terms = ui.t("settings.routing.guidance.terms") },
+	{ key = "notes", title = ui.t("settings.routing.notes.title"), terms = ui.t("settings.routing.notes.terms") },
 	{ key = "depth", title = ui.t("settings.routing.depth.label"), section = ui.t("settings.routing.delegation"), terms = ui.t("settings.routing.depth.terms") },
 	{ key = "children", title = ui.t("settings.routing.children.label"), section = ui.t("settings.routing.delegation"), terms = ui.t("settings.routing.children.terms") },
 })
@@ -47,6 +48,7 @@ local models = ui.state("settings_routing_models", {} :: { [string]: { any } })
 local preview = ui.state("settings_routing_preview", nil :: any)
 local delegation = ui.state("settings_routing_delegation", nil :: any)
 local delegation_error = ui.state("settings_routing_delegation_error", nil :: string?)
+local note_defaults = ui.state("settings_routing_note_defaults", {} :: { [string]: string })
 
 local function engine(method: string, params: any?): any
 	return host.call("settings.engine", { method = method, params = params or {} })
@@ -87,6 +89,12 @@ local function load()
 			end
 		end, function() end)
 	end
+	local ok_notes, notes = pcall(host.call, "settings.model_note_defaults")
+	if ok_notes and notes ~= nil then
+		notes:after(function(v: any)
+			note_defaults:set(if type(v) == "table" then v else {})
+		end, function() end)
+	end
 	load_preview()
 end
 M.load = load
@@ -124,6 +132,15 @@ local function save(edit: (any) -> ())
 	if not any_role then
 		sent = table.clone(next)
 		sent.roles = nil
+	end
+	local any_note = false
+	for _ in next.modelNotes or {} do
+		any_note = true
+		break
+	end
+	if not any_note then
+		sent = table.clone(sent)
+		sent.modelNotes = nil
 	end
 	engine("SetRoutingSettings", sent):after(function(saved: any)
 		settings:set(if type(saved) == "table" then saved else next)
@@ -582,6 +599,97 @@ local function stepper(field: string, label: Message, max: number): Node
 	end)()
 end
 
+local function note_of(id: string): string
+	local s = settings:get()
+	local own = s and s.modelNotes and s.modelNotes[id]
+	return if own ~= nil then own else note_defaults:get()[id] or ""
+end
+
+local function edited(id: string): boolean
+	local s = settings:get()
+	return s ~= nil and s.modelNotes ~= nil and s.modelNotes[id] ~= nil
+end
+
+local function set_note(id: string, note: string?)
+	save(function(s: any)
+		s.modelNotes = s.modelNotes or {}
+		s.modelNotes[id] = note
+	end)
+end
+
+local function note_row(h: any, m: any): Node
+	return ui.component(function(): Node
+		local text = ui.use_state(note_of(m.id))
+		ui.effect(function()
+			local v = note_of(m.id)
+			if v ~= text:peek() then
+				text:set(v)
+			end
+		end)
+		local slug = string.gsub(`{h.id}-{m.id}`, "[^%w]", "-")
+		return ds.Settings.Row {
+			label = m.label,
+			description = h.label,
+			stacked = true,
+			control = ui.row {
+				w_full = true,
+				gap = "$space.2",
+				items = "center",
+				ds.TextField {
+					id = `routing-note-{slug}`,
+					value = text,
+					name = ui.t("settings.routing.notes.name", { model = m.label }),
+					placeholder = ui.t("settings.routing.notes.placeholder"),
+					grow = 1,
+					on_commit = function(typed: string)
+						local note = string.match(typed, "^%s*(.-)%s*$") or ""
+						if note == note_of(m.id) then
+							return
+						end
+						set_note(m.id, if note == (note_defaults:peek()[m.id] or "") then nil else note)
+					end,
+				},
+				ui.show(function(): boolean
+					return edited(m.id)
+				end, ds.Button {
+					ui.t("settings.routing.notes.reset"),
+					id = `routing-note-reset-{slug}`,
+					tone = "ghost",
+					size = "sm",
+					on_click = function()
+						set_note(m.id, nil)
+					end,
+				}),
+			},
+		}
+	end)()
+end
+
+local function model_notes(): Node
+	return ui.each(ui.computed(function(): { any }
+		local out: { any } = {}
+		for _, h in harnesses:get() do
+			local ms = models:get()[h.id] or {}
+			if #ms > 0 then
+				table.insert(out, { h = h, models = ms })
+			end
+		end
+		return out
+	end), function(item: any): Node
+		local rows: { any } = {}
+		for _, m in item.models do
+			table.insert(rows, note_row(item.h, m))
+		end
+		return ds.Settings.Group(rows)
+	end, { key = function(item: any): string
+		local ids: { string } = {}
+		for _, m in item.models do
+			table.insert(ids, m.id)
+		end
+		return `{item.h.id}:{table.concat(ids, ",")}`
+	end, w_full = true, gap = "$space.2" })
+end
+
 local function row(key: string, props: any): Node
 	return search.anchor(key, ds.Settings.Row(props))
 end
@@ -663,6 +771,11 @@ local function body(): Node
 				}),
 			},
 		},
+		search.anchor("notes", ds.Settings.Section {
+			title = ui.t("settings.routing.notes.title"),
+			description = ui.t("settings.routing.notes.description"),
+			model_notes(),
+		}),
 		ds.Settings.Section {
 			title = ui.t("settings.routing.delegation"),
 			ui.show(function(): boolean

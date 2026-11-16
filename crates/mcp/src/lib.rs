@@ -443,7 +443,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "plan",
-            "description": "This chat's plan: steps, each run on a thread this chat owns. `write` replaces the steps that have not started with `steps` [{title, notes, role, threadId}] and keeps the rest; `overview` and `resources` (port:<n>, slot:<name>, path:<path in the project>; [] clears) replace theirs when given. A step's `threadId` hands it to a thread this chat delegated that runs no open step. Replaced steps' images move to the same-titled step or the overview (`imagesMoved`). Run a step with delegate_task and its `stepId`. `step` marks `stepId` `state` done, skipped or open; a step is done only once marked. `read` returns the plan: `overview`, `planPending` (run no step until the person approves) and each step's `status` (planned, working, waitingOnYou, readyForReview, failed, cancelled, done or skipped) and `threadId`.",
+            "description": "This chat's plan: steps, each run on a thread this chat owns. `write` replaces the steps that have not started with `steps` [{title, notes, role, target, threadId}] and keeps the rest; `overview` and `resources` (port:<n>, slot:<name>, path:<path in the project>; [] clears) replace theirs when given. A step's `threadId` hands it to a thread this chat delegated that runs no open step. Replaced steps' images move to the same-titled step or the overview (`imagesMoved`). Run a step with delegate_task and its `stepId`. `step` marks `stepId` `state` done, skipped or open; a step is done only once marked. `read` returns the plan: `overview`, `planPending` (run no step until the person approves) and each step's `status` (planned, working, waitingOnYou, readyForReview, failed, cancelled, done or skipped), `threadId` and `target`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -457,7 +457,18 @@ fn thread_tool_list() -> Value {
                                 "title": { "type": "string", "maxLength": 500 },
                                 "notes": { "type": "string", "maxLength": 10000 },
                                 "threadId": { "type": "string" },
-                                "role": { "type": "string", "description": "worker | validator | research | design | general; Settings > Routing picks where the step runs." }
+                                "role": { "type": "string", "description": "worker | validator | research | design | general; Settings > Routing picks where the step runs." },
+                                "target": {
+                                    "type": "object",
+                                    "description": "The agent this step runs on, ahead of its role's route; delegate_task with this stepId uses it unless the call passes target or profile.",
+                                    "properties": {
+                                        "harness": { "type": "string" },
+                                        "model": { "type": "string" },
+                                        "reasoning": { "type": "string", "enum": REASONING_LEVELS }
+                                    },
+                                    "required": ["harness"],
+                                    "additionalProperties": false
+                                }
                             },
                             "required": ["title"],
                             "additionalProperties": false
@@ -575,7 +586,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "orchestrator_capabilities",
-            "description": format!("List what delegate_task and create_thread can run on: each harness with whether it runs now, its reasoning levels and models (pinned ones plus the first {LISTED_MODELS} in catalog order; `omittedModels` counts the rest and `search` finds any of them); the run settings a child inherits; where each delegate_task role is routed (Settings > Routing); the saved agent profiles (pick by `whenToUse`, pass the id as `profile`); and the delegation limits. `harness` narrows it to one harness and adds each model's label, reasoning levels and options."),
+            "description": format!("List what delegate_task and create_thread can run on: each harness with whether it runs now, its reasoning levels and models (pinned ones plus the first {LISTED_MODELS} in catalog order; `omittedModels` counts the rest and `search` finds any of them), each model's one-line `notes` on cost and fit, and its `quota`; `guidance` on choosing a model and effort; the run settings a child inherits; where each delegate_task role is routed (Settings > Routing); the saved agent profiles (pick by `whenToUse`, pass the id as `profile`); and the delegation limits. `harness` narrows it to one harness and adds each model's label, reasoning levels and options."),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -587,7 +598,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "delegate_task",
-            "description": "Start a Zeron-owned child agent of this chat on `task` alone, without this chat's history. Harness, model, reasoning and access mode inherit unless `profile` or `target` sets them; a `role` with neither runs on its Settings > Routing route, and `access` only narrows. `stepId` runs that step of this chat's plan: the child takes the step's title, images and role. `projectId` and `cwd` start it in another project or folder. `mode` async (default) returns its `taskId` at once and the child's completion wakes this chat; `wait`, only when this turn needs the result, blocks until it finishes or `timeoutMs` passes (`waitTimedOut` leaves the child running). `childThreadId` is the child's backing storage, not a top-level thread.",
+            "description": "Start a Zeron-owned child agent of this chat on `task` alone, without this chat's history. Harness, model, reasoning and access mode inherit unless `profile` or `target` sets them; a `role` with neither runs on its Settings > Routing route, and `access` only narrows. `stepId` runs that step of this chat's plan: the child takes the step's title, images, role and `target` (a `target` or `profile` on the call beats it). `projectId` and `cwd` start it in another project or folder. `mode` async (default) returns its `taskId` at once and the child's completion wakes this chat; `wait`, only when this turn needs the result, blocks until it finishes or `timeoutMs` passes (`waitTimedOut` leaves the child running). `childThreadId` is the child's backing storage, not a top-level thread.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1368,6 +1379,15 @@ impl ThreadTools {
             return Err(format!("unknown harness {id}"));
         }
         let agent_profiles = self.agent_profiles().await.unwrap_or_default();
+        let preview = self
+            .call_engine(methods::PREVIEW_ROUTES, json!({ "ownerChatId": caller.id }))
+            .await
+            .unwrap_or(Value::Null);
+        let settings = zeron_proto::routing::RoutingSettings {
+            model_notes: serde_json::from_value(preview["modelNotes"].clone())
+                .unwrap_or_default(),
+            ..Default::default()
+        };
         let catalogs = futures::future::join_all(harnesses.iter().map(|harness| async move {
             let id = harness["id"].as_str().unwrap_or_default();
             if harness["available"] != true && only.is_none() {
@@ -1402,9 +1422,20 @@ impl ThreadTools {
                             .filter(|profile| json!(profile.harness) == harness["id"])
                             .filter_map(|profile| profile.model.as_deref()),
                     )
+                    .chain(
+                        models
+                            .iter()
+                            .filter_map(|model| model["id"].as_str())
+                            .filter(|id| settings.model_note(id).is_some()),
+                    )
                     .collect();
                 let listed = listed_models(&models, &pinned, &terms);
                 let omitted = models.len() - listed.len();
+                let notes: serde_json::Map<String, Value> = listed
+                    .iter()
+                    .filter_map(|model| model["id"].as_str())
+                    .filter_map(|id| Some((id.to_string(), json!(settings.model_note(id)?))))
+                    .collect();
                 let models: Vec<Value> = listed
                     .into_iter()
                     .map(|model| match only {
@@ -1423,6 +1454,15 @@ impl ThreadTools {
                 });
                 if omitted > 0 {
                     row["omittedModels"] = json!(omitted);
+                }
+                if !notes.is_empty() {
+                    row["notes"] = Value::Object(notes);
+                }
+                if let Some(quota) = harness["id"]
+                    .as_str()
+                    .and_then(|id| preview["quotas"].get(id))
+                {
+                    row["quota"] = quota.clone();
                 }
                 row
             })
@@ -1444,14 +1484,10 @@ impl ThreadTools {
                 })
             })
             .collect();
-        let routing = self
-            .call_engine(methods::PREVIEW_ROUTES, json!({ "ownerChatId": caller.id }))
-            .await
-            .map(|preview| preview["rows"].clone())
-            .unwrap_or(Value::Null);
         Ok(json!({
             "parentThreadId": caller.id,
-            "routing": routing,
+            "guidance": DELEGATION_GUIDANCE,
+            "routing": preview["rows"],
             "inheritedHarness": config.map(|c| c.harness),
             "inheritedModel": config.and_then(|c| c.model.as_deref()),
             "inheritedReasoning": config.and_then(|c| c.reasoning),
@@ -2434,9 +2470,23 @@ impl ThreadTools {
                         {
                             planned["threadId"] = json!(thread);
                         }
+                        if step["target"].is_object() {
+                            planned["target"] = step["target"].clone();
+                        }
                         planned
                     })
                     .collect();
+                let chosen: Vec<&Value> = steps
+                    .iter()
+                    .map(|step| &step["target"])
+                    .filter(|target| target.is_object())
+                    .collect();
+                if !chosen.is_empty() {
+                    let (caller, _) = self.peers().await?;
+                    for target in chosen {
+                        self.check_model(&caller, target, "").await?;
+                    }
+                }
                 let mut params = json!({
                     "op": "planSteps",
                     "chatId": self.chat_id,
@@ -3372,6 +3422,8 @@ fn applied_profile(
     Ok(config)
 }
 
+const DELEGATION_GUIDANCE: &str = "Pick the cheapest model whose note says it is enough, and change effort before changing model. A small model only where a mistake is cheap to spot (search, reading logs, summaries); code edits and judgment calls go to a capable model. Search, reading and summarising under a few minutes: a native sub-agent on a small model; writing code, long steps and work that needs review: delegate_task. Review code on a different harness than the one that wrote it. Avoid a harness near its quota. Do not split one chain of dependent steps that fits in one context. A plan step runs on the person's choice on the step, else the lead's target, else its role's route.";
+
 fn listed_models<'a>(models: &'a [Value], pinned: &[&str], terms: &[String]) -> Vec<&'a Value> {
     if !terms.is_empty() {
         return models
@@ -3815,6 +3867,9 @@ fn plan_json(chat: &Chat, steps: &[(TaskStep, ThreadState)]) -> Value {
                 if let Some(thread) = &step.chat_id {
                     entry["threadId"] = json!(thread);
                 }
+                if let Some(target) = &step.target {
+                    entry["target"] = json!(target);
+                }
                 if !step.images.is_empty() {
                     entry["images"] = json!(step.images);
                 }
@@ -4171,6 +4226,11 @@ mod tests {
                 methods::GET_SIDEBAR_SETTINGS => {
                     Ok(RpcReply::Value(json!({ "settleAfterDays": 3 })))
                 }
+                methods::PREVIEW_ROUTES => Ok(RpcReply::Value(json!({
+                    "rows": [{ "role": "worker", "source": "off", "quota": { "known": true, "usedFraction": 0.9 } }],
+                    "quotas": { "claude-code": { "known": true, "usedFraction": 0.9, "exhausted": false } },
+                    "modelNotes": { "claude-opus-5-5": "Edited by the person." },
+                }))),
                 methods::LIST_TERMINALS => {
                     self.calls
                         .lock()
@@ -6512,6 +6572,15 @@ mod tests {
             .find(|h| h["harness"] == "claude-code")
             .unwrap();
         assert_eq!(claude["canRunChildTask"], true);
+        assert_eq!(
+            claude["notes"],
+            json!({ "claude-opus-5-5": "Edited by the person." }),
+            "the person's note replaces the built-in one; a model with neither has none"
+        );
+        assert_eq!(claude["quota"]["usedFraction"], 0.9);
+        assert!(codex.get("quota").is_none());
+        assert_eq!(out["routing"][0]["role"], "worker");
+        assert!(out["guidance"].as_str().unwrap().starts_with("Pick the cheapest model"));
         assert_eq!(out["parentThreadId"], "a");
         assert_eq!(out["features"]["maxDepth"], 2);
         assert_eq!(out["depth"], 0);

@@ -405,6 +405,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let disabled: Vec<String> = args.field("disabled").map(value_json).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         async move { Ok::<_, String>(json_value(&tool_groups(&disabled))) }
     });
+    host.async_action("settings.model_note_defaults", |_| async move {
+        Ok::<_, String>(Value::record(zeron_proto::routing::DEFAULT_MODEL_NOTES.iter().map(|(id, note)| (*id, Value::from(*note)))))
+    });
     host.async_action("settings.routing_preview", |_| async move {
         let preview = engine::get().call("PreviewRoutes", json!({})).await.map_err(|e| engine::outcome(&e).to_string())?;
         Ok::<_, String>(json_value(&routing_preview(&preview)))
