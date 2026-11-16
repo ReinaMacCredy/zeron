@@ -914,6 +914,9 @@ end
 config_stub.close = function()
 	note("config_close")
 end
+config_stub.mission_size = function(size: string)
+	note(`mission_size:{size}`)
+end
 config_stub.stats = function()
 	note("config_stats")
 end

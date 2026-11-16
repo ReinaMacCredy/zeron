@@ -6012,6 +6012,96 @@ async fn a_message_read_mid_turn_over_a_plan_that_ran_starts_plan_two() {
 }
 
 #[tokio::test]
+async fn a_plan_takes_a_changed_size_until_a_step_of_it_runs() {
+    let rig = rig(Duration::from_millis(500));
+    let rpc = rig.core.rpc_service();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let rpc = rpc.clone();
+        async move { zeron_rpc::RpcService::handle(&*rpc, method, params).await }
+    };
+    let mutate = |params| call(zeron_rpc::methods::MUTATE, params);
+    let sized = |size| zeron_proto::ChatConfig {
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        access: zeron_proto::AccessMode::FullAccess,
+        plan: false,
+        instructions: String::new(),
+        profile_id: None,
+        instance_id: None,
+        disabled_tools: Vec::new(),
+        mission: Some(zeron_proto::ChatMission {
+            same_agents: false,
+            approve: false,
+            size,
+        }),
+    };
+    let plan = |count: usize| {
+        let steps: Vec<_> = (0..count)
+            .map(|n| serde_json::json!({ "title": format!("Step {n}") }))
+            .collect();
+        serde_json::json!({ "op": "planSteps", "chatId": "lead", "fromChatId": "lead", "steps": steps })
+    };
+    let size = |rig: &Rig| {
+        rig.core
+            .workspace
+            .chat("lead")
+            .unwrap()
+            .unwrap()
+            .plan
+            .and_then(|plan| plan.size)
+    };
+    let turn_over =
+        |rig: &Rig, needle: &str| !prompts_with(rig, needle).is_empty() && idle(&rig.core, "lead");
+
+    rig.core
+        .workspace
+        .set_chat_config("lead", &sized(zeron_proto::PlanSize::Medium))
+        .unwrap();
+    queue_run(&rig.core, "lead", "c1", "m1", "grade the outputs");
+    wait_for(|| turn_over(&rig, "grade the outputs"), "the first goal").await;
+    mutate(plan(2)).await.unwrap();
+    rig.core
+        .workspace
+        .set_chat_config("lead", &sized(zeron_proto::PlanSize::Large))
+        .unwrap();
+    queue_run(&rig.core, "lead", "c2", "m2", "grade them all");
+    wait_for(|| turn_over(&rig, "grade them all"), "the second goal").await;
+    mutate(plan(11)).await.unwrap();
+    assert_eq!(
+        size(&rig),
+        Some(zeron_proto::PlanSize::Large),
+        "a plan nothing ran in takes the size of the goal that rewrites it"
+    );
+
+    let first = rig.core.workspace.steps_of("lead");
+    rpc_value(
+        &rig.core,
+        zeron_rpc::methods::DELEGATE_TASK,
+        serde_json::json!({ "ownerChatId": "lead", "task": "do: Step 0", "stepId": first[0].id }),
+    )
+    .await;
+    rig.core
+        .workspace
+        .set_chat_config("lead", &sized(zeron_proto::PlanSize::Small))
+        .unwrap();
+    queue_run(&rig.core, "lead", "c3", "m3", "drop the last one");
+    wait_for(
+        || !prompts_with(&rig, "drop the last one").is_empty(),
+        "the third goal",
+    )
+    .await;
+    mutate(plan(9)).await.unwrap();
+    assert_eq!(
+        size(&rig),
+        Some(zeron_proto::PlanSize::Large),
+        "a smaller size waits for the next plan: this one's running step stays"
+    );
+}
+
+#[tokio::test]
 async fn a_new_goal_over_a_plan_that_ran_starts_plan_two_and_a_rewrite_stays_in_its_plan() {
     let rig = rig(Duration::from_millis(20));
     let rpc = rig.core.rpc_service();

@@ -66,6 +66,7 @@ test("the Zeron tab's Plan size row opens on the four sizes, and a new mission s
 	settle(app)
 	expect(app:tree("#claude-config-value-mission.size")).to_contain("Unlimited")
 	expect(app:state("chat_mission").size).to_be("unlimited")
+	expect(app:state("calls")).to_contain("mission_size:unlimited")
 	expect(app:state("calls")).to_contain("configure:s1:mission=by_role/asks/unlimited")
 	expect(app:error()).to_be(nil)
 end)

@@ -65,6 +65,9 @@ M.host = {
 		local ok, v = pcall(ui.call_sync, "claude_panel.set", args)
 		return if ok then v else nil
 	end,
+	mission_size = function(size: string)
+		pcall(ui.call, "chat.mission_size", { size = size })
+	end,
 }
 
 M.shown = ui.state("chat_config_panel", false)
@@ -108,7 +111,7 @@ M.ZERON_ROWS = {
 		end,
 		set = function(v: string)
 			set_default("size", v)
-			pcall(ui.invoke, "chat.mission_size", { size = v })
+			M.host.mission_size(v)
 		end,
 	},
 	{
