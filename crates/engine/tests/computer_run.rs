@@ -219,10 +219,14 @@ struct Rig {
 fn rig_with(resume: Option<bool>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
-    rig_in(dir, resume)
+    rig_in(dir, resume, None)
 }
 
-fn rig_in(dir: tempfile::TempDir, resume: Option<bool>) -> Rig {
+fn rig_in(
+    dir: tempfile::TempDir,
+    resume: Option<bool>,
+    delegation: Option<zeron_proto::Delegation>,
+) -> Rig {
     let probe = Arc::new(Probe {
         resume,
         ..Probe::default()
@@ -234,11 +238,23 @@ fn rig_in(dir: tempfile::TempDir, resume: Option<bool>) -> Rig {
     core.workspace
         .create_space("space-cu", "dev-a", "/tmp", None, false)
         .expect("space");
-    for chat in [CHAT, LEAD] {
-        core.workspace
-            .create_chat(chat, Some("space-cu"), None, None, None)
-            .expect("chat");
+    core.workspace
+        .create_chat(LEAD, Some("space-cu"), None, None, None)
+        .expect("lead");
+    match delegation {
+        Some(delegation) => core.workspace.create_delegated_chat(
+            CHAT,
+            Some("space-cu"),
+            None,
+            None,
+            None,
+            delegation,
+        ),
+        None => core
+            .workspace
+            .create_chat(CHAT, Some("space-cu"), None, None, None),
     }
+    .expect("chat");
     core.sessions.set_tool_server_port(1);
     Rig {
         core,
@@ -742,6 +758,37 @@ async fn an_agent_that_cannot_see_the_computer_tools_refuses_computer_visibly() 
         rig.system_notes()
             .iter()
             .any(|note| note.starts_with("Computer is unavailable for this turn"))
+    );
+    rig.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_delegated_child_is_not_told_the_computer_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
+    let delegation = serde_json::from_value(json!({
+        "delegatedByChatId": LEAD, "depth": 1, "anchor": "m-c1", "wake": "never",
+        "status": "running", "startedAt": "2026-11-16T10:00:00Z",
+    }))
+    .unwrap();
+    let rig = rig_in(dir, None, Some(delegation));
+    rig.probe
+        .tools_unreachable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.run(
+        "c1",
+        "/computer-use open Calculator",
+        AccessMode::FullAccess,
+        None,
+    );
+    let seen = rig.saw(1).await;
+    assert!(!seen.computer, "still no catalog it cannot see");
+    assert!(
+        !rig.system_notes()
+            .iter()
+            .any(|note| note.starts_with("Computer is unavailable for this turn")),
+        "{:?}",
+        rig.system_notes()
     );
     rig.core.shutdown().await;
 }
@@ -1411,7 +1458,7 @@ async fn a_restart_resumes_a_slash_turn_with_the_generation_it_was_dispatched_wi
     std::fs::write(dir.path().join("device-id"), "dev-a").unwrap();
     crashed_slash_turn(dir.path(), CHAT, "/computer-use open Calculator", Some(0));
     crashed_slash_turn(dir.path(), LEAD, "/computer-use open Safari", Some(1));
-    let rig = rig_in(dir, None);
+    let rig = rig_in(dir, None, None);
     wait_for(|| rig.seen().len() >= 2, "both crashed turns to resume").await;
     let seen = rig.seen();
     let fenced = seen

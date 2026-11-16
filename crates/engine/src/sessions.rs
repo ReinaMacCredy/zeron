@@ -2186,12 +2186,11 @@ impl SessionsEngine {
             .map_err(EngineError::Other)?;
         self.inner
             .apply_native_policy(chat_id, harness_id, &mut request.disabled_tools);
-        if self
+        let chat = self
             .inner
             .workspace()
-            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
-            .is_some_and(|chat| chat.mission().is_some())
-        {
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten());
+        if chat.as_ref().is_some_and(|chat| chat.mission().is_some()) {
             request.plan = false;
         }
         // Native-only catalog entries have no portable file fallback. Reject
@@ -2214,7 +2213,9 @@ impl SessionsEngine {
         let (harness, instance_id) = self.inner.resolve_for_chat(chat_id, harness_id)?;
         let launch = self.inner.instance_launch(instance_id.as_deref());
         if request.computer_control && !harness.computer_tools_reachable() {
-            self.note_computer_unreachable(chat_id, harness_id);
+            if !chat.as_ref().is_some_and(|chat| chat.delegation.is_some()) {
+                self.note_computer_unreachable(chat_id, harness_id);
+            }
             request.computer_control = false;
         }
         let mut turn_computer = request.computer_control;
