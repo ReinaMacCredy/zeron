@@ -107,7 +107,7 @@ zeron.serve("start", function(args: any, call: any): any
 			error("prompt is required when no repo is given", 0)
 		end
 		local project = find_project(zeron.projects():await(), wanted)
-		local chat = zeron.new_chat({ project = project.id, prompt = prompt }):await()
+		local chat = zeron.new_chat({ project = project.id, sandbox = "read-only", prompt = prompt }):await()
 		return { chat = chat.chat, project = project.id, cwd = project.path }
 	end
 	local target = clone(repo, given)

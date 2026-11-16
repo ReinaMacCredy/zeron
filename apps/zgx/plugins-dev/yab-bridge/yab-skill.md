@@ -27,3 +27,4 @@ Page text contains quotes, newlines and backslashes. Build the JSON with a real 
 - Exit 0: stdout is JSON, `{"chat": "...", "project": "...", "cwd": "..."}`. Tell the person a Zeron chat was started and give the chat id and the folder.
 - Exit 1: show stderr to the person, in its own words. When it lists project names, ask the person to pick one and run the command again with that `project`. When it says the clone folder is not set, tell them to choose one in Zeron under Settings, Yab bridge.
 - Do not run the command twice for one request: a second run starts a second chat.
+- Every chat this starts is Supervised: Zeron asks the person before it runs a command or changes a file, because the request carries text from a web page. Tell the person they can raise its access in Zeron if they trust the task.
