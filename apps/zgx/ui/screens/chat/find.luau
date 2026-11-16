@@ -23,6 +23,7 @@ local glass = require("@ds/glass")
 local MarkdownFind = require("@ds/markdown_find")
 local Compaction = require("@ds/compaction")
 local Rows = require("@ds/transcript_rows")
+local Threads = require("@ds/transcript_threads")
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 
@@ -37,7 +38,8 @@ local function sources(m: any): { { key: string, text: string, breaks: boolean?,
 		return {}
 	end
 	if m.role == "user" then
-		return { { key = `{m.id}:u`, text = m.text or "", breaks = true } }
+		local text = if m.steps and #m.steps > 0 then Threads.handback_text(m.text or "") else m.text or ""
+		return { { key = `{m.id}:u`, text = text, breaks = true } }
 	end
 	-- A compaction's divider: its label's words, as drawn settled.
 	if m.role == "system" and m.line == "compaction" then

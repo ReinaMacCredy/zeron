@@ -1273,6 +1273,13 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "step_handback",
+	title = "A plan step's thread hands back its turn",
+	run = function()
+		store.messages:push { id = "hb1", role = "user", from_chat = "dg-run", steps = { "dg-run" }, clock = "4:27 PM", at = "Sep 8, 4:27 PM", text = 'Step "Write the parser" (stepId s1) finished a turn on its thread dg-run.\nTurn: 2m 5s, 3 tool calls, 1 failed.\n\n> The parser reads every fixture.\n\nRead it with read_thread, then mark the step done or skipped with the plan tool, action "step", or tell the thread what is still missing with send_message_to_thread.' }
+	end,
+}
+ui.command {
 	id = "peer_more",
 	title = "The parser delegate sends one more",
 	run = function()
