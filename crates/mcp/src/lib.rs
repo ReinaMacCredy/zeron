@@ -69,6 +69,7 @@ pub struct ThreadTools {
     ipc_port: Option<u16>,
     advertised_plugin_tools: Mutex<Option<BTreeSet<String>>>,
     waits_on_background: bool,
+    mission_lead: tokio::sync::OnceCell<bool>,
 }
 
 /// `ReasoningLevel`'s serde names, spelled out so the schema can list them.
@@ -107,6 +108,18 @@ pub fn tool_list() -> Value {
 }
 
 const WAIT_ON_BACKGROUND: &str = "wait_on_background";
+
+/// What a mission lead calls on every step, loaded up front instead of behind tool search.
+const MISSION_TOOLS: [&str; 8] = [
+    "plan",
+    "orchestrator_capabilities",
+    "delegate_task",
+    "send_message_to_thread",
+    "read_thread",
+    "task_cancel",
+    "task_status",
+    WAIT_ON_BACKGROUND,
+];
 
 const WAIT_ON_BACKGROUND_DESCRIPTION: &str = "\
 Say that you'll wait on background work you started, so this chat reads as waiting (not finished) \
@@ -687,6 +700,7 @@ impl ThreadTools {
             advertised_plugin_tools: Mutex::new(None),
             waits_on_background: std::env::var(zeron_proto::McpServer::WAITS_ON_BACKGROUND_ENV)
                 .is_ok_and(|value| value == "1"),
+            mission_lead: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -779,6 +793,23 @@ impl ThreadTools {
         Ok(Value::Object(map))
     }
 
+    /// Settled once per server, which lives as long as its run: a tool list
+    /// that changed mid-run would cost the run its prompt cache.
+    async fn mission_lead(&self) -> bool {
+        *self
+            .mission_lead
+            .get_or_init(|| async {
+                self.peers().await.is_ok_and(|(caller, peers)| {
+                    caller.mission().is_some()
+                        || caller.has_plan()
+                        || peers
+                            .iter()
+                            .any(|chat| chat.delegated_by() == Some(self.chat_id.as_str()))
+                })
+            })
+            .await
+    }
+
     async fn tools(&self) -> Value {
         let disabled = self.disabled_tools().await;
         let mut tools = tool_list();
@@ -799,6 +830,17 @@ impl ThreadTools {
                 (tools.as_array_mut(), catalog["tools"].as_array())
         {
             tools.extend(catalog.iter().cloned());
+        }
+        if self.mission_lead().await
+            && let Some(list) = tools.as_array_mut()
+        {
+            for tool in list.iter_mut().filter(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_some_and(|name| MISSION_TOOLS.contains(&name))
+            }) {
+                tool["_meta"]["anthropic/alwaysLoad"] = json!(true);
+            }
         }
         if let Some(list) = tools.as_array_mut() {
             self.add_plugin_tools(list).await;
@@ -5439,6 +5481,30 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mission_lead_loads_its_mission_tools_up_front_and_another_chat_defers_them() {
+        let mut fake = fixture();
+        fake.chats[0]["plan"] = json!({});
+        let fake = Arc::new(fake);
+        for (chat, lead) in [("a", true), ("c", false)] {
+            let mut pipe = Pipe::open(ThreadTools::new(memory_client(fake.clone()), chat));
+            let listed = pipe.list().await;
+            let loaded: Vec<&str> = listed
+                .iter()
+                .filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == json!(true))
+                .filter_map(|tool| tool["name"].as_str())
+                .collect();
+            for name in MISSION_TOOLS.iter().filter(|name| **name != WAIT_ON_BACKGROUND) {
+                assert!(
+                    listed.iter().any(|tool| tool["name"] == *name),
+                    "{chat} lists {name}"
+                );
+                assert_eq!(loaded.contains(name), lead, "{chat}: {name}");
+            }
+            assert!(loaded.contains(&"compact"), "{chat}");
         }
     }
 
