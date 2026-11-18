@@ -1473,21 +1473,23 @@ local function Transcript(props: Props): Node
 	local foot_held = ui.use_state(0)
 	-- The foot's room falling (the composer's pill row folds as a thread ends, just before its row lands here) eases off at the end: in a step, the view dropped by it under the row's own opening.
 	local foot_now = foot()
+	local foot_easing = ui.use_state(0)
 	local foot_eases = 0
 	ui.effect(function()
 		local f = foot()
 		local was = foot_now
 		foot_now = f
-		if f >= was or foot_held:peek() > 0 or not at_end:peek() or motion.reduced_now() then
+		if f >= was or not at_end:peek() or motion.reduced_now() then
 			return
 		end
 		foot_eases += 1
 		local turn = foot_eases
-		foot_held:set(was)
-		anime.animate(foot_held, { value = { was, f }, duration = PEER_ROOM_MS, ease = LAND_EASE })
+		local from = math.max(was, foot_easing:peek())
+		foot_easing:set(from)
+		anime.animate(foot_easing, { value = { from, f }, duration = PEER_ROOM_MS, ease = LAND_EASE })
 		ui.after(PEER_ROOM_MS + 20, function()
 			if turn == foot_eases then
-				foot_held:set(0)
+				foot_easing:set(0)
 			end
 		end)
 	end)
@@ -3027,14 +3029,14 @@ local function Transcript(props: Props): Node
 			-- The air at the conversation's end, on its last row: on the list
 			-- itself it would clip every row short of the list's foot.
 			pb = function(): number
-				return if last() then ui.raw(TAIL + math.max(foot(), foot_held:get()), "the air at its end, and the room held for what floats over its foot") else 0
+				return if last() then ui.raw(TAIL + math.max(foot(), foot_held:get(), foot_easing:get()), "the air at its end, and the room held for what floats over its foot") else 0
 			end,
 			relative = true,
 			min_h = function(): number
 				local p = folded()
 				local f = fold:get()
 				if p and f then
-					return if f.holds and last() then ((f.inners[m.id] or 0) + TURN_GAP) * (1 - p) + TAIL + math.max(foot(), foot_held:get()) + f.lost * p else 0
+					return if f.holds and last() then ((f.inners[m.id] or 0) + TURN_GAP) * (1 - p) + TAIL + math.max(foot(), foot_held:get(), foot_easing:get()) + f.lost * p else 0
 				end
 				return need()
 			end,
