@@ -1296,7 +1296,7 @@ function M.Card(props: CardProps): Node
 			return
 		end
 		flash:set(1)
-		anime.animate(flash, { value = { 1, 0 }, delay = 350, duration = 650, ease = "out(2)" })
+		anime.animate(flash, { value = { 1, 0 }, delay = 300, duration = 500, ease = "out(2)" })
 	end
 	if props.found then
 		local found = props.found
@@ -1605,6 +1605,7 @@ function M.Card(props: CardProps): Node
 		relative = true,
 		w_full = true,
 		min_w = 0,
+		origin = { 0.12, 1 },
 		on_mount = function(el)
 			mounted = true
 			if not props.fresh() then
@@ -1614,8 +1615,8 @@ function M.Card(props: CardProps): Node
 				anime.animate(el, { opacity = { 0, 1 }, duration = motion.FADE })
 				return
 			end
-			anime.animate(el, { opacity = { 0, 1 }, y = { 12, 0 }, scale = { 0.98, 1 }, duration = 280, ease = CARD_EASE })
-			flash_border()
+			anime.animate(el, { opacity = { from = 0, to = 1, duration = 160 }, y = { 28, 0 }, scale = { 0.9, 1 }, duration = 240, ease = CARD_EASE })
+			ui.after(120, flash_border)
 		end,
 		card,
 		ui.div {
@@ -1627,8 +1628,6 @@ function M.Card(props: CardProps): Node
 			rounded = "$radius.xl",
 			border = 1,
 			border_color = "$accent",
-			outline = 3,
-			outline_color = "$zeron.peer_card.ring",
 			pointer_events = "none",
 			aria_hidden = true,
 			opacity = function(): number

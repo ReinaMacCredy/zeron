@@ -61,6 +61,18 @@ test("with no queue and no plan nothing of the deck stands; one queued message b
 	expect(app:error()).to_be(nil)
 end)
 
+test("a thread's message in the queue brings no line until it has waited there", function()
+	local app = chat()
+	patch(app, { queue = { { id = "q1", text = "Step one is done", from = "c2" } } })
+	expect(app:has(PILL)).to_be(false)
+	app:wait("#never-shown", { timeout_ms = 1600 })
+	app:frames(10)
+	expect(app:tree(PILL)).to_contain("1 queued")
+	patch(app, { queue = { { id = "q1", text = "Step one is done", from = "c2" }, TWO[1] } })
+	expect(app:tree(PILL)).to_contain("2 queued")
+	expect(app:error()).to_be(nil)
+end)
+
 test("its tabs are Queue and Plan alone; agents and shells stay on the pill row", function()
 	local app = chat()
 	app:command("subagents_running")

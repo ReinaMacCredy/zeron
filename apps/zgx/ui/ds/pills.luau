@@ -104,8 +104,25 @@ local SEG_INK: { [string]: string } = {
 	skipped = "$text.tertiary",
 }
 
+-- A thread's message reaching the chat (the transcript counts them): the plan's working segments beat as its card comes up from them.
+M.arrivals = ui.state("pills_thread_arrivals", 0)
+
 function M.Segments(props: { states: () -> { string }, done: () -> number }): Node
 	local reduced = motion.reduced_now()
+	local beat = ui.use_state(1)
+	local arrivals_seen: number? = nil
+	ui.effect(function()
+		local n = M.arrivals:get()
+		local first = arrivals_seen == nil
+		arrivals_seen = n
+		if first or motion.reduced_now() then
+			return
+		end
+		anime.animate(beat, { value = { 1, 2.6 }, duration = 150, ease = "out(2)" })
+		ui.after(150, function()
+			anime.animate(beat, { value = { 2.6, 1 }, duration = 150, ease = "out(2)" })
+		end)
+	end)
 	local states = ui.computed(props.states)
 	local places = ui.computed(function(): { number }
 		local out: { number } = {}
@@ -138,6 +155,9 @@ function M.Segments(props: { states: () -> { string }, done: () -> number }): No
 					rounded = ui.raw(2, "the mockup's segment"),
 					bg = SEG_INK[st] or "$border.strong",
 					opacity = if st == "working" and not reduced then ui.loop { from = 1, to = 0.45, duration = 700, yoyo = true, fps = 30 } else nil,
+					scale_y = if st == "working" then function(): number
+						return beat:get()
+					end else nil,
 				}
 			end, { shrink = 0, enter = { opacity = { 0, 1 }, duration = if reduced then motion.FADE else 220 }, exit = { opacity = 0, duration = if reduced then motion.FADE else 220 } })
 		end, { direction = "row", gap = ui.raw(2, "the mockup's segments"), items = "center", shrink = 0 })

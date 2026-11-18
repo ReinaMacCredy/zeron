@@ -64,6 +64,7 @@ local locale = require("@self/locale")
 local Compaction = require("@self/compaction")
 local ContextCard = require("@self/compaction_context")
 local Threads = require("@self/transcript_threads")
+local Pills = require("@self/pills")
 local HtmlCard = require("@self/html_card")
 local Rows = require("@self/transcript_rows")
 local MessageEdit = require("@self/message_edit")
@@ -318,6 +319,8 @@ local FOLD_MS, FOLD_FADE_MS, FOLD_EASE = 240, 160, "cubicBezier(0.4, 0, 0.2, 1)"
 -- A prompt landing in place: its room opens as the queue's row goes (the deck folds then, and a later start read as a step down and back up), what came with it rises a beat in.
 local LAND_ROOM_MS, LAND_RISE_AT = 220, 80
 local LAND_EASE = "cubicBezier(0.2, 0.8, 0.2, 1)"
+-- (A thread's row: its card comes up from the pills as its room opens.)
+local PEER_ROOM_MS = 240
 ui.theme.tokens {
 	zeron = { transcript = { latest = { bg = "over({zeron.window}, {zeron.inset.bg})" } } },
 }
@@ -1466,6 +1469,28 @@ local function Transcript(props: Props): Node
 	local function wait_since_of(): number
 		return wait_since
 	end
+	-- (The room at its foot as a glide began, held until its prompt is in: a composer shrinking meanwhile, a steered row leaving its queue, would bring the list back to its end, to follow the new rows there.)
+	local foot_held = ui.use_state(0)
+	-- The foot's room falling (the composer's pill row folds as a thread ends, just before its row lands here) eases off at the end: in a step, the view dropped by it under the row's own opening.
+	local foot_now = foot()
+	local foot_eases = 0
+	ui.effect(function()
+		local f = foot()
+		local was = foot_now
+		foot_now = f
+		if f >= was or foot_held:peek() > 0 or not at_end:peek() or motion.reduced_now() then
+			return
+		end
+		foot_eases += 1
+		local turn = foot_eases
+		foot_held:set(was)
+		anime.animate(foot_held, { value = { was, f }, duration = PEER_ROOM_MS, ease = LAND_EASE })
+		ui.after(PEER_ROOM_MS + 20, function()
+			if turn == foot_eases then
+				foot_held:set(0)
+			end
+		end)
+	end)
 	-- A prompt the host adds at the end on its own (a queued message, as a turn or a compaction ends) lands in place.
 	local landing: { id: string, at: number }? = nil
 	local arrived: { [string]: number } = {}
@@ -1503,9 +1528,10 @@ local function Transcript(props: Props): Node
 			local at = messages:index_of("id", was)
 			if at and at < n then
 				arrived[id :: string] = ui.now()
+				Pills.arrivals:set(Pills.arrivals:peek() + 1)
 			end
 		end
-		if first or not last or not was or last.role ~= "user" or (last.from_chat ~= nil and last.continued_on == nil) or SENT:peek()[id] or not at_end:peek() or motion.reduced_now() then
+		if first or not last or not was or last.role ~= "user" or SENT:peek()[id] or not at_end:peek() or motion.reduced_now() then
 			return
 		end
 		local at = messages:index_of("id", was)
@@ -1574,8 +1600,6 @@ local function Transcript(props: Props): Node
 	-- from the end, a send jumps there (a glide across a long way would
 	-- build every row on it).
 	local held = ui.state(`transcript_held{kept}`, { id = "", h = 0 })
-	-- (The room at its foot as a glide began, held until its prompt is in: a composer shrinking meanwhile, a steered row leaving its queue, would bring the list back to its end, to follow the new rows there.)
-	local foot_held = ui.use_state(0)
 	-- A send's glide under way (from its step off the end to its landing).
 	local gliding = ui.state(`transcript_gliding{kept}`, false)
 	local glide: any = nil
@@ -2837,7 +2861,7 @@ local function Transcript(props: Props): Node
 			landing = nil
 			room = ui.use_state(0)
 			natural = ui.use_state(0)
-			anime.animate(room, { value = { 0, 1 }, duration = LAND_ROOM_MS, ease = LAND_EASE })
+			anime.animate(room, { value = { 0, 1 }, duration = if m.from_chat ~= nil and m.continued_on == nil then PEER_ROOM_MS else LAND_ROOM_MS, ease = LAND_EASE })
 		end
 		local function opened(): number
 			return if room then room:get() else 1
@@ -3117,19 +3141,19 @@ local function Transcript(props: Props): Node
 					elseif m.role == "system" then line_row(m.hint, function(): any
 						return state:get()
 					end, `{m.id}:row`, find_for)
-					elseif voice == "wake" and shape then ui.presence(function(): string?
+					elseif voice == "wake" and shape then landed(ui.presence(function(): string?
 						return if (shape :: () -> string)() == "wake" then "wake" else nil
 					end, function(): Node
 						return Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
-					end, { w_full = true })
-					elseif voice == "wake" then Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads }
-					elseif grouped and shape then ui.presence(function(): string?
+					end, { w_full = true }))
+					elseif voice == "wake" then landed(Threads.Wake { id = `wake-{m.id}`, ids = m.wake :: { string }, threads = props.threads })
+					elseif grouped and shape then landed(ui.presence(function(): string?
 						local sh = (shape :: () -> string)()
 						return if sh ~= "gone" and sh ~= "hidden" then "card" else nil
 					end, function(): Node
 						return peer_card(m, index, shape :: () -> string, hovered)
-					end, { w_full = true })
-					elseif voice == "peer" then ui.presence(function(): string?
+					end, { w_full = true }))
+					elseif voice == "peer" then landed(ui.presence(function(): string?
 						return if hidden() then nil else "peer"
 					end, function(): Node
 						return ui.column {
@@ -3149,7 +3173,7 @@ local function Transcript(props: Props): Node
 							},
 							strip(m, state, hovered),
 						}
-					end, { w_full = true })
+					end, { w_full = true }))
 					elseif mine then landed(ui.column {
 						hook = "chat.message.prompt",
 						-- What it is, for a plugin's selector (and the

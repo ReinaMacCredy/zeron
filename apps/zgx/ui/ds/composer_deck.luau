@@ -1212,6 +1212,44 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 	local function has_queue(): boolean
 		return props.queue ~= nil and #props.queue:get() > 0
 	end
+	-- A thread's row that goes as it comes (the chat was idle, or its turn takes it at once) shows no chip: one opened a row over the composer and shut it around the thread's card.
+	local THREAD_ROW_WAIT = 1500
+	local waited = ui.use_state(false)
+	local waiting_since: number? = nil
+	ui.effect(function()
+		local threads_only = has_queue()
+		for _, q in (if props.queue then props.queue:get() else {}) do
+			if q.from == nil then
+				threads_only = false
+			end
+		end
+		if not threads_only then
+			waiting_since = nil
+			waited:set(false)
+			return
+		end
+		if waiting_since then
+			return
+		end
+		local since = ui.now()
+		waiting_since = since
+		ui.after(THREAD_ROW_WAIT, function()
+			if waiting_since == since then
+				waited:set(true)
+			end
+		end)
+	end)
+	local function queue_shown(): boolean
+		if not has_queue() then
+			return false
+		end
+		for _, q in (props.queue :: any):get() do
+			if q.from == nil then
+				return true
+			end
+		end
+		return waited:get()
+	end
 	local function has_todos(): boolean
 		return props.todos ~= nil and #props.todos:get() > 0
 	end
@@ -1387,7 +1425,7 @@ local function build(props: Props): ({ Tab }, State<Tray?>, { [string]: number }
 			end,
 			trail = if steer_all then { steer_all } else nil,
 			body = body,
-			present = has_queue,
+			present = queue_shown,
 		})
 	end
 

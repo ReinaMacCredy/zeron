@@ -8550,6 +8550,9 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
             if let Some(ms) = q["issuedAt"].as_f64() {
                 fields.push(("at", Value::Num(ms / 1000.)));
             }
+            if let Some(from) = q["fromChatId"].as_str().filter(|f| !f.is_empty()) {
+                fields.push(("from", Value::from(from)));
+            }
             let mine = open.editing.as_ref().is_some_and(|e| q["id"].as_str() == Some(&e.item));
             if mine {
                 fields.push(("editing", Value::Bool(true)));
