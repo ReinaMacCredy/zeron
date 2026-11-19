@@ -12,8 +12,7 @@ const PORT_BASE: u16 = 49800;
 const NUMBERS: std::ops::RangeInclusive<u16> = 60..=99;
 const SCENARIO_N: u16 = 80;
 const RELEASE_ID: &str = "sh.zeron.app";
-const SCRIPT: &str = "scripts/run-macos-dev.sh";
-const ZGX_SCRIPT: &str = "scripts/run-zgx-dev.sh";
+const SCRIPT: &str = "scripts/run-zgx-dev.sh";
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(500);
@@ -23,7 +22,6 @@ const TAIL_LINES: usize = 40;
 struct Launch {
     n: Option<u16>,
     mock: bool,
-    zgx: bool,
     name: Option<String>,
     app_args: Vec<String>,
 }
@@ -33,7 +31,6 @@ impl Launch {
         let mut launch = Launch {
             n: None,
             mock: false,
-            zgx: false,
             name: None,
             app_args: Vec::new(),
         };
@@ -55,7 +52,10 @@ impl Launch {
                     );
                 }
                 ("mock", Value::Bool(mock)) => launch.mock = *mock,
-                ("zgx", Value::Bool(zgx)) => launch.zgx = *zgx,
+                ("zgx", Value::Bool(true)) => {}
+                ("zgx", Value::Bool(false)) => {
+                    return Err("`launch` starts the zgx app only: the gpui app is gone".into());
+                }
                 ("name", Value::String(name)) if !name.trim().is_empty() && !name.contains('/') => {
                     launch.name = Some(name.trim().to_owned());
                 }
@@ -97,14 +97,8 @@ pub(super) async fn launch(
             .ok_or("every Dev number from 60 to 99 is in use")?,
     };
     let port = PORT_BASE + n;
-    let (script, folder, default_name) = if launch.zgx {
-        (ZGX_SCRIPT, "zgx-dev", "Zeron Beta Dev")
-    } else {
-        (SCRIPT, "macos-dev", "Zeron Dev")
-    };
-    let root = target.join(format!("{folder}{n}"));
-    let name = launch.name.unwrap_or_else(|| format!("{default_name} {n}"));
-    let bundle_id = format!("{RELEASE_ID}.dev{n}");
+    let root = target.join(format!("zgx-dev{n}"));
+    let name = launch.name.unwrap_or_else(|| format!("Zeron Beta Dev {n}"));
     std::fs::create_dir_all(&root).map_err(|error| format!("{}: {error}", root.display()))?;
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     let log_path = root.join("launch.log");
@@ -115,12 +109,11 @@ pub(super) async fn launch(
         .map_err(|error| format!("{}: {error}", log_path.display()))?;
     let mut command = Command::new("bash");
     command
-        .arg(checkout.join(script))
+        .arg(checkout.join(SCRIPT))
         .args(&launch.app_args)
         .current_dir(&checkout)
         .env("ZERON_DEV_ROOT", &root)
         .env("ZERON_DEV_APP_NAME", &name)
-        .env("ZERON_DEV_BUNDLE_ID", &bundle_id)
         .env("ZERON_DEV_IPC_PORT", port.to_string())
         .env_remove("ZERON_DEV_DATA_DIR")
         .stdin(Stdio::null())
@@ -133,7 +126,7 @@ pub(super) async fn launch(
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .spawn()
-        .map_err(|error| format!("bash {}: {error}", checkout.join(script).display()))?;
+        .map_err(|error| format!("bash {}: {error}", checkout.join(SCRIPT).display()))?;
     eprintln!(
         "launch: building and opening {name} (port {port}); log {}",
         log_path.display()
@@ -148,13 +141,12 @@ pub(super) async fn launch(
                 "port": app.ipc_port,
                 "root": root,
                 "log": log_path,
-                "bundleId": (!launch.zgx).then_some(&bundle_id),
             }));
         }
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
             stop_group(child.id());
             return Err(format!(
-                "{script} exited ({status}) before {name} came up; the end of {}:\n{}",
+                "{SCRIPT} exited ({status}) before {name} came up; the end of {}:\n{}",
                 log_path.display(),
                 tail(&log_path, TAIL_LINES)
             ));
@@ -394,7 +386,6 @@ mod tests {
             "action": "launch", "n": 63, "mock": true, "zgx": true, "name": "Zeron Dev 63", "appArgs": ["--x"]
         })))
         .unwrap();
-        assert!(launch.zgx);
         assert_eq!(
             (
                 launch.n,
@@ -410,6 +401,7 @@ mod tests {
             (json!({ "appArgs": [1] }), "array of strings"),
             (json!({ "name": "../x" }), "not `name`"),
             (json!({ "window": 1 }), "not `window`"),
+            (json!({ "zgx": false }), "zgx app only"),
         ] {
             let error = Launch::parse(&args(bad)).err().unwrap();
             assert!(error.contains(says), "{error}");

@@ -10,10 +10,7 @@ name: release
 # and a sha256 per artifact), which the in-app updater reads.
 #
 # Every shipped Zeron installs these (crates/update at v0.2.138 reads the same
-# names, checksums and `--version` answers), so a release can move to the old
-# app (apps/zeron, the jobs below) and back: the `app` input of a run by hand,
-# or the repository variable STABLE_APP=gpui for a tag. That's the way back
-# if the zgx app has to be withdrawn: a newer version of the old app.
+# names, checksums and `--version` answers).
 #
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
@@ -24,13 +21,8 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      app:
-        description: Which app to build.
-        type: choice
-        options: [zgx, gpui]
-        default: zgx
       platforms:
-        description: Which to build (the zgx app).
+        description: Which to build.
         type: string
         default: macos linux windows
 
@@ -42,31 +34,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      app: ${{ steps.version.outputs.app }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: version (the workspace's; a tag's must be it) and app
+      - name: version (the workspace's; a tag's must be it)
         id: version
-        env:
-          APP: ${{ inputs.app || vars.STABLE_APP || 'zgx' }}
         run: |
           workspace="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
           if [ "$GITHUB_EVENT_NAME" = push ] && [ "${GITHUB_REF_NAME#v}" != "$workspace" ]; then
             echo "tag $GITHUB_REF_NAME isn't the workspace's v$workspace"; exit 1
           fi
-          case "$APP" in
-            zgx|gpui) ;;
-            *) echo "app '$APP' is neither zgx nor gpui"; exit 1 ;;
-          esac
           echo "version=$workspace" >>"$GITHUB_OUTPUT"
-          echo "app=$APP" >>"$GITHUB_OUTPUT"
 
   cursor-compatibility:
     uses: ./.github/workflows/cursor-compatibility.yml
 
   zgx:
     needs: version
-    if: needs.version.outputs.app == 'zgx'
     uses: ./.github/workflows/zgx-build.yml
     secrets: inherit
     with:
@@ -74,130 +57,6 @@ jobs:
       platforms: ${{ github.event_name == 'push' && 'macos linux windows' || inputs.platforms }}
       # This fork's GitHub Releases, never upstream's zeron.sh feed.
       windows-feed: https://github.com/${{ github.repository }}/releases/latest/download
-
-  # The old app (apps/zeron), when a release has to go back to it.
-  linux:
-    needs: version
-    if: needs.version.outputs.app == 'gpui'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04 # x86_64
-          - runner: ubuntu-24.04-arm # aarch64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: gpui system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-dev libxcb1-dev libx11-xcb-dev \
-            libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: package
-        run: scripts/package-linux.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: linux-${{ runner.arch }}
-          path: target/package/*.tar.gz
-          if-no-files-found: error
-
-  # Every platform must build before publishing the release and updater manifest.
-  #
-  # Signing/notarization (both optional — absent secrets fall back to an
-  # ad-hoc-signed build):
-  #   MACOS_CERT_P12 / MACOS_CERT_PASSWORD — base64 "Developer ID Application"
-  #     certificate + private key (.p12) and its export password.
-  #   AC_API_KEY_P8 / AC_API_KEY_ID / AC_API_ISSUER_ID — App Store Connect API
-  #     key (raw .p8 contents), for notarytool. All three present → the package
-  #     script notarizes and staples the app + dmg (no Gatekeeper warning).
-  macos:
-    needs: version
-    if: needs.version.outputs.app == 'gpui'
-    runs-on: macos-latest # Apple silicon
-    env:
-      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
-      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
-      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: import Developer ID certificate
-        if: env.MACOS_CERT_P12 != ''
-        run: |
-          keychain="$RUNNER_TEMP/release.keychain-db"
-          pass="$(openssl rand -hex 16)"
-          security create-keychain -p "$pass" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
-          security unlock-keychain -p "$pass" "$keychain"
-          printf '%s' "$MACOS_CERT_P12" | base64 -d >"$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
-            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/cert.p12"
-          # Allow codesign to use the imported key without a UI prompt.
-          security set-key-partition-list -S apple-tool:,apple: \
-            -s -k "$pass" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" login.keychain-db
-          identity="$(security find-identity -v -p codesigning "$keychain" \
-            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
-          [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
-          echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
-      - name: notary credentials
-        if: env.AC_API_KEY_P8 != ''
-        run: |
-          printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
-          {
-            echo "NOTARY_KEY_PATH=$RUNNER_TEMP/ac_api_key.p8"
-            echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
-            echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
-          } >>"$GITHUB_ENV"
-      - name: package dmg
-        run: scripts/package-macos.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: macos-${{ runner.arch }}
-          path: |
-            target/package/*.dmg
-            target/package/*.tar.gz
-          if-no-files-found: error
-
-  windows:
-    needs: version
-    if: needs.version.outputs.app == 'gpui'
-    runs-on: windows-2022
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: rust toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Locate Windows SDK shader compiler
-        run: |
-          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: package installer and portable app
-        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-${{ runner.arch }}
-          path: |
-            target/package/*.zip
-            target/package/*.exe
-          if-no-files-found: error
 
   release-notes:
     runs-on: ubuntu-latest
@@ -224,9 +83,9 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
   publish:
-    # One app's jobs run and the other's are skipped: none may have failed.
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !failure() && !cancelled()
-    needs: [version, cursor-compatibility, zgx, linux, macos, windows, release-notes]
+    # Every platform must build before publishing the release and updater manifest.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [version, cursor-compatibility, zgx, release-notes]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -236,8 +95,6 @@ jobs:
           path: dist
           merge-multiple: true
       - name: version guard (tag == artifact version)
-        env:
-          APP: ${{ needs.version.outputs.app }}
         run: |
           ver="${GITHUB_REF_NAME#v}"
           ls dist/
@@ -246,26 +103,17 @@ jobs:
             test -f "dist/zeron-$ver-$platform" \
               || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
           done
-          # crates/update `mac_app_artifact`: each interface's macOS installs ask for their own name.
-          if [ "$APP" = zgx ]; then mac_app="zeron-zgx-$ver-macos-arm64-app.tar.gz"; else mac_app="zeron-$ver-macos-arm64-app.tar.gz"; fi
+          # crates/update `mac_app_artifact`: zgx installs ask for the zgx name; installs from 0.2.132 ask only for the unprefixed one.
+          mac_app="zeron-zgx-$ver-macos-arm64-app.tar.gz"
           test -f "dist/$mac_app" || { echo "missing artifact for tag v$ver: $mac_app"; exit 1; }
-          # Either interface's installs update across: 0.2.132 asks only for the unprefixed name, and a rollback to gpui must reach zgx installs.
-          for other in "zeron-$ver-macos-arm64-app.tar.gz" "zeron-zgx-$ver-macos-arm64-app.tar.gz"; do
-            [ -f "dist/$other" ] || cp "dist/$mac_app" "dist/$other"
-          done
+          [ -f "dist/zeron-$ver-macos-arm64-app.tar.gz" ] || cp "dist/$mac_app" "dist/zeron-$ver-macos-arm64-app.tar.gz"
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
-        env:
-          APP: ${{ needs.version.outputs.app }}
         run: |
-          # The zgx app needs macOS 13 (Ghostty's floor); the old app's 12. A
-          # Mac below it is held on the release it has, and told why
-          # (crates/update `offer`, in every Zeron since 0.2.136).
-          if [ "$APP" = zgx ]; then
-            manifest=$(jq -n --arg version "$VERSION" '{version: $version, minimumMacOS: "13.0", files: {}}')
-          else
-            manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
-          fi
+          # The app needs macOS 13 (Ghostty's floor). A Mac below it is held on
+          # the release it has, and told why (crates/update `offer`, in every
+          # Zeron since 0.2.136).
+          manifest=$(jq -n --arg version "$VERSION" '{version: $version, minimumMacOS: "13.0", files: {}}')
           for f in dist/*; do
             sha=$(sha256sum "$f" | cut -d' ' -f1)
             manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \

@@ -612,6 +612,21 @@ impl AccessMode {
         *self == AccessMode::FullAccess
     }
 
+    /// Resolve the requested mode against an agent's capabilities. Auto
+    /// falls back only to a stricter offered mode; None means the run must
+    /// be refused. Other modes resolve as [`resolve_access`].
+    pub fn honored_by(self, modes: &[AccessMode]) -> Option<AccessMode> {
+        if modes.contains(&self) {
+            return Some(self);
+        }
+        if self == AccessMode::AutoReview {
+            return [AccessMode::AutoAcceptEdits, AccessMode::Supervised]
+                .into_iter()
+                .find(|mode| modes.contains(mode));
+        }
+        Some(resolve_access(self, modes))
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             AccessMode::Supervised => "Supervised",
@@ -946,7 +961,12 @@ pub fn legacy_access(value: &mut serde_json::Value) {
 /// of whatever the user configured. Each driver spells it in its own dialect
 /// (Claude `--mcp-config`, ACP `session/new` `mcpServers`, Codex
 /// `mcp_servers.*` config overrides).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Zeron's own server also carries [`Self::http`]: the engine serves its
+/// tools itself, over loopback Streamable HTTP, so a driver whose agent
+/// speaks HTTP MCP adds that and starts no process. `command`/`args`/`env`
+/// then name a small stdio-to-HTTP proxy for agents that only speak stdio.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServer {
     pub name: String,
@@ -955,6 +975,68 @@ pub struct McpServer {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// The same server over Streamable HTTP, for agents that speak it.
+    /// Additive + serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<McpHttp>,
+}
+
+/// Values of these keys are credentials: never printed.
+const SECRET_ENV: [&str; 1] = [McpServer::TOKEN_ENV];
+
+/// Hand-written so a `{:?}` never prints a run's MCP token.
+impl std::fmt::Debug for McpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env: std::collections::BTreeMap<&str, &str> = self
+            .env
+            .iter()
+            .map(|(key, value)| {
+                let value = if SECRET_ENV.contains(&key.as_str()) {
+                    "<redacted>"
+                } else {
+                    value.as_str()
+                };
+                (key.as_str(), value)
+            })
+            .collect();
+        f.debug_struct("McpServer")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &env)
+            .field("http", &self.http)
+            .finish()
+    }
+}
+
+/// An MCP server's Streamable HTTP endpoint: its URL and the headers every
+/// request carries (the run's bearer token).
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpHttp {
+    pub url: String,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+impl McpHttp {
+    /// The bearer token of an `Authorization: Bearer …` header, if any.
+    pub fn bearer_token(&self) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .and_then(|(_, value)| value.strip_prefix("Bearer "))
+    }
+}
+
+/// Header names only: the values are credentials.
+impl std::fmt::Debug for McpHttp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpHttp")
+            .field("url", &self.url)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// Where a resumed harness session is cut when the run starts: history
@@ -978,6 +1060,13 @@ pub enum AnchorRole {
 }
 
 impl McpServer {
+    /// The stdio proxy's endpoint URL ([`Self::http`]'s, for agents that
+    /// only speak stdio).
+    pub const URL_ENV: &'static str = "ZERON_MCP_URL";
+    /// The stdio proxy's bearer token: the run's own, scoped to its chat and
+    /// revoked when the run ends.
+    pub const TOKEN_ENV: &'static str = "ZERON_MCP_TOKEN";
+
     /// Set to `1` on Zeron's own server when its host turned the provider's
     /// native subagents off (Settings → Providers) and the chat has no
     /// parent: the agent delegates through this server's side chats instead,
@@ -1560,6 +1649,35 @@ pub struct ToolResultImage {
     pub data_base64: String,
 }
 
+/// A verdict from an agent's structured reviewer metadata, such as
+/// Codex's auto-review, in [`AccessMode::AutoReview`]. Shown on the call so a
+/// person can tell what the reviewer let through or stopped. Tool output
+/// alone is not evidence that a reviewer made a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolReviewStatus {
+    /// The reviewer is looking at it.
+    Reviewing,
+    /// The reviewer let it run.
+    Approved,
+    /// The reviewer stopped it; it didn't run.
+    Denied,
+    /// The reviewer didn't decide in time.
+    TimedOut,
+}
+
+/// A reviewer's verdict on a tool call: its status, and, when the reviewer
+/// says, how risky it judged the call (`low` to `critical`) and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolReview {
+    pub status: ToolReviewStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1753,6 +1871,13 @@ pub enum AgentEvent {
         /// a command still running in the background, or one that never ran.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+    },
+    /// The agent's own reviewer on tool call `id` (Auto): reviewing it,
+    /// or its verdict. Folds onto the call's part; a later one replaces it.
+    #[serde(rename_all = "camelCase")]
+    ToolReviewed {
+        id: String,
+        review: ToolReview,
     },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.
@@ -2044,6 +2169,60 @@ mod tests {
         assert_eq!(
             serde_json::to_value(params).unwrap(),
             serde_json::json!({"harness": "mock"})
+        );
+    }
+
+    #[test]
+    fn auto_ranks_between_auto_accept_edits_and_full_access() {
+        let ws = SandboxLevel::WorkspaceWrite;
+        // A supervised or auto-accept-edits chat can't hand work to Auto.
+        for max in [AccessMode::Supervised, AccessMode::AutoAcceptEdits] {
+            assert_eq!(
+                cap_access((ws, AccessMode::AutoReview), (ws, max)),
+                (ws, max, true)
+            );
+        }
+        // Auto caps full access, and lets Auto and what's below it through.
+        assert_eq!(
+            cap_access((ws, AccessMode::FullAccess), (ws, AccessMode::AutoReview)),
+            (ws, AccessMode::AutoReview, true)
+        );
+        for asked in [
+            AccessMode::Supervised,
+            AccessMode::AutoAcceptEdits,
+            AccessMode::AutoReview,
+        ] {
+            assert_eq!(
+                cap_access((ws, asked), (ws, AccessMode::AutoReview)),
+                (ws, asked, false)
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&AccessMode::AutoReview).unwrap(),
+            "\"auto-review\""
+        );
+    }
+
+    #[test]
+    fn auto_falls_back_to_the_nearest_stricter_mode() {
+        use AccessMode::*;
+        assert_eq!(AutoReview.honored_by(&AccessMode::ALL), Some(AutoReview));
+        assert_eq!(
+            AutoReview.honored_by(&[Supervised, AutoAcceptEdits, FullAccess]),
+            Some(AutoAcceptEdits)
+        );
+        assert_eq!(
+            AutoReview.honored_by(&[Supervised, FullAccess]),
+            Some(Supervised)
+        );
+        // With no safe fallback, the caller must refuse to run.
+        assert_eq!(AutoReview.honored_by(&[FullAccess]), None);
+        assert_eq!(AutoReview.honored_by(&[]), None);
+        // The other modes fall back as before.
+        assert_eq!(Supervised.honored_by(&[FullAccess]), Some(FullAccess));
+        assert_eq!(
+            AutoAcceptEdits.honored_by(&AccessMode::ALL),
+            Some(AutoAcceptEdits)
         );
     }
 

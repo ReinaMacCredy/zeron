@@ -394,6 +394,7 @@ mod tests {
             command: "zeron".into(),
             args: vec!["mcp".into(), "--chat".into(), "c1".into(), "--port".into()],
             env: Default::default(),
+            http: None,
         };
         assert_eq!(chat_id(Some(&server)), Some("c1"));
         assert_eq!(chat_id(None), None);

@@ -175,8 +175,8 @@ local function Session(id: Id?): Node
 	-- reader left it), else its latest; the one left keeps its place for
 	-- coming back. (Only when the id moves: what the route reads changes as
 	-- sessions do, and a page made again by a reload stays where it was.)
-	-- The transcript is made anew for it (keyed by `shown`, below), which
-	-- puts the view there.
+	-- The transcript stays; its rows' list is made anew for it (its
+	-- `session`, `shown`, below), which puts the view there.
 	local entering: { id: string, at_end: boolean }? = nil
 	ui.effect(function()
 		local s = which()

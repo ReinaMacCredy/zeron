@@ -30,6 +30,7 @@ local RowProps = require("@app/screens/chat/row_props")
 local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
+local Draft = require("@ds/draft_text")
 local Completions = require("@app/screens/chat/completions")
 local AppCommands = require("@app/screens/chat/app_commands")
 local Outgoing = require("@app/screens/chat/outgoing")
@@ -870,6 +871,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		placeholder = locale.s(placeholder or "chat.lane_tab.placeholder"),
 		running = running,
 		access = access,
+		access_auto = function(): boolean
+			return store.offers_auto(model:get())
+		end,
 		plan = plan,
 		model = model,
 		effort = effort,
@@ -895,7 +899,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			if mine then
 				return mine
 			end
-			local link = machine.cloud_link(string.find(draft:get(), "%S") ~= nil)
+			local link = machine.cloud_link(Draft.has_text(draft))
 			return if link then LinkNotice.of { cloud = link } else nil
 		end),
 		-- The app's settings: what sends, and whether Escape stops the agent.

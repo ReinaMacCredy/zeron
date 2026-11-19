@@ -842,11 +842,17 @@ local function runs_now(list: { MarkdownRun }, style: { [string]: any }?, ctx: C
 					return Links.take(target)
 				end
 			elseif open then
+				-- A link too (its role, as a reader hears it), going where
+				-- the page opens it: zgx makes a run that only acts a button.
+				-- (Its click handled here, so a web address doesn't open
+				-- outside as well; zgx opens no other scheme.)
+				span.href = target
 				-- (⌘-click on a file opens nothing, as gpui's `activate_session_link` refuses External.)
-				span.on_click = function(keys: any?)
+				span.on_click = function(keys: any?): boolean
 					if not (keys and keys.cmd) or string.match(target, "^zeron%-chat:") then
 						open(target)
 					end
+					return true
 				end
 			end
 			-- Its menu, by its kind (ds/links), built as it opens.

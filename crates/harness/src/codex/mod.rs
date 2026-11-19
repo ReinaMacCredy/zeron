@@ -311,7 +311,7 @@ impl CodexHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -362,7 +362,7 @@ impl CodexHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -1056,7 +1056,7 @@ fn spawn_app_server(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
         let cwd = (!request.cwd.is_empty()).then(|| Path::new(&request.cwd));
         crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
     })?;
@@ -2128,6 +2128,15 @@ async fn run_session(session: Session) {
                             && let Some(active) = router.active.clone()
                         {
                             send_turn_interrupt(&client, &thread_id, active);
+                        }
+                    }
+
+                    // Auto's reviewer on a call: shown on the call.
+                    "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
+                        if let Some(event) = normalize::auto_review_event(&params)
+                            && !send(&event_tx, event).await
+                        {
+                            break 'main;
                         }
                     }
 
@@ -4053,6 +4062,7 @@ mod tests {
             command: "/data/plugins/server".into(),
             args: vec![],
             env: Default::default(),
+            http: None,
         }];
         let key = "mcp_servers.plugin-focus.command";
         let alone = thread_params(&request, None, None, "never", None);
@@ -4323,6 +4333,7 @@ mod mcp_injection_tests {
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec!["--stdio".into()],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         let overrides: serde_json::Map<String, Value> =
             codex_extra_mcp_overrides(&[extra]).into_iter().collect();

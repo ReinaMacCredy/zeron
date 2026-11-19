@@ -94,7 +94,7 @@ plutil -lint "$PLIST" >/dev/null
 
 rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' "$ZGX/ui/" "$APP/Contents/Resources/ui/"
 rsync -a --exclude '.zgx/' --exclude '.DS_Store' "$ZGX/plugins-builtin/" "$APP/Contents/Resources/plugins-builtin/"
-cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$ZGX/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"
+cp "$ROOT/assets/fonts/licenses/"* "$ZGX/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
 cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.txt"
 "$ROOT/scripts/macos-app-icon.sh" "$APP/Contents/Resources"

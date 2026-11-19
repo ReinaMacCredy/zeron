@@ -649,7 +649,7 @@ impl Appshots {
     }
 }
 
-pub(crate) static SOUND: &[u8] = include_bytes!("../../../../crates/ui/assets/sounds/appshot.wav");
+pub(crate) static SOUND: &[u8] = include_bytes!("../../../../assets/sounds/appshot.wav");
 
 pub(crate) fn play_sound() {
     std::thread::spawn(|| crate::settings::play(SOUND));

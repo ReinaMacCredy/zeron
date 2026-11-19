@@ -539,6 +539,7 @@ mod tests {
             origin: None,
             chat_id: None,
             signing_in: false,
+            test_run: false,
         }
     }
 

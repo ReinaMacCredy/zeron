@@ -1170,10 +1170,10 @@ mod tests {
         serde_json::from_str::<Json>(&text).unwrap().as_object().unwrap().keys().cloned().collect()
     }
 
-    /// `UiSettings`'s keys as crates/ui/src/settings.rs declares them (each
-    /// field camelCased, or its `rename`), read from the source now.
+    /// `UiSettings`'s keys as the retired crates/ui/src/settings.rs declared
+    /// them (each field camelCased, or its `rename`), from its last copy.
     fn ui_settings_keys() -> Vec<String> {
-        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../crates/ui/src/settings.rs")).unwrap();
+        let source = std::fs::read_to_string(Path::new(FIXTURES).join("ui-settings.rs")).unwrap();
         let body = source.split("pub struct UiSettings {").nth(1).expect("the struct").split("\n}").next().unwrap();
         let mut keys = Vec::new();
         let mut renamed = None;

@@ -275,6 +275,38 @@ test("the panel opening and closing leaves the transcript where it was read: the
 	expect(settled_y()).to_be(y0)
 end)
 
+-- Whether the window holds the panel's home at all, shown or hidden.
+local function home_made(app: any): boolean
+	return app:tree("#shell", { all = true }):find("#panel-home-block", 1, true) ~= nil
+end
+
+test("a shut panel makes no home for the chats switched to; opened, its home is there at once", function()
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 800)
+	app:frames(30)
+	show_chat(app, "Fix the build")
+	expect(panel_open(app, "a1")).to_be(false)
+	expect(eventually(app, function(): boolean
+		app:frames(5)
+		return panel_width(app) == 0
+	end)).to_be(true)
+	-- (Each chat switched to would otherwise make a home nobody sees.)
+	expect(home_made(app)).to_be(false)
+	show_chat(app, "Write the docs")
+	expect(home_made(app)).to_be(false)
+	-- Opened: its home, in the frame the panel opens in.
+	app:click('#titlebar >> role:button "Panel"')
+	app:frames(1)
+	expect(home_made(app)).to_be(true)
+	expect(app:wait("#panel-empty", { timeout_ms = 15000 })).to_be(true)
+	-- Shut again, once it has eased shut: let go of.
+	app:click('#titlebar >> role:button "Panel"')
+	expect(eventually(app, function(): boolean
+		app:frames(5)
+		return panel_width(app) == 0 and not home_made(app)
+	end)).to_be(true)
+end)
+
 test("closing a chat's last tab, the panel shuts on what it showed: no frame of its home", function()
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 800)

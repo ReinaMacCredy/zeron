@@ -30,6 +30,7 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "language", title = ui.t("settings.general.language.label"), terms = ui.t("settings.general.language.terms") },
 	{ key = "close_panel", title = ui.t("settings.general.close_panel.label"), terms = ui.t("settings.general.close_panel.terms") },
 	{ key = "keep_awake", title = ui.t("settings.features.keep_awake.label"), terms = ui.t("settings.features.keep_awake.terms") },
+	{ key = "keep_running", title = ui.t("settings.general.keep_running.label"), terms = ui.t("settings.general.keep_running.terms") },
 	{ key = "chat_section", title = ui.t("settings.chat.title"), terms = ui.t("settings.chat.terms") },
 	{ key = "send_with", title = ui.t("settings.general.send_with.label"), section = ui.t("settings.chat.title"), terms = ui.t("settings.general.send_with.terms") },
 	{ key = "follow_up", title = ui.t("settings.general.follow_up.label"), section = ui.t("settings.chat.title"), terms = ui.t("settings.general.follow_up.terms") },
@@ -41,6 +42,7 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "key_switcher_cycles", title = ui.t("settings.shortcuts.switcher.cycles.label"), section = ui.t("settings.shortcuts.switcher.section") },
 	{ key = "predictions", title = ui.t("settings.predictions.show"), section = ui.t("settings.predictions.title"), terms = ui.t("settings.predictions.terms") },
 	{ key = "hide_emails", title = ui.t("settings.general.hide_emails.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.hide_emails.terms") },
+	{ key = "keep_chats_local", title = ui.t("settings.general.keep_chats_local.label"), section = ui.t("settings.general.privacy"), terms = ui.t("settings.general.keep_chats_local.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
 })
@@ -57,6 +59,9 @@ type Titles = { harness: string?, model: string? }
 local credit = ui.state("settings_commit_credit", nil :: Credit?)
 local worktrees = ui.state("settings_worktrees", nil :: Worktrees?)
 local titles = ui.state("settings_titles", nil :: Titles?)
+-- Whether the engine outlives the app (src/quit_prompt.rs).
+type Background = { keepRunningAfterQuit: boolean }
+local background = ui.state("settings_background", nil :: Background?)
 -- Why one couldn't be had (an outcome word), by name.
 local failed = ui.state("settings_engine_failed", {} :: { [string]: string })
 
@@ -82,10 +87,28 @@ local function load(name: string, method: string, into: State<any>)
 	end)
 end
 
+-- Whether this device keeps its chats local while signed in (the host's,
+-- beside the engine: it decides which workspace the engine opens).
+local keep_local = ui.state("settings_keep_chats_local", nil :: boolean?)
+
+local function set_keep_local(on: boolean)
+	local before = keep_local:peek()
+	keep_local:set(on)
+	-- The engine starts again on the other workspace; the window reconnects.
+	host.call("account.keep_chats_local", on):after(function() end, function(err: any)
+		keep_local:set(before)
+		toast.show { title = ui.t("settings.engine.couldnt_save"):get(), body = says(err.message):get(), tone = "danger" }
+	end)
+end
+
 local function load_all()
+	host.call("account.keeps_chats_local"):after(function(on: any)
+		keep_local:set(on == true)
+	end, function() end)
 	load("credit", "GetCommitCredit", credit)
 	load("worktrees", "GetWorktreeSettings", worktrees)
 	load("titles", "GetTitleSettings", titles)
+	load("background", "GetBackgroundSettings", background)
 end
 
 -- A change to the engine's: shown now, back as it was if refused.
@@ -270,6 +293,26 @@ function M.view(): Node
 					description = ui.t("settings.features.keep_awake.description"),
 					control = Builtins.Switch("keep_awake", ui.t("settings.features.keep_awake.label")),
 				}),
+				row("keep_running", {
+					label = ui.t("settings.general.keep_running.label"),
+					description = function()
+						if failed:get().background then
+							return says(failed:get().background):get()
+						end
+						local b = background:get()
+						return if b == nil or b.keepRunningAfterQuit
+							then ui.t("settings.general.keep_running.on"):get()
+							else ui.t("settings.general.keep_running.off"):get()
+					end,
+					control = engine_switch(ui.t("settings.general.keep_running.label"), function()
+						local b = background:get()
+						return if b then b.keepRunningAfterQuit else nil
+					end, function(on: boolean)
+						change("background", background, { keepRunningAfterQuit = on }, "SetBackgroundSettings", { keepRunningAfterQuit = on })
+					end, function()
+						return background:get() == nil
+					end),
+				}),
 			},
 		},
 		search.anchor("chat_section", ds.Settings.Section {
@@ -316,6 +359,13 @@ function M.view(): Node
 					label = ui.t("settings.general.hide_emails.label"),
 					description = ui.t("settings.general.hide_emails.description"),
 					control = ds.Switch { value = prefs.hide_emails, label = ui.t("settings.general.hide_emails.label") },
+				}),
+				row("keep_chats_local", {
+					label = ui.t("settings.general.keep_chats_local.label"),
+					description = ui.t("settings.general.keep_chats_local.description"),
+					control = engine_switch(ui.t("settings.general.keep_chats_local.label"), function(): boolean?
+						return keep_local:get()
+					end, set_keep_local),
 				}),
 			},
 		},
