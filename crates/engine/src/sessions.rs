@@ -8810,6 +8810,7 @@ async fn drive_run(
                         last_stream_activity = tokio::time::Instant::now();
                         entry_id = new_id();
                         segment_started = now_ms();
+                        clock.start(false, std::time::Instant::now());
                         inner.set_status(&chat_id, SessionStatus::Working, true);
                     }
                     continue;
@@ -12664,12 +12665,33 @@ mod tests {
         assert!(s.waiting.is_none());
 
         // The wake turn's own end is the one finish.
+        let woke_at = crate::now_ms();
         rig.feed.send(AgentEvent::TextDelta { text: "all done".into() }).unwrap();
+        rig.feed
+            .send(AgentEvent::PromptCache {
+                read_tokens: 100,
+                write_tokens: 10,
+                ttl_secs: Some(3600),
+            })
+            .unwrap();
         rig.feed.send(done(DoneStatus::Completed)).unwrap();
         let s = settled(&rig).await;
         assert_eq!(s.status, SessionStatus::Idle);
         assert!(s.waiting.is_none());
         assert!(s.last_completed_turn.is_some());
+        let stats = rig
+            .core
+            .sessions
+            .doc_handle(rig.chat)
+            .unwrap()
+            .doc()
+            .session_stats();
+        assert!(
+            stats
+                .and_then(|s| s.cache_touched_at)
+                .is_some_and(|t| t >= woke_at),
+            "a wake turn's prompt cache keeps the cache's clock"
+        );
         rig.core.sessions.shutdown().await;
     }
 
