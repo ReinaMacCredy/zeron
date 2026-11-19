@@ -71,9 +71,16 @@ local function sources(m: any, plan: Plan?): { { key: string, text: string, brea
 	if m.role ~= "assistant" then
 		return {}
 	end
-	if m.blocks then
+	-- (A long reply's blocks set aside by the host: asked for as a find
+	-- reads them.)
+	local blocks = m.blocks
+	if blocks == nil and m.runs ~= nil then
+		local ok, list = pcall(ui.call_sync, "chat.reply_blocks", m.id)
+		blocks = if ok and type(list) == "table" then list else {}
+	end
+	if blocks then
 		local out = {}
-		for _, b in m.blocks do
+		for _, b in blocks do
 			if b.kind == "text" and b.text then
 				table.insert(out, { key = `{m.id}:{b.id}`, text = b.text })
 			elseif b.kind == "line" then

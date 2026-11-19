@@ -56,6 +56,8 @@ pub mod catalog;
 mod discovery;
 mod fork_tail;
 mod local;
+mod mcp_config;
+pub use mcp_config::configured_mcp_servers;
 mod normalize;
 pub mod refresh_lock;
 mod wire;
@@ -170,6 +172,18 @@ fn managed_mcp_config() -> bool {
 /// for (it exits right after).
 fn no_conversation(text: &str) -> bool {
     text.contains("No conversation found")
+}
+
+/// The first Claude CLI live-verified to report every background task it
+/// holds with `background_tasks_changed` (agents and shells:
+/// `background.rs`, 2.1.312; held an idle stop off in the measurement rig
+/// on 2.1.322).
+const REPORTS_BACKGROUND_SINCE: semver::Version = semver::Version::new(2, 1, 312);
+
+/// Whether a CLI of `version` reports its background work: an unknown
+/// version is treated as not.
+fn reports_background(version: Option<&semver::Version>) -> bool {
+    version.is_some_and(|version| *version >= REPORTS_BACKGROUND_SINCE)
 }
 
 /// Shown when a chat's Claude session could not be restored.
@@ -617,7 +631,7 @@ impl ClaudeHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
         })?;
         let stdio = (child.stdin.take(), child.stdout.take());
@@ -777,6 +791,30 @@ impl Harness for ClaudeHarness {
     /// Live-verified 2.1.319: a new turn 0.1 s after a background task ends.
     fn wakes_on_background(&self) -> bool {
         true
+    }
+    /// `--resume` brings the session back whole (live-verified 2.1.322
+    /// against a replay server: the resumed request carries every earlier
+    /// turn), and teardown never signals mid login refresh
+    /// ([`refresh_lock::settle`]). Only for a CLI known to report its
+    /// background work (`background_tasks_changed`,
+    /// [`REPORTS_BACKGROUND_SINCE`]): the host's other guard against
+    /// stopping one mid-work. Blocking: may ask the CLI its version once.
+    /// Launched without `--strict-mcp-config`, the CLI also starts the
+    /// servers of the user's own MCP scopes ([`mcp_config`]).
+    fn configured_mcp_servers(&self, request: &RunRequest) -> Vec<crate::process::KnownServer> {
+        let cwd = if request.cwd.is_empty() {
+            std::env::current_dir().unwrap_or_default()
+        } else {
+            PathBuf::from(&request.cwd)
+        };
+        configured_mcp_servers(&request.env, &cwd)
+    }
+    fn stops_when_idle(&self) -> bool {
+        reports_background(
+            self.executable_path()
+                .and_then(|path| crate::executable::binary_version(&path))
+                .as_ref(),
+        )
     }
     fn display_name(&self) -> &str {
         "Claude Code"
@@ -1069,6 +1107,8 @@ impl ClaudeHarness {
             mut stdin,
             stderr_tail,
         } = launcher.launch(&request)?;
+        // The host looks at what this process runs before stopping it idle.
+        controls.turn.set_agent_pid(child.id());
 
         let lock_dir = refresh_lock::config_dir_for(&launcher.env(&request));
         if !title_only {
@@ -1163,6 +1203,9 @@ impl Launcher {
         crate::compose_child_path(&mut cmd, exe);
         // The variable, not `--forward-subagent-text`: a CLI older than 2.1.211 exits on the flag.
         cmd.env("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "1");
+        // No session title of the CLI's own: Zeron titles chats itself, and the
+        // CLI's titling is one more Haiku request on every new session.
+        cmd.env("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1");
         // The app can inherit these from the shell that launched it, and they override every chat's own pick.
         for var in [
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
@@ -1272,7 +1315,7 @@ impl Launcher {
 
     /// Start one CLI process for a run, with its stdio wired up.
     fn launch(&self, request: &RunRequest) -> Result<Runtime, HarnessError> {
-        let mut child = self.command(request).spawn().map_err(|e| {
+        let mut child = crate::process::spawn_agent(&mut self.command(request)).map_err(|e| {
             let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
             crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&self.exe))
         })?;
@@ -1631,6 +1674,7 @@ async fn run_session(session: Session) {
     // [`background`]), and the stops asked of them.
     let mut shells = background::BackgroundShells::default();
     let mut task_stops_sent = 0u64;
+    let mut first_lines = 0u8;
 
     'main: loop {
         if std::mem::take(&mut relaunch) {
@@ -1653,6 +1697,7 @@ async fn run_session(session: Session) {
                     stdout_lines = runtime.stdout_lines;
                     stdin = runtime.stdin;
                     stderr_tail = runtime.stderr_tail;
+                    turn.set_agent_pid(child.id());
                 }
                 Err(error) => {
                     let _ = event_tx.send(Err(error)).await;
@@ -1693,6 +1738,10 @@ async fn run_session(session: Session) {
                     // The CLI is still producing: whatever it is doing is not
                     // the quiet end a held turn end's fallback waits for.
                     last_frame_at = tokio::time::Instant::now();
+                    if first_lines < 16 {
+                        first_lines += 1;
+                        tracing::debug!(target: "first_word", title_only, frame = %line.chars().take(60).collect::<String>(), "claude stdout");
+                    }
                     let frame = match wire::parse_frame(line) {
                         Ok(frame) => frame,
                         Err(e) => {
@@ -2220,6 +2269,7 @@ async fn run_session(session: Session) {
     }
     stdin.close_for_teardown();
     child.shutdown_with(torn_down, kill_grace).await;
+    turn.set_agent_pid(None);
     if let Some(handle) = escalation {
         handle.abort();
     }
@@ -3130,6 +3180,29 @@ mod tests {
         assert!(updated["questions"].is_array());
     }
 
+    /// The CLI's own Haiku session-title request is skipped on chat runs and
+    /// titling runs alike: Zeron titles chats itself.
+    #[test]
+    fn runs_turn_off_the_clis_own_session_titles() {
+        let request = access_tests::request(zeron_proto::AccessMode::FullAccess, false);
+        let harness = ClaudeHarness::new();
+        for one_shot in [None, Some("title")] {
+            let mut launcher = harness.launcher(std::path::Path::new("claude"));
+            launcher.one_shot = one_shot;
+            let mut cmd = launcher.command(&request);
+            let value = cmd
+                .as_std_mut()
+                .get_envs()
+                .find(|(key, _)| *key == "CLAUDE_CODE_DISABLE_TERMINAL_TITLE")
+                .and_then(|(_, value)| value.map(|v| v.to_os_string()));
+            assert_eq!(
+                value.as_deref(),
+                Some(std::ffi::OsStr::new("1")),
+                "one_shot {one_shot:?}"
+            );
+        }
+    }
+
     #[test]
     fn runs_ask_the_cli_to_forward_subagent_text() {
         let request = access_tests::request(zeron_proto::AccessMode::FullAccess, false);
@@ -3344,6 +3417,19 @@ mod resolution_tests {
             PathBuf::from("/cfg")
         );
     }
+
+    /// Stopped while idle only where the CLI is known to report its
+    /// background work; an unknown version isn't.
+    #[test]
+    fn idle_stops_need_a_cli_that_reports_its_background_work() {
+        let v = |text: &str| semver::Version::parse(text).unwrap();
+        assert!(reports_background(Some(&v("2.1.312"))));
+        assert!(reports_background(Some(&v("2.1.322"))));
+        assert!(reports_background(Some(&v("2.2.0"))));
+        assert!(!reports_background(Some(&v("2.1.311"))));
+        assert!(!reports_background(None));
+    }
+
     #[test]
     fn plugin_servers_load_beside_the_tool_server_but_never_on_a_one_shot() {
         let mut request = access_tests::request(zeron_proto::AccessMode::FullAccess, false);
@@ -3352,6 +3438,7 @@ mod resolution_tests {
             command: "/data/plugins/server".into(),
             args: vec![],
             env: Default::default(),
+            http: None,
         }];
         let configs = |launcher: &Launcher| -> Vec<String> {
             let cmd = launcher.command(&request);
@@ -3391,12 +3478,14 @@ mod resolution_tests {
             command: "/opt/zeron/zeron".into(),
             args: vec!["mcp".into()],
             env: Default::default(),
+            http: None,
         };
         let extra = zeron_proto::McpServer {
             name: "plugin-focus".into(),
             command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
             args: vec!["--stdio".into()],
             env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+            http: None,
         };
         assert_eq!(mcp_servers_config_arg(None, &[]), None);
         let both: Value = serde_json::from_str(

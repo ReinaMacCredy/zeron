@@ -74,9 +74,20 @@ const WAKE_BOOT_MARGIN_MS: i64 = 60 * 60 * 1000;
 
 /// Warm-doc LRU: how many unwatched, run-less docs stay fully open. Everything
 /// beyond this (and beyond [`zeron_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
-/// oldest-access-first — reopening from the SQLite snapshot measured within
-/// ~11ms of a warm doc, so the cap trades no perceptible open latency.
+/// oldest-access-first. A real chat's doc is large (a long one 15-80 MB, 3-24M
+/// ops), and reopening one from its SQLite snapshot reads its whole state:
+/// 45 ms for 15 MB, 280 ms for 80 MB (M5 Max, 2026-11-17), past the 400 ms
+/// that shows a skeleton on slower Macs. Three kept (0.3.8) made switching
+/// among a few chats freeze and show skeletons; the interface shows a chat
+/// from its own rows only while it keeps them. Each kept doc's memory is the
+/// price until reopening is cheap of its own accord.
 const WARM_DOC_CAP: usize = 12;
+
+/// A stored transcript this large (its snapshot's bytes) takes a while to
+/// read whole: ~3 ms a MB (an 80 MB chat's 250 ms, M5 Max). A viewer holding
+/// its rows is sent what changed among its newest entries first
+/// ([`ChatDocHandle::transcript_is_long`]).
+const LONG_TRANSCRIPT_BYTES: usize = 1 << 20;
 
 /// Resident-memory estimate per compressed snapshot byte. Loro snapshots are
 /// columnar+compressed; the in-memory doc plus mirror runs well above the blob
@@ -97,6 +108,12 @@ const SYNC_ADMISSION_BATCH: usize = 4;
 /// while a pass leaves work in flight.
 const SYNC_PASS_SPACING: std::time::Duration = std::time::Duration::from_millis(100);
 const SYNC_CATCH_UP_QUANTUM_MS: i64 = 300_000;
+/// A chat opened again while its client still runs ([`ReopenRefresh`]) asks
+/// the room at most this often: switching between chats asks once each.
+const REOPEN_REFRESH_SPACING_MS: i64 = 15_000;
+/// How long that ask may take. A client that hasn't caught up by then is
+/// redialed: a fresh join, whose hello also wakes a relayed chat's host.
+const REOPEN_REFRESH_DEADLINE_MS: i64 = 20_000;
 /// A quiesce for a Cloud sleep the stop never followed lifts after this.
 const QUIESCE_LEASE: std::time::Duration = std::time::Duration::from_secs(180);
 
@@ -348,6 +365,9 @@ struct DocHostInner {
     /// publishes the edge posture on change (see `watch_connectivity`).
     connectivity: OnceLock<watch::Sender<zeron_proto::Connectivity>>,
     connectivity_started: AtomicBool,
+    /// Told as the workspace is wired (`set_workspace`): a connectivity
+    /// monitor started before then learns whether there is an edge to watch.
+    workspace_wired: tokio::sync::Notify,
     /// In-flight queued-attachment transfers, published per landed chunk
     /// (see `watch_transfers`). Entries live exactly as long as bytes are
     /// moving: added when a file's push starts, removed on commit or failure
@@ -428,6 +448,20 @@ impl Drop for TransferProgressGuard<'_> {
 /// is never delayed.
 const DEGRADE_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// How often the connectivity monitor looks once the posture has held
+/// healthy for [`CONNECTIVITY_SETTLE_TICKS`] seconds. A fresh degradation is
+/// then seen up to this late, on top of its [`DEGRADE_GRACE`]; recovery from
+/// one is still seen within a second, as the monitor looks every second
+/// while anything is degraded.
+const CONNECTIVITY_STEADY: std::time::Duration = std::time::Duration::from_secs(5);
+const CONNECTIVITY_SETTLE_TICKS: u32 = 3;
+
+/// Nothing degraded: local, or connected with every open chat connected.
+fn connectivity_healthy(posture: &zeron_proto::Connectivity) -> bool {
+    use zeron_proto::ConnectivityState as S;
+    matches!(posture.state, S::Connected | S::Disabled) && posture.chats.iter().all(|chat| chat.connected)
+}
+
 /// One tracked degradation source in [`DegradeGrace`].
 enum GraceKey<'a> {
     OsPath,
@@ -472,6 +506,11 @@ impl DegradeGrace {
         }
         let since = *slot.get_or_insert(now);
         now.duration_since(since) >= DEGRADE_GRACE
+    }
+
+    /// A degradation is being timed: the report may change with time alone.
+    fn timing(&self) -> bool {
+        self.os_path.is_some() || self.registry.is_some() || !self.chats.is_empty()
     }
 
     /// Drop timers for chats that no longer have open docs.
@@ -814,8 +853,40 @@ pub struct ChatDocHandle {
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
     /// The relay layer's state for this chat. None with the flag off.
     relay: Mutex<Option<Arc<relay::ChatRelayState>>>,
+    /// An open of this chat while its client already runs (see [`ReopenRefresh`]).
+    reopen: Mutex<ReopenRefresh>,
+    /// This admission's client has been logged as caught up.
+    sync_caught_up_logged: AtomicBool,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
+}
+
+/// A chat opened (a transcript watch, a focus) while its client already runs.
+/// A running client is otherwise never asked whether it's current: it was
+/// admitted once, and only a new admission joins the room again. One whose
+/// socket stopped delivering, or that missed a relayed chat's last frames
+/// while its host has since left the room, kept showing that stale copy to
+/// every viewer until this device wrote (2026-11-19: a remote turn read
+/// "Interrupted" until a send pulled its whole end in at once). Each such
+/// open of a chat another device hosts has the dispatcher ask the room
+/// again, and, on a relayed chat, ask the host directly; the room wakes a
+/// host that isn't there.
+#[derive(Default)]
+struct ReopenRefresh {
+    /// When an open asked, epoch ms. 0 = nothing to serve.
+    opened: i64,
+    /// When the dispatcher last asked the room ([`REOPEN_REFRESH_SPACING_MS`]).
+    asked_at: i64,
+    pending: Option<PendingRefresh>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingRefresh {
+    /// [`zeron_sync::ChatClient::request_catch_up`]'s ticket.
+    catch_up: u64,
+    /// [`zeron_sync::chat_relay::RelayHandle::ask_host`]'s, on a relayed chat.
+    host: Option<u64>,
+    since: i64,
 }
 
 /// A running agent explicitly owns a writer lease until its final cleanup.
@@ -1452,6 +1523,20 @@ impl ChatDocHandle {
         }
     }
 
+    /// Whether this chat's transcript is long enough that what goes with all
+    /// of it takes a while: reading it whole (a doc just opened, or one
+    /// nobody has watched since it changed, reads every entry from the doc),
+    /// and even with its entries kept, summing each to tell a reader what
+    /// changed. A viewer holding rows is sent what changed among the newest
+    /// entries first (`WatchDocMessages`).
+    pub(crate) fn transcript_is_long(&self) -> bool {
+        let bytes = self
+            .snapshot_bytes
+            .load(Ordering::Relaxed)
+            .max(self.persistence.as_ref().map_or(0, |p| p.snapshot_bytes()));
+        bytes >= LONG_TRANSCRIPT_BYTES
+    }
+
     /// Rough resident cost for the LRU budget.
     fn resident_estimate(&self) -> usize {
         let bytes = self
@@ -1507,6 +1592,7 @@ impl DocHost {
                 uploads: OnceLock::new(),
                 connectivity: OnceLock::new(),
                 connectivity_started: AtomicBool::new(false),
+                workspace_wired: tokio::sync::Notify::new(),
                 transfers: watch::channel(Vec::new()).0,
                 held_active: Mutex::new(HashSet::new()),
                 held_gate: Mutex::new(()),
@@ -1925,6 +2011,7 @@ impl DocHost {
     pub fn set_workspace(&self, workspace: WorkspaceHost) {
         let chats = workspace.watch_chats();
         if self.inner.workspace.set(workspace).is_ok() {
+            self.inner.workspace_wired.notify_one();
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
             self.kick_sync();
@@ -2094,6 +2181,7 @@ impl DocHost {
     /// start the change-driven task, and request budgeted sync when configured.
     pub fn open(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {
         let handle = self.open_local(chat_id)?;
+        Self::note_reopen(&handle);
         self.activate_sync(&handle);
         Ok(handle)
     }
@@ -2104,8 +2192,92 @@ impl DocHost {
         let handle = self.open_local(chat_id)?;
         let focus = self.inner.focus_clock.fetch_add(1, Ordering::AcqRel) + 1;
         handle.last_focus.fetch_max(focus, Ordering::AcqRel);
+        Self::note_reopen(&handle);
         self.activate_sync(&handle);
         Ok(())
+    }
+
+    /// Someone opened this chat. If its client is already running, the
+    /// dispatcher has it show it's current ([`ReopenRefresh`]); a client
+    /// still to be admitted joins afresh anyway.
+    fn note_reopen(handle: &ChatDocHandle) {
+        lock(&handle.reopen).opened = now_ms();
+    }
+
+    /// Serve [`ReopenRefresh`] for the running client of a chat another device
+    /// hosts: ask the room for its rows and queue again, and on a relayed chat
+    /// ask the host for what this copy lacks;
+    /// redial a client that hasn't caught up by the deadline. At most one ask
+    /// per [`REOPEN_REFRESH_SPACING_MS`]. True while an ask is under way.
+    fn serve_reopen(&self, handle: &ChatDocHandle) -> bool {
+        let (opened, pending) = {
+            let reopen = lock(&handle.reopen);
+            (reopen.opened, reopen.pending.is_some())
+        };
+        if opened == 0 && !pending {
+            return false;
+        }
+        // A chat this device hosts is written here: its doc is the copy
+        // others catch up with, and its own opens (every drain and run)
+        // must not each poke the room. Read before the client's lock: the
+        // registry has locks of its own.
+        if !pending && self.is_host(&handle.chat_id) {
+            lock(&handle.reopen).opened = 0;
+            return false;
+        }
+        let relay = lock(&handle.relay).clone();
+        let client = lock(&handle.chat2);
+        let mut reopen = lock(&handle.reopen);
+        let opened = std::mem::take(&mut reopen.opened);
+        let Some(client) = client.as_ref() else {
+            // Still dialing: its join is the catch-up.
+            reopen.pending = None;
+            return false;
+        };
+        let now = now_ms();
+        if opened != 0
+            && reopen.pending.is_none()
+            && now - reopen.asked_at >= REOPEN_REFRESH_SPACING_MS
+        {
+            reopen.asked_at = now;
+            let catch_up = client.request_catch_up();
+            // Rows don't carry a relayed chat: its host does, if it's there.
+            let host = relay
+                .as_ref()
+                .filter(|_| client.relay_room())
+                .map(|state| state.relay.ask_host());
+            reopen.pending = Some(PendingRefresh { catch_up, host, since: now });
+            tracing::info!(chat = %handle.chat_id, asks_host = host.is_some(),
+                "chat2 reopened while connected; asking the room for anything missed");
+        }
+        let Some(pending) = reopen.pending else {
+            return false;
+        };
+        let caught_up = client.catch_up_completed(pending.catch_up);
+        let answered = pending.host.is_none_or(|ticket| {
+            relay.as_ref().is_some_and(|state| state.relay.host_answered(ticket))
+        });
+        let elapsed_ms = now - pending.since;
+        if caught_up && answered {
+            reopen.pending = None;
+            tracing::info!(chat = %handle.chat_id, elapsed_ms, host_asked = pending.host.is_some(),
+                "chat2 reopen: caught up");
+            return false;
+        }
+        if elapsed_ms < REOPEN_REFRESH_DEADLINE_MS {
+            return true;
+        }
+        reopen.pending = None;
+        if caught_up {
+            // The room was asked to wake it; its join brings the rest.
+            tracing::info!(chat = %handle.chat_id, elapsed_ms,
+                "chat2 reopen: rows caught up; the host hasn't answered yet");
+        } else {
+            tracing::info!(chat = %handle.chat_id, elapsed_ms,
+                "chat2 reopen: catch-up didn't finish; redialing");
+            client.redial();
+        }
+        false
     }
 
     /// Materialize one authoritative local document without acquiring a network
@@ -2429,6 +2601,8 @@ impl DocHost {
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
             relay: Mutex::new(None),
+            reopen: Mutex::new(ReopenRefresh::default()),
+            sync_caught_up_logged: AtomicBool::new(false),
             _sub: sub,
         });
         // Snapshot recovery may restore several independently edited rows.
@@ -2669,7 +2843,25 @@ impl DocHost {
                         _ = tokio::time::sleep_until(last + SYNC_PASS_SPACING), if busy => {}
                         _ = kick.notified() => {}
                         Ok(()) = jobs.changed() => {}
-                        Ok(()) = outbox.changed() => {}
+                        Ok(()) = outbox.changed() => {
+                            // Rows a started chat's own client sends: nothing
+                            // for a pass to admit. A streaming chat adds
+                            // several a second, and each pass reads the store.
+                            let Some(inner) = weak.upgrade() else { return };
+                            let changed = inner.store.take_outbox_changes();
+                            let handles = lock(&inner.handles);
+                            let own = changed.iter().all(|id| {
+                                !stopping_ids.contains(id)
+                                    && handles.get(id).is_some_and(|h| {
+                                        h.sync_started.load(Ordering::Acquire)
+                                            && !h.publication_failed.load(Ordering::Acquire)
+                                    })
+                            });
+                            drop(handles);
+                            if own && !busy {
+                                continue;
+                            }
+                        }
                         Ok(()) = socket_contention.changed() => {}
                         Some(Ok(())) = changed(&mut registry_chats) => {}
                         Some(Ok(())) = changed(&mut registry_synced) => {}
@@ -2690,6 +2882,9 @@ impl DocHost {
                 // Whatever changes from here on wakes the next pass.
                 jobs.borrow_and_update();
                 outbox.borrow_and_update();
+                if let Some(inner) = weak.upgrade() {
+                    inner.store.take_outbox_changes();
+                }
                 socket_contention.borrow_and_update();
                 let Some(inner) = weak.upgrade() else { return };
                 let host = Self { inner };
@@ -2846,6 +3041,9 @@ impl DocHost {
                     // reclaim a slot. Only resident, non-closing clients
                     // acknowledge focus here.
                     handle.sync_focus_served.fetch_max(handle.last_focus.load(Ordering::Acquire), Ordering::AcqRel);
+                    // Acknowledging isn't proving: a reopened chat's client
+                    // shows it's current.
+                    unsettled |= host.serve_reopen(handle);
                     let mut captured = handle.sync_wake_version.load(Ordering::Acquire);
                     let pending_wake = host
                         .inner
@@ -2883,6 +3081,11 @@ impl DocHost {
                                 .complete_sync_job(&handle.chat_id, "wake", captured);
                     }
                     let caught_up = lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
+                    if caught_up && !handle.sync_caught_up_logged.swap(true, Ordering::AcqRel) {
+                        tracing::info!(chat = %handle.chat_id,
+                            elapsed_ms = now_ms() - handle.sync_last_started.load(Ordering::Acquire),
+                            "chat2 client caught up");
+                    }
                     // A quiet document can still be receiving its checkpoint
                     // or commands. Incomplete catch-up only yields via rotate's
                     // explicit service deadline, never the short reuse grace.
@@ -3058,6 +3261,9 @@ impl DocHost {
                     handle.sync_wake_version.store(wake_version.unwrap_or(0), Ordering::Release);
                     handle.wake_durable_mark.store(0, Ordering::Release);
                     handle.sync_wake_ticket.store(0, Ordering::Release);
+                    handle.sync_caught_up_logged.store(false, Ordering::Release);
+                    // A fresh join is the catch-up an open asks for.
+                    *lock(&handle.reopen) = ReopenRefresh { asked_at: now_ms(), ..Default::default() };
                     match action {
                         SyncAdmission::Join => {
                             let cursor = handle.persistence.as_ref().map_or(0, |p| p.cursor());
@@ -3663,7 +3869,25 @@ impl DocHost {
                 }
             }
             let mut after = String::new();
+            let mut jobs_changed = host.inner.store.watch_sync_jobs();
             loop {
+                // With no recovery owed, nothing to retry: sleep until a
+                // job is scheduled (a salvage failed) rather than looking
+                // every half minute. One owed is tried a half minute apart.
+                if after.is_empty() {
+                    jobs_changed.borrow_and_update();
+                    let owed = host
+                        .inner
+                        .store
+                        .pending_sync_jobs("recovery", "", 1)
+                        .map_or(true, |jobs| !jobs.is_empty());
+                    if !owed {
+                        if jobs_changed.changed().await.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let jobs = host
                     .inner
@@ -4225,10 +4449,13 @@ impl DocHost {
     }
 
     /// The connectivity stream: current posture first, then every change.
-    /// Lazily starts a monitor — a 1s recompute over in-memory stats
-    /// (atomics + small locks), published only when the value changes. The
-    /// retry countdown renders client-side from `retry_at_ms`, so quiet
-    /// periods emit nothing at all.
+    /// Lazily starts a monitor — a recompute over in-memory stats (atomics +
+    /// small locks), published only when the value changes: every second
+    /// while it's changing, degraded or timing a degradation's grace, and
+    /// every [`CONNECTIVITY_STEADY`] once it has held healthy (or local) for
+    /// a few seconds, so a settled engine isn't woken each second to find
+    /// nothing changed. The retry countdown renders client-side from
+    /// `retry_at_ms`, so quiet periods emit nothing at all.
     pub fn watch_connectivity(&self) -> watch::Receiver<zeron_proto::Connectivity> {
         let tx = self
             .inner
@@ -4240,12 +4467,30 @@ impl DocHost {
         {
             let host = self.clone();
             self.spawn_worker(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut held = 0u32;
                 loop {
-                    tick.tick().await;
+                    // A local profile's posture is the default for good
+                    // (`compute_connectivity`): nothing to look at, once its
+                    // workspace (no edge either) is wired.
+                    if !host.edge_expected() {
+                        if host.inner.workspace.get().is_some() {
+                            std::future::pending::<()>().await;
+                        }
+                        host.inner.workspace_wired.notified().await;
+                        continue;
+                    }
+                    if held >= CONNECTIVITY_SETTLE_TICKS {
+                        // Settled: on the beat grid, with the sockets' pings
+                        // (`zeron_sync::wake`), so it wakes the engine with
+                        // them rather than between.
+                        tokio::time::sleep_until(zeron_sync::wake::next_beat(CONNECTIVITY_STEADY))
+                            .await;
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                     let next = host.compute_connectivity();
-                    if let Some(tx) = host.inner.connectivity.get() {
+                    let healthy = connectivity_healthy(&next);
+                    let changed = host.inner.connectivity.get().is_some_and(|tx| {
                         tx.send_if_modified(|cur| {
                             if *cur == next {
                                 false
@@ -4253,8 +4498,10 @@ impl DocHost {
                                 *cur = next;
                                 true
                             }
-                        });
-                    }
+                        })
+                    });
+                    let timing = lock(&host.inner.connectivity_grace).timing();
+                    held = if changed || timing || !healthy { 0 } else { held.saturating_add(1) };
                 }
             });
         }
@@ -4270,12 +4517,16 @@ impl DocHost {
     /// those flashed amber warnings and "Queued" badges at every chat
     /// switch. Raw degradation must persist [`DEGRADE_GRACE`] before it is
     /// reported; recovery reports instantly.
+    /// Whether this engine syncs through an edge (signed in): otherwise its
+    /// connectivity is the local profile's, always the default.
+    fn edge_expected(&self) -> bool {
+        self.inner.config.edge.is_some() || self.workspace().is_some_and(|w| w.edge_expected())
+    }
+
     fn compute_connectivity(&self) -> zeron_proto::Connectivity {
         use zeron_proto::{ChatConnectivity, Connectivity, ConnectivityState};
         let workspace = self.workspace();
-        let edge_expected = self.inner.config.edge.is_some()
-            || workspace.as_ref().is_some_and(|w| w.edge_expected());
-        if !edge_expected {
+        if !self.edge_expected() {
             return Connectivity::default();
         }
         let now = std::time::Instant::now();
@@ -4492,6 +4743,7 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        tracing::debug!(target: "first_word", chat = %chat_id, "queue command");
         let handle = self.open(chat_id)?;
         // A chat hosted on Cloud: the bytes go to the edge's store first, and
         // the message enters the chat only once they're there.
@@ -6972,6 +7224,7 @@ impl DocHost {
                         SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
                     ) {
                         crate::wake_trace::mark_command(entry.issued_at);
+                        tracing::debug!(target: "first_word", chat = %handle.chat_id, "drain picked the run");
                         self.await_earlier_controls(handle, &entry.id).await;
                     }
                     let (status, resolution) = match self.execute(&sessions, handle, &entry).await {

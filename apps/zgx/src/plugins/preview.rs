@@ -110,6 +110,8 @@ pub const BLOCKED: &[&str] = &[
     "agents.set_key",
     // (An API key, and what an agent's keys are called.)
     "agents.add_key",
+    // (The API key every Cloud machine's agent uses, kept by the vault.)
+    "agents.cloud_key",
     "agents.rename",
     "agents.cloud_key",
     "profiles.save",
@@ -138,6 +140,9 @@ pub const BLOCKED: &[&str] = &[
     "cloud.retry",
     "cloud.set_machine",
     "sessions.create_cloud",
+    // (What a Cloud chat reaches: the person's own choice.)
+    "cloud.set_reach",
+    "cloud.set_session_reach",
 ];
 
 pub fn blocked(action: &str) -> bool {

@@ -461,7 +461,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use zeron_proto::device_hub::{AVCC_DESCRIPTION, AvccDemuxer};
 
-    const FIXTURE: &[u8] = include_bytes!("../../../crates/ui/tests/fixtures/device-ios-588x1280.avcc");
+    const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/device-ios-588x1280.avcc");
 
     #[test]
     fn the_captured_description_parses_and_a_bad_record_does_not() {

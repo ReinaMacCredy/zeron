@@ -876,6 +876,11 @@ struct Revival {
 struct Inner {
     voice: crate::voice::VoiceManager,
     device_id: String,
+    /// Per chat: the background processes its runtime runs (as it last
+    /// said), and the background commands its agent started with Zeron's
+    /// `run_command`, here or on another device. Its session row shows both.
+    runtime_tasks: Mutex<HashMap<String, Vec<zeron_proto::BackgroundTask>>>,
+    command_tasks: Mutex<HashMap<String, Vec<crate::commands::CommandTask>>>,
     /// The engine is shutting down: dying runs re-dispatch nothing.
     shutting_down: std::sync::atomic::AtomicBool,
     /// A shutdown marks the turns it cuts off for pick-up on the next boot
@@ -898,6 +903,8 @@ struct Inner {
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
     ipc_token_file: Mutex<Option<std::path::PathBuf>>,
+    /// Per chat: who has its transcript open now, and when the last left.
+    viewers: Arc<Viewers>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// The IPC port this engine actually bound, once it has; `zeron mcp`
@@ -981,6 +988,114 @@ struct Inner {
     quota: Arc<crate::routing::quota::QuotaBook>,
     /// Plugins whose native MCP servers local runs get (absent in bare tests).
     plugins: OnceLock<crate::plugins::Plugins>,
+    /// New chats' warm starts, by the id the chat will be created with
+    /// ([`warm_start`]).
+    warm: Mutex<HashMap<String, warm_start::WarmStart>>,
+    /// Their leases (open, typed) when a test sets them.
+    warm_leases: Mutex<Option<(std::time::Duration, std::time::Duration)>>,
+}
+
+/// How long a runtime parked between turns with nothing pending keeps its
+/// agent process when its driver resumes sessions whole
+/// ([`Harness::stops_when_idle`]). Then it is stopped, and the next message
+/// resumes the session (`--resume`), paying a cold start once.
+///
+/// Measured (Claude CLI 2.1.322 against a local replay server, M5 Max): a
+/// parked CLI holds ~130 MB phys_footprint (~200 MB with a real login and
+/// plugins) and keeps waking at rest; a stopped one costs the next message
+/// ~0.18 s more before its request leaves (0.22 s resumed vs 0.04 s warm,
+/// medians of 5), with the whole context back. Two minutes covers reading
+/// a reply and writing the next message in one sitting, so a conversation
+/// in progress stays warm, while a chat left alone gives its memory back
+/// soon.
+///
+/// Two guards don't trust the agent's own report of its work: the window
+/// applies only to a CLI known to make that report (Claude's version gate,
+/// in its driver), and before stopping one the engine looks at its
+/// process's live children — anything but its configured MCP servers holds
+/// it ([`zeron_harness::process::unexpected_descendants`]).
+pub const AGENT_IDLE_STOP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The idle window of drivers not stopped after [`AGENT_IDLE_STOP`].
+const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// A live subagent silent this long is presumed lost (its terminal signal
+/// went missing) and no longer holds its runtime.
+const SUBAGENT_SILENCE: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
+
+/// [`AGENT_IDLE_STOP`] for a chat open nowhere: nobody is reading the reply,
+/// so a next message is unlikely soon. Counted from the later of the turn's
+/// end and the moment its last viewer left. Measured (the ademark A5 shape:
+/// five chats seeded, then at rest): its agents gone within 30 s, against
+/// two minutes; the next message to such a chat costs the resume
+/// (~0.2 s before its request leaves).
+pub const UNWATCHED_IDLE_STOP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Who has a chat's transcript open: the app on this device or another
+/// device ([`SessionsEngine::retain_viewer`]), and when the last one left.
+#[derive(Default)]
+struct Viewers {
+    open: Mutex<HashMap<String, ViewState>>,
+    /// Bumped on every change: parked runs re-check their idle window.
+    changed: OnceLock<watch::Sender<u64>>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct ViewState {
+    count: usize,
+    /// When the count last fell to zero.
+    left_at: Option<tokio::time::Instant>,
+}
+
+impl Viewers {
+    fn sender(&self) -> &watch::Sender<u64> {
+        self.changed.get_or_init(|| watch::channel(0).0)
+    }
+
+    fn bump(&self) {
+        self.sender().send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    /// Whether the chat is open anywhere now, and when it was last left.
+    fn state(&self, chat_id: &str) -> ViewState {
+        lock(&self.open).get(chat_id).copied().unwrap_or_default()
+    }
+}
+
+/// One open view of a chat's transcript ([`SessionsEngine::retain_viewer`]).
+pub struct Viewer {
+    viewers: Arc<Viewers>,
+    chat_id: String,
+}
+
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        {
+            let mut open = lock(&self.viewers.open);
+            if let Some(state) = open.get_mut(&self.chat_id) {
+                state.count = state.count.saturating_sub(1);
+                if state.count == 0 {
+                    state.left_at = Some(tokio::time::Instant::now());
+                }
+            }
+        }
+        self.viewers.bump();
+    }
+}
+
+/// The idle window that applies to a chat now: the longer one while its
+/// transcript is open anywhere.
+fn window_now(
+    inner: &Inner,
+    chat_id: &str,
+    watched_idle: std::time::Duration,
+    unwatched_idle: std::time::Duration,
+) -> std::time::Duration {
+    if inner.view_state(chat_id).0 {
+        watched_idle
+    } else {
+        unwatched_idle
+    }
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -996,6 +1111,9 @@ fn spawned_text(call: &ToolCall) -> Option<&str> {
         _ => call.delegate_task_text(),
     }
 }
+#[path = "warm_start.rs"]
+mod warm_start;
+pub use warm_start::WarmOutcome;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1288,6 +1406,8 @@ impl SessionsEngine {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
                 device_id,
+                runtime_tasks: Mutex::new(HashMap::new()),
+                command_tasks: Mutex::new(HashMap::new()),
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 revive_after_shutdown: std::sync::atomic::AtomicBool::new(true),
                 revivals: Mutex::new(HashMap::new()),
@@ -1295,6 +1415,7 @@ impl SessionsEngine {
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
                 ipc_token_file: Mutex::new(None),
+                viewers: Arc::default(),
                 journal,
                 registry: registry.clone(),
                 tool_server_port: Mutex::new(None),
@@ -1336,6 +1457,8 @@ impl SessionsEngine {
                 resume_schedule: OnceLock::new(),
                 quota: crate::routing::quota::QuotaBook::new(),
                 plugins: OnceLock::new(),
+                warm: Mutex::new(HashMap::new()),
+                warm_leases: Mutex::new(None),
             }),
         }
     }
@@ -1355,6 +1478,21 @@ impl SessionsEngine {
     /// at dial time, so it follows token rotation across engine restarts.
     pub fn set_ipc_token_file(&self, path: std::path::PathBuf) {
         *lock(&self.inner.ipc_token_file) = Some(path);
+    }
+
+    /// `chat_id`'s transcript is open (in this device's app or another
+    /// device's) until the guard drops: its parked agent gets the longer
+    /// idle window ([`AGENT_IDLE_STOP`], not [`UNWATCHED_IDLE_STOP`]).
+    pub fn retain_viewer(&self, chat_id: &str) -> Viewer {
+        lock(&self.inner.viewers.open)
+            .entry(chat_id.to_owned())
+            .or_default()
+            .count += 1;
+        self.inner.viewers.bump();
+        Viewer {
+            viewers: self.inner.viewers.clone(),
+            chat_id: chat_id.to_owned(),
+        }
     }
 
     /// Wire the plugins service: local runs get its native MCP servers.
@@ -1598,6 +1736,12 @@ impl SessionsEngine {
         }
     }
 
+    /// A status row for `chat_id`, as a run would leave (tests).
+    #[cfg(test)]
+    pub(crate) fn seed_status(&self, chat_id: &str, status: SessionStatus) {
+        self.inner.set_status(chat_id, status, true);
+    }
+
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
@@ -1770,6 +1914,69 @@ impl SessionsEngine {
         true
     }
 
+    /// Show a background command `chat_id`'s agent started with
+    /// `run_command` (here or on another device) on its session row, with
+    /// its runtime's own background processes ([`crate::commands::Commands::show`]).
+    pub fn show_command(&self, chat_id: &str, command: crate::commands::CommandTask) {
+        lock(&self.inner.command_tasks)
+            .entry(chat_id.to_owned())
+            .or_default()
+            .push(command);
+        self.inner.publish_background_tasks(chat_id);
+    }
+
+    /// Keep showing those of `chat_id`'s commands on `device` that `keep`
+    /// says still run (and every command elsewhere).
+    pub fn retain_commands(
+        &self,
+        chat_id: &str,
+        device: &Option<String>,
+        keep: impl Fn(&str) -> bool,
+    ) {
+        let changed = {
+            let mut shown = lock(&self.inner.command_tasks);
+            let Some(commands) = shown.get_mut(chat_id) else {
+                return;
+            };
+            let before = commands.len();
+            commands.retain(|c| &c.device != device || keep(&c.id));
+            let changed = commands.len() != before;
+            if commands.is_empty() {
+                shown.remove(chat_id);
+            }
+            changed
+        };
+        if changed {
+            self.inner.publish_background_tasks(chat_id);
+        }
+    }
+
+    /// No longer show one of `chat_id`'s commands (the person stopped it).
+    pub fn hide_command(&self, chat_id: &str, task_id: &str) {
+        let device = lock(&self.inner.command_tasks)
+            .get(chat_id)
+            .and_then(|commands| commands.iter().find(|c| c.task.id == task_id))
+            .map(|c| (c.device.clone(), c.id.clone()));
+        if let Some((device, id)) = device {
+            self.retain_commands(chat_id, &device, |shown| shown != id);
+        }
+    }
+
+    /// How many of `chat_id`'s commands on `device` are shown.
+    pub fn shown_commands_on(&self, chat_id: &str, device: &Option<String>) -> usize {
+        lock(&self.inner.command_tasks)
+            .get(chat_id)
+            .map_or(0, |commands| {
+                commands.iter().filter(|c| &c.device == device).count()
+            })
+    }
+
+    /// Keep `chat_id`'s row fresh while it shows running commands, as a live
+    /// run's heartbeat does.
+    pub fn heartbeat(&self, chat_id: &str) {
+        self.inner.touch_session(chat_id);
+    }
+
     /// The tail of one background process's output; `None` when no live
     /// runtime lists it.
     pub async fn background_task_output(
@@ -1841,6 +2048,23 @@ impl SessionsEngine {
             .iter()
             .filter(|chat| !self.turn_in_flight(chat))
             .count()
+    }
+
+    /// Chats with work running or pending: a turn in flight (or waiting on a
+    /// question), or background work live after their turn ended.
+    pub fn chats_with_work(&self) -> Vec<String> {
+        let mut chats: std::collections::BTreeSet<String> = lock(&self.inner.statuses)
+            .iter()
+            .filter(|(_, session)| is_active(session))
+            .map(|(chat, _)| chat.clone())
+            .collect();
+        chats.extend(
+            lock(&self.inner.runs)
+                .iter()
+                .filter(|(_, run)| run.turn.background_live())
+                .map(|(chat, _)| chat.clone()),
+        );
+        chats.into_iter().collect()
     }
 
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
@@ -2435,6 +2659,7 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "message cancelled by a later Stop: not dispatched");
             return Ok(String::new());
         }
+        tracing::debug!(target: "first_word", chat = %chat_id, "dispatch: fresh run");
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         let revival = {
@@ -2640,20 +2865,25 @@ impl SessionsEngine {
             self.inner.predictions.clear(chat_id);
         }
 
-        // Name the chat NOW, off the first prompt — not after the first
-        // exchange completes ("called New session for a long time for no
-        // reason"; the titler only needs the prompt and skips titled chats;
-        // the Done-time call below stays as the retry for a failed
-        // generation).
-        if !idle && let Some(titles) = self.inner.titles.get() {
-            titles.maybe_generate(
-                chat_id,
-                harness_id,
-                title_instance,
-                &request.prompt,
-                &request.cwd,
-            );
-        }
+        // Name the chat off the first prompt as soon as the agent answers —
+        // not after the first exchange completes ("called New session for a
+        // long time for no reason"; the titler only needs the prompt and
+        // skips titled chats; the Done-time call below stays as the retry
+        // for a failed generation). Not before the agent's first output:
+        // the titling agent's own startup competed with this one's.
+        let title = (!idle)
+            .then(|| self.inner.titles.get().cloned())
+            .flatten()
+            .map(|titles| {
+                crate::titles::TitleAfterFirstOutput::new(
+                    titles,
+                    chat_id,
+                    harness_id,
+                    title_instance,
+                    &request.prompt,
+                    &request.cwd,
+                )
+            });
 
         tokio::spawn(drive_run(
             self.inner.clone(),
@@ -2681,6 +2911,8 @@ impl SessionsEngine {
                 default_instance,
             },
             turn,
+            side_chats_only,
+            title,
         ));
         Ok(run_id)
     }
@@ -4891,6 +5123,7 @@ impl SessionsEngine {
         self.inner
             .shutting_down
             .store(true, std::sync::atomic::Ordering::Release);
+        self.warm_stop_all().await;
         self.inner.voice.retire();
         if self
             .inner
@@ -4930,6 +5163,8 @@ impl SessionsEngine {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
         }
+        // Lines still waiting to be written (`run_journal`'s batching).
+        self.inner.journal.flush_all();
     }
 
     /// The engine is going down because its account signed out: the turns
@@ -5828,6 +6063,19 @@ impl Inner {
         seq
     }
 
+    /// Whether a question of this chat's waits on the person.
+    fn awaiting_input(&self, chat_id: &str) -> bool {
+        lock(&self.statuses)
+            .get(chat_id)
+            .is_some_and(|session| session.status == SessionStatus::AwaitingInput)
+    }
+
+    /// Whether the chat is open anywhere, and when its last viewer left.
+    fn view_state(&self, chat_id: &str) -> (bool, Option<tokio::time::Instant>) {
+        let state = self.viewers.state(chat_id);
+        (state.count > 0, state.left_at)
+    }
+
     /// Bump the session's freshness on stream activity WITHOUT a status
     /// transition. Long silent-LOOKING stretches (thinking heartbeats, a big
     /// tool input being generated) still carry events — the UI's 45s
@@ -5904,6 +6152,63 @@ impl Inner {
                     input.person && !input.tx.is_closed() && except != Some(id.as_str())
                 })
             })
+    }
+
+    /// Publish the background processes `chat_id`'s runtime runs, mirrored
+    /// like [`Self::set_running_subagents`]. The live heartbeat keeps the row
+    /// fresh while they run; an engine that stops beating took them with it.
+    fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
+        {
+            let mut runtime = lock(&self.runtime_tasks);
+            if tasks.is_empty() {
+                runtime.remove(chat_id);
+            } else {
+                runtime.insert(chat_id.to_owned(), tasks);
+            }
+        }
+        self.publish_background_tasks(chat_id);
+    }
+
+    /// The session row's background processes: its runtime's, then the
+    /// commands its agent left running with `run_command`.
+    fn publish_background_tasks(&self, chat_id: &str) {
+        let mut tasks = lock(&self.runtime_tasks)
+            .get(chat_id)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(commands) = lock(&self.command_tasks).get(chat_id) {
+            tasks.extend(commands.iter().map(|c| c.task.clone()));
+        }
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            let tasks: Vec<_> = tasks
+                .into_iter()
+                .map(|mut task| {
+                    if let Some(known) = entry.background_tasks.iter().find(|k| k.id == task.id) {
+                        task.started_at = known.started_at.min(task.started_at);
+                    }
+                    task
+                })
+                .collect();
+            if entry.background_tasks == tasks {
+                return;
+            }
+            entry.background_tasks = tasks;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
+            ws.record_session(&session);
+        }
     }
 
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
@@ -6140,40 +6445,6 @@ impl Inner {
         let mut list: Vec<Session> = statuses.values().cloned().collect();
         list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         self.sessions_tx.send_replace(list);
-    }
-
-    fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
-        let session = {
-            let mut statuses = lock(&self.statuses);
-            let Some(entry) = statuses.get_mut(chat_id) else {
-                return;
-            };
-            let now = Utc::now();
-            let tasks: Vec<_> = tasks
-                .into_iter()
-                .map(|mut task| {
-                    if let Some(known) = entry.background_tasks.iter().find(|k| k.id == task.id) {
-                        task.started_at = known.started_at.min(task.started_at);
-                    }
-                    task
-                })
-                .collect();
-            if entry.background_tasks == tasks {
-                return;
-            }
-            entry.background_tasks = tasks;
-            entry.updated_at = now;
-            let session = entry.clone();
-            let mut list: Vec<Session> = statuses.values().cloned().collect();
-            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
-            self.sessions_tx.send_replace(list);
-            session
-        };
-        if self.activity_tx.get().is_none()
-            && let Some(ws) = self.workspace()
-        {
-            ws.record_session(&session);
-        }
     }
 
     /// The doc host, once wired. `None` before assembly or after retirement.
@@ -7790,6 +8061,28 @@ fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
     }
 }
 
+/// Auto asked of an agent with no auto mode and no stricter mode to fall
+/// back to (Cursor, Pi: they ignore the access mode, so they'd run it with
+/// full access). Refused before launch, whatever the client sent.
+fn auto_unavailable(
+    request: &RunRequest,
+    offered: &[zeron_proto::AccessMode],
+) -> Option<zeron_harness::HarnessError> {
+    (!request.auto_approve && request.access.honored_by(offered).is_none()).then(|| {
+        zeron_harness::HarnessError::Protocol(
+            "This agent can't run in Auto. Choose another access mode or agent.".into(),
+        )
+    })
+}
+
+/// A reviewer's words as the doc keeps them: their first `max` characters.
+fn cap_review_text(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", text[..at].trim_end()),
+        None => text.to_owned(),
+    }
+}
+
 /// Apply the render-parts privacy policy: strip heavy/sensitive tool inputs before doc
 /// entry. Full inputs live only in the local run journal.
 fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
@@ -7816,6 +8109,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 exit_code,
                 output_truncated,
                 output_lines,
+                review,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -7840,6 +8134,13 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 exit_code: *exit_code,
                 output_truncated: *output_truncated,
                 output_lines: *output_lines,
+                // The reviewer's verdict stays: it's what the person needs to
+                // see. Its words are bounded, as an output summary is.
+                review: review.as_ref().map(|r| zeron_proto::ToolReview {
+                    risk: r.risk.as_deref().map(|risk| cap_review_text(risk, 32)),
+                    reason: r.reason.as_deref().map(|why| cap_review_text(why, 600)),
+                    ..r.clone()
+                }),
             },
             other => other.clone(),
         })
@@ -8091,6 +8392,8 @@ async fn drive_run(
     mut cancel_rx: watch::Receiver<bool>,
     resume_state: RunResumeState,
     turn: TurnControl,
+    side_chats_only: bool,
+    mut title: Option<crate::titles::TitleAfterFirstOutput>,
 ) {
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
@@ -8116,6 +8419,7 @@ async fn drive_run(
             command: server.command.clone(),
             args: server.args.clone(),
             env: server.env.iter().cloned().collect(),
+            http: None,
         });
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
@@ -8124,6 +8428,31 @@ async fn drive_run(
         resume: None,
         ..request.clone()
     });
+    // A new chat's warm start (`warm_start`). (One still launching is
+    // waited for; a Stop meanwhile ends it.)
+    let mut warm = if resume_state.idle {
+        None
+    } else {
+        tokio::select! {
+            biased;
+            _ = controls.interrupt.cancelled() => {
+                inner.stop_warm(&chat_id).await;
+                None
+            }
+            taken = inner.take_warm(&chat_id, harness_id) => taken,
+        }
+    };
+    // Launched with native subagents switched otherwise than now: the CLI's
+    // flags are another runtime's.
+    if warm
+        .as_ref()
+        .is_some_and(|taken| taken.parked.side_chats_only != side_chats_only)
+        && let Some(taken) = warm.take()
+    {
+        inner
+            .discard_taken(harness.as_ref(), &chat_id, taken, "native subagents switched")
+            .await;
+    }
     // Plugins' native MCP servers come from this host's own allowed plugins,
     // run from their verified snapshots — never from what a sender put here.
     request.extra_mcp = inner
@@ -8131,6 +8460,21 @@ async fn drive_run(
         .get()
         .map(crate::plugins::Plugins::native_mcp_servers)
         .unwrap_or_default();
+    // The MCP servers the agent starts from this run's config: the only
+    // children it may hold when stopped idle (see the reaper).
+    let mut known_servers: Vec<zeron_harness::process::KnownServer> = request
+        .mcp
+        .iter()
+        .chain(&request.extra_mcp)
+        .map(|server| (server.command.clone(), server.args.clone()))
+        .collect();
+    // And those it starts from its user's own MCP config, read now (once,
+    // off the runtime's threads) and joined in when the reaper first looks.
+    let mut configured_servers = Some({
+        let harness = harness.clone();
+        let request = request.clone();
+        tokio::task::spawn_blocking(move || harness.configured_mcp_servers(&request))
+    });
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).
@@ -8300,7 +8644,9 @@ async fn drive_run(
         }
         crate::runner::mark_setup_shown();
     }
-    let prepared = if harness_id == HarnessId::Cursor {
+    let prepared = if let Some(refused) = auto_unavailable(&request, harness.access_modes()) {
+        Err(refused)
+    } else if harness_id == HarnessId::Cursor {
         cursor_unstarted_history(
             &doc,
             &resume_state.user_message_id,
@@ -8316,12 +8662,25 @@ async fn drive_run(
     // The pending-update marker still orders new subprocesses after installation.
     // Share the lease with the adapter so child cleanup outlives this event loop.
     let mut _execution_lease = None;
+    // A warm start holds its CLI's lease from before its launch, so no update
+    // came between; one accepted since ends it here (the run waits behind
+    // the update as any other).
+    if warm.is_some() && inner.registry.update_pending(harness_id)
+        && let Some(taken) = warm.take()
+    {
+        inner
+            .discard_taken(harness.as_ref(), &chat_id, taken, "its CLI is being updated")
+            .await;
+    }
     let started = match prepared {
         Ok(()) => {
-            let lease = tokio::select! {
-                biased;
-                _ = controls.interrupt.cancelled() => None,
-                lease = inner.registry.execution_lease(harness_id) => Some(Arc::new(lease)),
+            let lease = match warm.as_ref() {
+                Some(taken) => Some(taken.parked.execution_lease.clone()),
+                None => tokio::select! {
+                    biased;
+                    _ = controls.interrupt.cancelled() => None,
+                    lease = inner.registry.execution_lease(harness_id) => Some(Arc::new(lease)),
+                },
             };
             if let Some(lease) = lease {
                 _execution_lease = Some(lease.clone());
@@ -8351,15 +8710,45 @@ async fn drive_run(
                     // `run.preparing` pin): the session parks on what it
                     // really started with, not on what dispatch read before.
                     let now = inner.registry.run_credential(harness_id, Some(&chat_id)).await;
-                    if let Some(h) = lock(&inner.runs).get_mut(&chat_id).filter(|h| h.run_id == run_id) {
-                        h.credential = now;
+                    let binary = {
+                        let mut runs = lock(&inner.runs);
+                        let handle = runs.get_mut(&chat_id).filter(|h| h.run_id == run_id);
+                        handle.map(|h| {
+                            h.credential = now.clone();
+                            h.binary.clone()
+                        })
+                    };
+                    // A warm start launched with another account, or from a
+                    // CLI binary since replaced, is another runtime (as a
+                    // parked session's would be: `credential_changed`).
+                    let stale = warm.as_ref().and_then(|taken| {
+                        if taken.parked.credential != now {
+                            Some("its credential changed")
+                        } else if let (Some(was), Some(Some(is))) = (&taken.parked.binary, &binary)
+                            && was != is
+                        {
+                            Some("its CLI changed")
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(why) = stale
+                        && let Some(taken) = warm.take()
+                    {
+                        inner.discard_taken(harness.as_ref(), &chat_id, taken, why).await;
                     }
                 }
+                tracing::debug!(target: "first_word", chat = %chat_id, "drive_run: prepared");
                 match prepared {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
                     Ok(()) => {
                         crate::wake_trace::mark(crate::wake_trace::Stage::AgentSpawn);
-                        harness.run(wire_request, controls).await
+                        match warm.take() {
+                            Some(taken) => {
+                                harness.run_warm(&taken.key, wire_request, controls).await
+                            }
+                            None => harness.run(wire_request, controls).await,
+                        }
                     }
                     Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),
                 }
@@ -8377,6 +8766,13 @@ async fn drive_run(
         }
         Err(error) => Err(error),
     };
+    // A warm start no runtime took (a Stop before the launch, a run that
+    // couldn't be prepared) ends here.
+    if let Some(taken) = warm.take() {
+        inner
+            .discard_taken(harness.as_ref(), &chat_id, taken, "the run never launched")
+            .await;
+    }
     // Only a refused permission needs to know (a filesystem read, kept off
     // the async threads like `binary_identity`).
     let cli_just_replaced = match &started {
@@ -8605,22 +9001,43 @@ async fn drive_run(
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
     // routes into a live run) starts the next turn with zero respawn/resume
-    // latency. `Some(when)` = idle since then; the 30-min reaper below ends
-    // a session nobody comes back to (zeron SESSION_IDLE_MS). A voice
-    // orchestrator holds Codex and its MCP servers (~200 MB) for calls only,
-    // so it goes after 5 minutes. A call holds the reaper off, and the window
-    // restarts at hang-up. `ZERON_SESSION_IDLE_MS` overrides both (tests).
-    let session_idle = std::env::var("ZERON_SESSION_IDLE_MS")
+    // latency. `Some(when)` = idle since then; the idle reaper below stops a
+    // runtime nobody comes back to. A driver whose resume brings the session
+    // back whole ([`Harness::stops_when_idle`]) is stopped after
+    // [`AGENT_IDLE_STOP`], the rest after [`SESSION_IDLE`] (zeron
+    // SESSION_IDLE_MS). A voice orchestrator holds Codex and its MCP servers
+    // (~200 MB) for calls only, so it goes after 5 minutes. A call holds the
+    // reaper off, and the window restarts at hang-up. Nothing pending is
+    // ever stopped (see the reaper arm). `ZERON_SESSION_IDLE_MS` overrides
+    // every window (tests, the measurement rig).
+    // (May ask the CLI its version: off the runtime's threads.)
+    let stops_when_idle = {
+        let harness = harness.clone();
+        tokio::task::spawn_blocking(move || harness.stops_when_idle())
+            .await
+            .unwrap_or(false)
+    };
+    let idle_override = std::env::var("ZERON_SESSION_IDLE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(std::time::Duration::from_secs(
-            if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
-                5 * 60
-            } else {
-                30 * 60
-            },
-        ));
+        .map(std::time::Duration::from_millis);
+    let session_idle = idle_override.unwrap_or(
+        if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
+            std::time::Duration::from_secs(5 * 60)
+        } else if stops_when_idle {
+            AGENT_IDLE_STOP
+        } else {
+            SESSION_IDLE
+        },
+    );
+    // A chat open nowhere: the shorter window, from the later of the turn's
+    // end and its last viewer leaving (only where the short window applies).
+    let short_window = idle_override.is_none()
+        && stops_when_idle
+        && !zeron_proto::voice::is_orchestrator_chat(&chat_id);
+    let unwatched_idle = if short_window { UNWATCHED_IDLE_STOP } else { session_idle };
+    // Viewers coming and going: the window is worked out again.
+    let mut viewers_changed = inner.viewers.sender().subscribe();
     // A live subagent stretches the window, but never unbounded: every
     // driver's subagent terminal is a best-effort vendor signal (claude's
     // untagged task_notification, grok's subagent_finished, codex thread
@@ -8628,7 +9045,11 @@ async fn drive_run(
     // loop's registry heartbeat — until the chat is archived. A subagent
     // silent this long (4h by default) is presumed lost; the reap stamps its
     // chip failed.
-    let subagent_silence = session_idle * 8;
+    let subagent_silence = idle_override.map_or(SUBAGENT_SILENCE, |idle| idle * 8);
+    // Wake-ups the agent scheduled for itself (Claude's `ScheduleWakeup`)
+    // and session crons it created (`CronCreate`): both live in its
+    // process, so it is never stopped while any is pending.
+    let mut self_scheduled = crate::self_schedule::SelfScheduled::default();
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
     let mut compacting_since: Option<std::time::Instant> = None;
@@ -8802,6 +9223,9 @@ async fn drive_run(
                 // ended): a turn is running from this moment, not from its
                 // first words.
                 () = turn.woke() => {
+                    // (The wake-up's turn only if its time has come: a
+                    // background task's ending wakes the agent too.)
+                    self_scheduled.woke(tokio::time::Instant::now());
                     if idle_since.is_some() {
                         tracing::info!(chat = %chat_id, "parked session resumed by a wake turn");
                         idle_since = None;
@@ -8850,11 +9274,31 @@ async fn drive_run(
                 // A live background subagent is somebody still using the child:
                 // the window counts from its last activity, and stretches to
                 // `subagent_silence` while its sink is open.
+                // Someone opened or left a transcript: work the window out again.
+                Ok(()) = viewers_changed.changed(), if idle_since.is_some() => {
+                    continue;
+                }
                 _ = tokio::time::sleep_until(
                     {
-                        let window = if live_subagents.is_empty() { session_idle } else { subagent_silence };
-                        let base = idle_since
-                            .map(|at| at.max(last_subagent_activity.unwrap_or(at)) + window);
+                        let (watched, left_at) = inner.view_state(&chat_id);
+                        let window = if !live_subagents.is_empty() {
+                            subagent_silence
+                        } else if watched {
+                            session_idle
+                        } else {
+                            unwatched_idle
+                        };
+                        let base = idle_since.map(|at| {
+                            let mut from = at.max(last_subagent_activity.unwrap_or(at));
+                            // Left alone: from when the last viewer left.
+                            if !watched
+                                && live_subagents.is_empty()
+                                && let Some(left) = left_at
+                            {
+                                from = from.max(left);
+                            }
+                            from + window
+                        });
                         match (base, reap_deferred_until) {
                             (Some(base), Some(deferred)) => base.max(deferred),
                             (base, deferred) => base.or(deferred).unwrap_or_else(tokio::time::Instant::now),
@@ -8871,14 +9315,57 @@ async fn drive_run(
                     // the runtime for as long as that work lives.
                     if turn.background_live() {
                         tracing::info!(chat = %chat_id, "idle reaper deferred: the agent reports background work");
-                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                        reap_deferred_until = Some(tokio::time::Instant::now() + window_now(&inner, &chat_id, session_idle, unwatched_idle));
                         held_for_background = true;
                         continue;
                     }
                     if std::mem::take(&mut held_for_background) {
                         // The work just ended: a full idle window from here.
-                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
+                        reap_deferred_until = Some(tokio::time::Instant::now() + window_now(&inner, &chat_id, session_idle, unwatched_idle));
                         continue;
+                    }
+                    // Anything else still pending in this runtime holds it
+                    // too: the agent said it waits on work, it scheduled a
+                    // wake-up or a cron, or a question waits on the person.
+                    // Checked again a full window later.
+                    let scheduled = self_scheduled.pending(tokio::time::Instant::now());
+                    let held = if wait.is_some() {
+                        Some("the agent waits on background work")
+                    } else if scheduled.is_some() {
+                        scheduled
+                    } else if inner.awaiting_input(&chat_id) {
+                        Some("a question waits on the person")
+                    } else {
+                        None
+                    };
+                    if let Some(why) = held {
+                        tracing::info!(chat = %chat_id, why, "idle reaper deferred");
+                        reap_deferred_until = Some(tokio::time::Instant::now() + window_now(&inner, &chat_id, session_idle, unwatched_idle));
+                        continue;
+                    }
+                    // Belt and braces, trusting no report of the agent's:
+                    // a child of its process that isn't one of its MCP
+                    // servers (a background shell, a dev server) holds it.
+                    if let Some(pid) = turn.agent_pid() {
+                        // (Unreadable: nothing added, and its servers hold.)
+                        if let Some(reading) = configured_servers.take() {
+                            known_servers.extend(reading.await.unwrap_or_default());
+                        }
+                        let known = known_servers.clone();
+                        let lingering = tokio::task::spawn_blocking(move || {
+                            zeron_harness::process::unexpected_descendants(pid, &known)
+                        })
+                        .await
+                        .unwrap_or_else(|_| vec!["(the check failed)".to_owned()]);
+                        if !lingering.is_empty() {
+                            tracing::info!(
+                                chat = %chat_id,
+                                ?lingering,
+                                "idle reaper deferred: the agent's process runs children it didn't report"
+                            );
+                            reap_deferred_until = Some(tokio::time::Instant::now() + window_now(&inner, &chat_id, session_idle, unwatched_idle));
+                            continue;
+                        }
                     }
                     tracing::info!(
                         chat = %chat_id,
@@ -8902,10 +9389,22 @@ async fn drive_run(
                 }
                 next = stream.next() => match next {
                     Some(Ok(event)) => {
-                        crate::wake_trace::note_agent_event(matches!(
-                            event,
-                            AgentEvent::SessionStarted { .. }
-                        ));
+                        let started = matches!(event, AgentEvent::SessionStarted { .. });
+                        crate::wake_trace::note_agent_event(started);
+                        // The agent's first output: its chat's title may start.
+                        // (Not its startup's reports: the session, its usage
+                        // and its commands come before its request.)
+                        let report = started
+                            || matches!(
+                                event,
+                                AgentEvent::ContextUsage { .. }
+                                    | AgentEvent::PlanUsage { .. }
+                                    | AgentEvent::Usage { .. }
+                                    | AgentEvent::AvailableCommands { .. }
+                            );
+                        if !report && let Some(mut title) = title.take() {
+                            title.fire();
+                        }
                         event
                     }
                     // A stream error while PARKED is a post-turn child death —
@@ -8946,6 +9445,7 @@ async fn drive_run(
                     // (parent + any dirty subagent docs).
                     last_flush = Some(tokio::time::Instant::now());
                     if dirty {
+                        tracing::debug!(target: "first_word", chat = %chat_id, "segment commit");
                         if let Err(err) = sync_segment(
                             doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
                         ) {
@@ -8956,6 +9456,8 @@ async fn drive_run(
                     for sink in subagents.values_mut() {
                         sink.flush(&device_id);
                     }
+                    // The journal keeps up with the transcript it backs.
+                    inner.journal.flush(&chat_id);
                     continue;
                 }
                 // Turn-quiesce watchdog (see the knob above). Armed only when the
@@ -9046,6 +9548,8 @@ async fn drive_run(
             };
             event
         };
+        // Scheduled wake-ups and session crons live in the agent's process.
+        self_scheduled.observe(&event, tokio::time::Instant::now());
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
@@ -11401,6 +11905,31 @@ mod tests {
                 Some(zeron_proto::HarnessId::ClaudeCode)
             ))
         );
+    }
+
+    /// Auto on an agent that ignores the access mode (Cursor, Pi) would run
+    /// with full access: refused. Where a stricter mode exists, or Auto is
+    /// offered, or full access was asked for outright, the run goes ahead.
+    #[test]
+    fn auto_is_refused_where_it_would_become_full_access() {
+        use zeron_proto::AccessMode::{self, *};
+        let asking = |access: AccessMode, auto_approve: bool| RunRequest {
+            access,
+            auto_approve,
+            ..request()
+        };
+        assert!(auto_unavailable(&asking(AutoReview, false), &[FullAccess]).is_some());
+        assert!(auto_unavailable(&asking(AutoReview, true), &[FullAccess]).is_none());
+        assert!(
+            auto_unavailable(
+                &asking(AutoReview, false),
+                &[Supervised, AutoAcceptEdits, FullAccess]
+            )
+            .is_none()
+        );
+        assert!(auto_unavailable(&asking(AutoReview, false), &AccessMode::ALL).is_none());
+        // The other modes keep their old fallback.
+        assert!(auto_unavailable(&asking(Supervised, false), &[FullAccess]).is_none());
     }
 
     fn request() -> RunRequest {

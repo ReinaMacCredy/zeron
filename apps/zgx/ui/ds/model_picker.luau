@@ -44,6 +44,7 @@ export type Harness = {
 	icon: string?,
 	state: ("ready" | "loading" | "error")?,
 	error: string?,
+	auto: boolean?,
 }
 -- One of a model option's choices.
 export type Choice = { id: string, label: string }

@@ -860,6 +860,7 @@ mod tests {
                 diff: None,
                 output_ref: None,
                 output_bytes: None,
+                review: None,
                 diff_ref: None,
                 diff_stats: None,
                 subagent_ref: None,

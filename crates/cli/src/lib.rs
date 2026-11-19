@@ -153,16 +153,16 @@ pub struct UiCommand {
     /// For `scenario`: the report directory (default ~/.zeron/run/scenarios/<name>-<time>).
     #[arg(long)]
     pub out: Option<std::path::PathBuf>,
-    /// For `launch`: the Dev number 60-99 (bundle target/macos-dev<N>, port 49800+N); defaults to the lowest free one.
+    /// For `launch`: the Dev number 60-99 (folder target/zgx-dev<N>, port 49800+N); defaults to the lowest free one.
     #[arg(long)]
     pub n: Option<u16>,
     /// For `launch`: run the app with the mock harness.
     #[arg(long)]
     pub mock: bool,
-    /// For `launch`: start apps/zgx instead of a gpui Dev bundle.
+    /// For `launch`: optional, `launch` always starts apps/zgx.
     #[arg(long)]
     pub zgx: bool,
-    /// For `launch`: the app name (default `Zeron Dev <N>`, or `Zeron Beta Dev <N>` with `--zgx`).
+    /// For `launch`: the app name (default `Zeron Beta Dev <N>`).
     #[arg(long)]
     pub name: Option<String>,
     /// For `snapshot` and `record stop`: the absolute file to write; for `compare`: the mockup .html file in the current folder.

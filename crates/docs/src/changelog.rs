@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 use zeron_update::version_newer;
 
-pub const SOURCE: &str = include_str!("../../ui/whats_new.toml");
+pub const SOURCE: &str = include_str!("../../../whats_new.toml");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

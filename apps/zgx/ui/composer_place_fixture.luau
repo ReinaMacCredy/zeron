@@ -19,6 +19,10 @@
 --   test_place_bare      the art hidden, its backings kept (to measure ink)
 --   test_place_picture   "plate-1-night" | "plate-3-sunrise"
 --   test_place_radii     "default" | "hot" (the Hot Pink template's radii; reload)
+--   test_place_reach     a new chat's reach on Cloud (nil: the default)
+--   test_place_reach_default  the account's ("devices" | "isolated")
+--   test_place_fixed     an existing chat's place (Composer.Fixed), or nil
+--   test_place_reach_picked   what an existing Cloud chat's reach was set to
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -50,6 +54,9 @@ local function accounts(_harness: string, _model: string): { any }?
 	end
 	return { { id = "a1", email = "wing@example.test", plan = "Max", active = true, can_switch = false, used = 0, detail = "", windows = w } }
 end
+local reach_default = ui.state("test_place_reach_default", "devices" :: string?)
+local fixed = ui.state("test_place_fixed", nil :: Composer.Fixed?)
+local reach_picked = ui.state("test_place_reach_picked", nil :: string?)
 
 -- The theme, as the app sets it (the window's, global), so what reads the
 -- theme's values follows it too.
@@ -201,6 +208,16 @@ return ui.column {
 			checkout = ui.state("test_place_checkout", "worktree" :: string?),
 			branch = ui.state("test_place_branch", "zeron/create-readme-update-for-onboarding" :: string?),
 			branches = BRANCHES,
+			reach = ui.state("test_place_reach", nil :: string?),
+			reach_default = function(): string?
+				return reach_default:get()
+			end,
+			branch_fixed = function(): Composer.Fixed?
+				return fixed:get()
+			end,
+			on_reach = function(r: string)
+				reach_picked:set(r)
+			end,
 			-- (The fraction too: a composer before `usage` reads it.)
 			context = function(): number
 				local u = usage:get()
