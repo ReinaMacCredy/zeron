@@ -3804,14 +3804,17 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
     }
     let id = request.get("id").filter(|id| !id.is_null())?.clone();
     Some(match request["method"].as_str().unwrap_or("") {
-        "initialize" => ok(
-            id,
-            json!({
+        "initialize" => {
+            let mut reply = json!({
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION),
                 "capabilities": { "tools": { "listChanged": true } },
                 "serverInfo": { "name": "zeron", "version": env!("CARGO_PKG_VERSION") },
-            }),
-        ),
+            });
+            if let Some(said) = tools.bot_instructions().await {
+                reply["instructions"] = json!(said);
+            }
+            ok(id, reply)
+        }
         "ping" => ok(id, json!({})),
         "tools/list" => ok(id, json!({ "tools": tools.tools().await })),
         "tools/call" => {

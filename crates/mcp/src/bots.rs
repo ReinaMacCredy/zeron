@@ -99,4 +99,51 @@ impl ThreadTools {
             .await
             .map_err(|e| e.to_string())
     }
+
+    /// What a Bot is told as its session starts (MCP `instructions`): its
+    /// memory's MEMORY.md and its open Inbox cards. None for a chat with
+    /// neither.
+    pub(crate) async fn bot_instructions(&self) -> Option<String> {
+        let me = json!({ "botId": self.chat_id });
+        let mut read = me.clone();
+        read["action"] = json!("read");
+        let memory = self.client.call(methods::BOT_MEMORY, read).await.ok()?;
+        let memory = memory["content"].as_str().unwrap_or("").trim().to_owned();
+        let mut list = me;
+        list["action"] = json!("list");
+        let open = self.client.call(methods::BOT_INBOX, list).await.ok();
+        let cards: Vec<String> = open
+            .as_ref()
+            .and_then(|o| o["items"].as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|i| {
+                        format!(
+                            "- {} ({}, {}): {}",
+                            i["id"].as_str().unwrap_or(""),
+                            i["kind"].as_str().unwrap_or(""),
+                            i["urgency"].as_str().unwrap_or(""),
+                            i["title"].as_str().unwrap_or("")
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if memory.is_empty() && cards.is_empty() {
+            return None;
+        }
+        let mut out = String::from(
+            "You are a Bot: a lead that keeps its own memory (bot_memory), files cards for what only your owner can do (bot_inbox) and tracks its tasks on a board (bot_board).",
+        );
+        if !memory.is_empty() {
+            out.push_str("\n\nYour memory (MEMORY.md):\n");
+            out.push_str(&memory);
+        }
+        if !cards.is_empty() {
+            out.push_str("\n\nOpen Inbox cards:\n");
+            out.push_str(&cards.join("\n"));
+        }
+        Some(out)
+    }
 }
