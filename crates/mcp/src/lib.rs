@@ -4532,6 +4532,9 @@ mod tests {
                         .push((method.to_string(), params.clone()));
                     Ok(RpcReply::Value(json!({ "profiles": [] })))
                 }
+                methods::BOT_MEMORY if params["botId"] == "bot" => Ok(RpcReply::Value(json!({ "content": "# Memory\n- Skip vendored code." }))),
+                methods::BOT_INBOX if params["botId"] == "bot" => Ok(RpcReply::Value(json!({ "items": [{ "id": "c1", "kind": "review", "urgency": "important", "title": "Review the dead-code PR" }] }))),
+                methods::BOT_MEMORY | methods::BOT_INBOX => Ok(RpcReply::Value(json!({}))),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -4648,6 +4651,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_bot_starts_told_its_memory_and_open_cards() {
+        let fake = Arc::new(fixture());
+        let bot = ThreadTools::new(memory_client(fake.clone()), "bot").with_run_secret(None);
+        let said = bot.bot_instructions().await.unwrap();
+        assert!(said.contains("Skip vendored code."), "{said}");
+        assert!(said.contains("c1 (review, important): Review the dead-code PR"), "{said}");
+        let plain = ThreadTools::new(memory_client(fake), "a").with_run_secret(None);
+        assert!(plain.bot_instructions().await.is_none(), "a chat with no memory nor cards is told nothing");
     }
 
     #[tokio::test]
