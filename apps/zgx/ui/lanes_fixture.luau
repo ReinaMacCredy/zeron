@@ -54,6 +54,7 @@ local children = {
 	{ id = "side-a", parent = "chat-1", title = "Looking at the tests", device = "d", status = "working", updated = NOW - 60, created = NOW - 120, agent = "openai" },
 	{ id = "side-b", parent = "chat-1", title = "New side chat", device = "d", updated = NOW - 600, created = NOW - 700 },
 }
+local parent_branch: string? = "main"
 local function publish()
 	sessions.now:set({
 		state = "ready",
@@ -64,7 +65,7 @@ local function publish()
 			{ id = "p2", name = "zephyr", device = "d", path = "/zephyr", git = true },
 		},
 		chats = {
-			{ id = "chat-1", title = "Parent", project = "p1", device = "d", branch = "main", cwd = "/proj", updated = NOW, created = NOW - 3600, running_subagents = 1, side_chats = #children, working_side_chats = 1 },
+			{ id = "chat-1", title = "Parent", project = "p1", device = "d", branch = parent_branch, cwd = "/proj", updated = NOW, created = NOW - 3600, running_subagents = 1, side_chats = #children, working_side_chats = 1 },
 		},
 		archived = {},
 		children = { ["chat-1"] = table.clone(children) },
@@ -344,6 +345,12 @@ ui.command { id = "lane_find", title = "⌘F", run = function()
 end }
 ui.command { id = "lane_model", title = "⌘/", run = function()
 	note(`model:{Panel.model_in_lane()}`)
+end }
+local test_parent_branch = ui.state("test_parent_branch", "feature")
+ui.command { id = "parent_on_branch", title = "The parent works on another branch", run = function()
+	local b = test_parent_branch:peek()
+	parent_branch = if b == "" then nil else b
+	publish()
 end }
 ui.command { id = "lane_effort_up", title = "⌘=", run = function()
 	note(`effort:{Panel.effort_in_lane(1)}`)

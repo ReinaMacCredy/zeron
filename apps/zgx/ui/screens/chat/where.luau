@@ -436,8 +436,9 @@ function M.bind(c: Choices)
 		end
 		-- Another project: its own ref, chosen afresh.
 		if id ~= project_was then
+			local had = project_was
 			project_was = id
-			if c.branch:peek() ~= nil then
+			if had ~= nil and c.branch:peek() ~= nil then
 				c.branch:set(nil)
 			end
 		end

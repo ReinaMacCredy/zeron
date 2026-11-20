@@ -643,6 +643,23 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	end
 	-- Where its first message makes it: nil, its parent's place as it is;
 	-- else where the person moved it (`where.plan()`).
+	local function branch_kept(was: string?): boolean
+		local now = branch:peek()
+		if now == was then
+			return true
+		end
+		-- (A parent's branch git doesn't list is shown as git's current, not picked.)
+		local current: string? = nil
+		for _, ref in where.refs:peek().list do
+			if ref.name == was then
+				return false
+			end
+			if ref.current then
+				current = ref.name
+			end
+		end
+		return now == current
+	end
 	local function place(): { [string]: any }?
 		local was = seed:peek()
 		if
@@ -650,7 +667,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			and project:peek() == was.project
 			and device:peek() == was.device
 			and checkout:peek() == was.checkout
-			and branch:peek() == was.branch
+			and branch_kept(was.branch)
 		then
 			return nil
 		end

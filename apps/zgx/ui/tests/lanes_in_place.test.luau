@@ -332,6 +332,23 @@ test("a new side chat's footer is the chat page's: access, where it works, the m
 	expect(calls(app)).to_contain(`pick:{made}:claude-code/opus-5.5:claude-code:high:supervised`)
 end)
 
+test("a new side chat is made where its parent is, whatever branch the parent says it's on", function()
+	-- (Another branch, none, one git no longer lists.)
+	for _, branch in { "feature", "", "gone" } do
+		local app = open()
+		app:set_state("test_parent_branch", branch)
+		app:command("parent_on_branch")
+		app:click('#session-lanes >> role:button "New side chat"')
+		app:frames(40)
+		app:type('.side-chat-tab >> role:textbox', "hi")
+		app:key("Enter")
+		app:frames(30)
+		local made = calls(app):match("create:chat%-1:([%w%-]+)")
+		expect(`{branch}: {made ~= nil}`).to_be(`{branch}: true`)
+		expect(`{branch}: {calls(app):find(`place:{made}`, 1, true) ~= nil}`).to_be(`{branch}: false`)
+	end
+end)
+
 test("a side chat's access and place picks stick per chat and go with its first message; then it's fixed", function()
 	local app = open()
 	app:click('#session-lanes >> role:button "New side chat"')
