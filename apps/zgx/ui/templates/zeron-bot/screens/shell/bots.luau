@@ -537,6 +537,21 @@ local function CardOverlay(): Node
 	}
 end
 
+-- Review cards (a PR to review or merge) get their own section; the rest need you.
+local function cards_where(review: boolean): () -> { any }
+	return function(): { any }
+		local out = {}
+		for _, c in cards:get() do
+			if (c.kind == "review") == review then
+				table.insert(out, c)
+			end
+		end
+		return out
+	end
+end
+local need_cards = ui.computed(cards_where(false))
+local review_cards = ui.computed(cards_where(true))
+
 local function CardRow(item: any): Node
 	return ui.button {
 		class = "session-row inbox-card",
@@ -621,17 +636,22 @@ local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 				ui.each(bot_list, BotRow),
 				Empty(bot_list, "No Bots yet. Press + to make one."),
 				Heading("Needs you", function(): number
-					return #need_list:get() + #cards:get()
+					return #need_list:get() + #need_cards:get()
 				end),
-				ui.each(cards, CardRow),
+				ui.each(need_cards, CardRow),
 				ui.each(need_list, NeedRow),
 				Empty(ui.computed(function(): { any }
 					local all = table.clone(need_list:get())
-					for _, c in cards:get() do
+					for _, c in need_cards:get() do
 						table.insert(all, c)
 					end
 					return all
 				end), "Nothing needs you."),
+				Heading("Review", function(): number
+					return #review_cards:get()
+				end),
+				ui.each(review_cards, CardRow),
+				Empty(review_cards, "Nothing to review."),
 				Heading("Sessions"),
 				ui.each(folder_list, Folder),
 				Empty(folder_list, "No sessions yet."),
