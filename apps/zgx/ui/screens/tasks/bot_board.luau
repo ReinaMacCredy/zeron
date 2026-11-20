@@ -28,8 +28,9 @@ function M.load()
 	for _, bot in bots do
 		ui.call("bots.board", { botId = bot, action = "list" }):after(function(reply: any)
 			for _, row in (reply and reply.tasks) or {} do
-				row.bot = bot
-				got[row.taskId] = row
+				local r = table.clone(row)
+				r.bot = bot
+				got[r.taskId] = r
 			end
 			one()
 		end, one)

@@ -441,8 +441,9 @@ local function load_cards(list: { any })
 	for _, b in list do
 		ui.call("bots.inbox", { botId = b.id, action = "list" }):after(function(reply: any)
 			for _, item in (reply and reply.items) or {} do
-				item.bot = b.id
-				table.insert(got, item)
+				local card = table.clone(item)
+				card.bot = b.id
+				table.insert(got, card)
 			end
 			left -= 1
 			if left == 0 then

@@ -443,7 +443,7 @@ mod tests {
         write(&t, "zeron-v2/zeron-template.json", r#"{"name":"My v2","author":"you"}"#);
         write(&t, "zeron-v2/screens/shell/page.luau", "-- mine");
         let ids = install(&ui(), &t);
-        assert_eq!(ids, ["zeron-v2-2"]);
+        assert_eq!(ids, ["zeron-v2-2", "zeron-bot"]);
         assert_eq!(std::fs::read_to_string(t.join("zeron-v2/screens/shell/page.luau")).unwrap(), "-- mine", "yours, untouched");
         assert!(verified_at(&ui(), &t.join("zeron-v2")).is_none());
         let at = t.join("zeron-v2-2");
@@ -525,7 +525,7 @@ mod tests {
         std::fs::remove_file(t.join("zeron-v2/.imported.json")).unwrap();
         write(&t, ".zeron/zeron-template.json", r#"{"name":"Zeron v3","author":"Zeron"}"#);
         let listed = live::installed(&t);
-        assert_eq!(listed.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), [live::BUILTIN, "zeron-v2", "my-v2"], "the default, Zeron's, then the rest");
+        assert_eq!(listed.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), [live::BUILTIN, "zeron-v2", "zeron-bot", "my-v2"], "the default, Zeron's, then the rest");
         assert_eq!(listed[1].official, Some(V2));
     }
 }
