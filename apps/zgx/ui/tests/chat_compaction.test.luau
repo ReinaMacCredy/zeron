@@ -115,6 +115,9 @@ test("compaction: the wait stands in the trailer's place, queued then compacting
 	expect(app:has("#compaction-wait")).to_be(false)
 	expect(app:has('~"Sending…"')).to_be(true)
 	expect(clocks(app)).to_be(0)
+	run_for(app, 1.2)
+	wait_for(app, { phase = "compacting" })
+	expect(app:tree("#compaction-wait"):find("· 0:00", 1, true) ~= nil).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
 

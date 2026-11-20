@@ -1829,6 +1829,7 @@ local function Transcript(props: Props): Node
 		if w then
 			if not waits_live then
 				waits_live = true
+				wait_last = nil
 				wait_turn += 1
 				table.clear(handoffs)
 				handed:set(false)
