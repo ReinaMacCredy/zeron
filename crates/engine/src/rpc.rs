@@ -8491,13 +8491,13 @@ impl RpcService for EngineRpc {
                 // chat this device runs lends its folder and takes the
                 // terminal (its activity rides that chat's session row,
                 // which only its host writes), as for a project action.
-                let hosted = self
-                    .workspace
-                    .chat(&p.chat_id)
-                    .ok()
-                    .flatten()
-                    .filter(|chat| chat.device_id == self.doc_host.device_id());
-                let chat_cwd = hosted.as_ref().and_then(|chat| chat.cwd.clone());
+                let row = self.workspace.chat(&p.chat_id).ok().flatten();
+                let elsewhere = row
+                    .as_ref()
+                    .is_some_and(|chat| chat.device_id != self.doc_host.device_id());
+                let chat_cwd = row
+                    .filter(|_| !elsewhere)
+                    .and_then(|chat| chat.cwd);
                 // Likewise only a project made on this device: another's
                 // folder is a path there.
                 let space_cwd = canvas_space_id(&p.chat_id).and_then(|space_id| {
@@ -8527,9 +8527,11 @@ impl RpcService for EngineRpc {
                     None => self.terminals.open(&cwd, p.cols, p.rows),
                 }
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
-                self.terminals
-                    .associate_chat(&session.id, &p.chat_id)
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if !elsewhere {
+                    self.terminals
+                        .associate_chat(&session.id, &p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                }
                 if p.agent {
                     self.terminals
                         .announce_agent_open(&p.chat_id, session.clone());
