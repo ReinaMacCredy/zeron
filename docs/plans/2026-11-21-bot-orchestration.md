@@ -231,7 +231,8 @@ PRs 3-6 are independent after 2 and can run as parallel threads.
 
 A Bot is a pinned lead chat, and its files live under `{data_dir}/bots/<chat id>/`. That replaces the separate Bot registry row of §2: a chat already carries its name, agent, model and profile.
 
-Not built:
-- iOS.
-- The rail's Review page.
-- Showing the board fields on the Tasks screen.
+| Board fields on Tasks rows (status, folder, note) | `screens/tasks/bot_board.luau`, host action `bots.board` |
+| Review section (review cards) | `screens/shell/bots.luau` |
+| iOS Bots tab (Bots, Needs-you cards) | `apps/ios/Zeron/Shell/BotsViewController.swift`, FFI `bot_call_json` |
+
+The Review page is a sidebar section, not a rail page: the template hides the rail, and rail actions come from plugins. The iOS tab needs `scripts/ios/build-core.sh` to regenerate `zeron_core.swift` before it builds.
