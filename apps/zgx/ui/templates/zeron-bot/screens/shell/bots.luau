@@ -457,6 +457,86 @@ local function load_cards(list: { any })
 	end
 end
 
+-- A card opened over the window: what it asks, and its answer.
+local open_card = ui.state("zeron_bot_card", nil :: any)
+local function answer_card(action: string, resolution: string?)
+	local item = open_card:peek()
+	if not item then
+		return
+	end
+	open_card:set(nil)
+	ui.call("bots.inbox", { botId = item.bot, action = action, id = item.id, resolution = resolution })
+		:after(function()
+			load_cards(bots())
+		end)
+end
+
+local function CardButton(text: string, primary: boolean, act: () -> ()): Node
+	return ui.button {
+		label = text,
+		h = 32,
+		px = "$space.3",
+		rounded = "$radius.md",
+		bg = if primary then "$accent" else "#00000000",
+		hover = { bg = if primary then "$accent" else "$hover" },
+		on_click = act,
+		ui.text { text, text_size = "$font.size.sm", weight = "$font.weight.medium", color = if primary then "#FFFFFF" else "$text.secondary" },
+	}
+end
+
+local function CardBody(): Node
+	local item = open_card:peek() or {}
+	local approve = if item.kind == "approval" then (item.label or "Approve") else "Done"
+	return ui.column {
+		w_full = true,
+		p = "$space.4",
+		gap = "$space.2",
+		bg = "$background",
+		ui.row {
+			gap = "$space.2",
+			items = "center",
+			ui.div { w = 8, h = 8, rounded = "$radius.full", bg = "$warning" },
+			ui.text { "Needs you", text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$warning" },
+		},
+		ui.text { item.title or "", literal = true, wrap = true, text_size = "$font.size.lg", weight = "$font.weight.semibold", color = "$text.primary" },
+		ui.text { item.summary or "", literal = true, wrap = true, text_size = "$font.size.sm", color = "$text.secondary" },
+		ui.text { item.details or "", literal = true, wrap = true, text_size = "$font.size.sm", color = "$text.tertiary" },
+		ui.row {
+			w_full = true,
+			justify = "end",
+			gap = "$space.2",
+			pt = "$space.2",
+			CardButton("Open Bot", false, function()
+				open_card:set(nil)
+				route.open_session(item.bot)
+			end),
+			CardButton("Dismiss", false, function()
+				answer_card("close", "Dismissed")
+			end),
+			CardButton(approve, true, function()
+				answer_card("resolve", approve)
+			end),
+		},
+	}
+end
+
+local function CardOverlay(): Node
+	return ui.modal {
+		open = ui.computed(function(): boolean
+			return open_card:get() ~= nil
+		end),
+		on_close = function()
+			open_card:set(nil)
+		end,
+		label = "Needs you",
+		w = 560,
+		p = 0,
+		gap = 0,
+		rounded = "$radius.xl",
+		build = CardBody,
+	}
+end
+
 local function CardRow(item: any): Node
 	return ui.button {
 		class = "session-row inbox-card",
@@ -471,7 +551,7 @@ local function CardRow(item: any): Node
 		bg = "#00000000",
 		hover = { bg = "$hover" },
 		on_click = function()
-			route.open_session(item.bot)
+			open_card:set(item)
 		end,
 		ui.div { w = 6, h = 6, shrink = 0, rounded = "$radius.full", bg = if item.urgency == "blocking" then "$danger" else "$warning" },
 		ui.column {
@@ -528,6 +608,7 @@ local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 			},
 		},
 		NewBot(),
+		CardOverlay(),
 		ui.scroll {
 			w_full = true,
 			grow = 1,
