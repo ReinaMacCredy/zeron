@@ -1,4 +1,5 @@
 {
   "screens/shell/bots.luau": "bd60acb658c79e45",
-  "screens/shell/init.luau": "09cfee6c89caf19b"
+  "screens/shell/init.luau": "09cfee6c89caf19b",
+  "theme.luau": "f91385ac6c055b8d"
 }
