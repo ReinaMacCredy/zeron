@@ -164,7 +164,7 @@ local function NewBotBody(): Node
 			shrink = 0,
 			p = "$space.4",
 			justify = "end",
-			bg = "alpha($accent, 0.12)",
+			bg = "#C026A31F",
 			ui.text { "Your custom Bot", text_size = "$font.size.lg", weight = "$font.weight.semibold", color = "$text.primary" },
 			ui.text { "A Bot keeps its memory, files what needs you and starts sessions for its work.", text_size = "$font.size.sm", color = "$text.secondary" },
 		},
