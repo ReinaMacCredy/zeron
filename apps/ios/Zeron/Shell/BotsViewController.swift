@@ -30,15 +30,6 @@ final class BotsViewController: UITableViewController {
         reload()
     }
 
-    private var router: AppRouter? {
-        var next: UIResponder? = self
-        while let r = next {
-            if let router = r as? AppRouter { return router }
-            next = r.next
-        }
-        return nil
-    }
-
     @objc private func reload() {
         bots = app.sessions(inFolder: "pinned")
         tableView.reloadData()
@@ -48,7 +39,7 @@ final class BotsViewController: UITableViewController {
             var found: [(bot: SessionRowVM, card: [String: Any])] = []
             for bot in bots where !bot.deviceId.isEmpty {
                 let params = "{\"botId\":\"\(bot.id)\",\"action\":\"list\"}"
-                guard let reply = try? await client.botCallJson(deviceId: bot.deviceId, method: "BotInbox", paramsJson: params),
+                guard let reply = try? await client?.botCallJson(deviceId: bot.deviceId, method: "BotInbox", paramsJson: params),
                       let data = reply.data(using: .utf8),
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let items = json["items"] as? [[String: Any]] else { continue }
