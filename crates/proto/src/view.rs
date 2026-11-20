@@ -254,42 +254,6 @@ pub fn attention_rank(status: ChatIndicator) -> u8 {
 // Sort orders
 // ---------------------------------------------------------------------------
 
-/// Active-list order: pure recency (`last_message_at` desc, `created_at`
-/// fallback), id tiebreak so the sort is total. Deliberately NOT
-/// attention-bucketed: status drives the DOT, never the position — bucketing
-/// meant that merely OPENING a completed session (completed → seen → idle)
-/// dropped its row under the pointer (user report: "their position in the
-/// scrollbar changes"). Matches the old sidebar, which rendered chats in
-/// recency order and let the dots carry urgency; [`attention_rank`] still
-/// aggregates the space rows' urgency dot.
-pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
-    rows.sort_by(|(_, a), (_, b)| {
-        let ka = a.last_message_at.unwrap_or(a.created_at);
-        let kb = b.last_message_at.unwrap_or(b.created_at);
-        kb.cmp(&ka).then_with(|| a.id.cmp(&b.id))
-    });
-}
-
-/// Session-tab order for a space: creation order (activity never reorders
-/// tabs), id tiebreak. Pure.
-pub fn sort_tabs(chats: &mut [&Chat]) {
-    chats.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-}
-
-/// Spaces list order: creation order, id tiebreak — total and stable across
-/// devices. Pure.
-pub fn sort_spaces(spaces: &mut [Space]) {
-    spaces.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-}
-
 /// The project a space belongs to: spaces sharing a repository identity —
 /// clones and worktrees of one repository, on any device — are one project.
 /// A space without an identity is a project of its own. Pure.
@@ -334,19 +298,6 @@ pub fn representative_space<'a>(spaces: &'a [Space], space: &'a Space) -> &'a Sp
         .filter(|s| s.repository_id.as_deref() == Some(repository_id))
         .min_by_key(|s| (s.created_at, s.id.as_str()))
         .unwrap_or(space)
-}
-
-/// Sidebar order: `last_message_at` desc, falling back to `created_at`; ties
-/// break by `created_at` desc then id so the sort is total and stable across
-/// devices. Pure.
-pub fn sort_chats(chats: &mut [Chat]) {
-    chats.sort_by(|a, b| {
-        let ka = a.last_message_at.unwrap_or(a.created_at);
-        let kb = b.last_message_at.unwrap_or(b.created_at);
-        kb.cmp(&ka)
-            .then_with(|| b.created_at.cmp(&a.created_at))
-            .then_with(|| a.id.cmp(&b.id))
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -735,47 +686,9 @@ mod gate_tests {
     }
 }
 
-/// Parse an `AuthStatus` frame tolerantly. The engine currently serializes its
-/// own enum (`{"_tag": "SignedIn", ...}`) while the proto type expects
-/// `{"state": "signedIn", ...}` — accept both so either side can converge
-/// without breaking a viewport.
-pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
-    if let Ok(state) = serde_json::from_value::<AuthState>(value.clone()) {
-        return Some(state);
-    }
-    let tag = value.get("_tag").and_then(|t| t.as_str())?;
-    let user = || -> Option<crate::UserProfile> {
-        let u = value.get("user")?;
-        Some(crate::UserProfile {
-            id: u.get("id")?.as_str()?.to_string(),
-            email: u.get("email")?.as_str()?.to_string(),
-            name: u.get("name").and_then(|n| n.as_str()).map(str::to_string),
-        })
-    };
-    match tag {
-        "SignedOut" => Some(AuthState::SignedOut),
-        "NeedsOrganization" => Some(AuthState::NeedsOrganization { user: user()? }),
-        "SignedIn" => Some(AuthState::SignedIn {
-            user: user()?,
-            org_id: value
-                .get("orgId")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        }),
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Sidebar grouping
 // ---------------------------------------------------------------------------
-
-/// One grouped-by-project sidebar section.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChatGroup<'a> {
-    pub label: String,
-    pub chats: Vec<&'a Chat>,
-}
 
 /// Project label for a chat: the basename of its cwd, or "No project".
 pub fn project_label(cwd: Option<&str>) -> String {
@@ -790,77 +703,6 @@ pub fn project_label(cwd: Option<&str>) -> String {
         .map(|n| n.to_string_lossy().to_string())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| cwd.to_string())
-}
-
-/// Group chats by project label, preserving the incoming (recency) order both
-/// for groups (by their most recent chat) and rows within a group. Pure.
-pub fn group_chats<'a>(chats: impl IntoIterator<Item = &'a Chat>) -> Vec<ChatGroup<'a>> {
-    let mut groups: Vec<ChatGroup<'a>> = Vec::new();
-    for chat in chats {
-        let label = project_label(chat.cwd.as_deref());
-        match groups.iter_mut().find(|g| g.label == label) {
-            Some(group) => group.chats.push(chat),
-            None => groups.push(ChatGroup {
-                label,
-                chats: vec![chat],
-            }),
-        }
-    }
-    groups
-}
-
-/// Compact relative time ("now", "5m", "3h", "2d", "1w", …) — no "ago" suffix;
-/// port of zeron's `formatTimeAgo`.
-pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let s = now.signed_duration_since(then).num_seconds().max(0);
-    // Under a minute reads as "now" — otherwise 45–59s floors to a bare "0m".
-    if s < 60 {
-        return "now".to_string();
-    }
-    let m = s / 60;
-    if m < 60 {
-        return format!("{m}m");
-    }
-    let h = m / 60;
-    if h < 24 {
-        return format!("{h}h");
-    }
-    let d = h / 24;
-    if d < 7 {
-        return format!("{d}d");
-    }
-    let w = d / 7;
-    if w < 5 {
-        return format!("{w}w");
-    }
-    let mo = d / 30;
-    if mo < 12 {
-        return format!("{mo}mo");
-    }
-    format!("{}y", d / 365)
-}
-
-/// Session-row sub-line, "project · branch" (zeron `chatLocation`): the repo
-/// checkout identity. Either part may be missing; empty when both are. A
-/// projectless chat names no project and no folder.
-pub fn chat_location(chat: &Chat) -> Option<String> {
-    let project = chat
-        .cwd
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !crate::projectless::is_projectless_cwd(Some(c)))
-        .map(|c| project_label(Some(c)));
-    let reference = chat
-        .branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|b| !b.is_empty());
-    match (project, reference) {
-        (Some(p), Some(r)) => Some(format!("{p} · {r}")),
-        (Some(p), None) => Some(p),
-        (None, Some(r)) => Some(r.to_string()),
-        (None, None) => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
