@@ -51,9 +51,9 @@ worktree.
     `scripts/seed-worktree-target.sh --ssd`, which replaces the links with
     clones of the main checkout's targets on disk. Whole suites and the app
     build run once, on `main`, in the merge gate.
-- Visual proofs run in an isolated `target/macos-dev<N>/Zeron Dev <N>.app`
-  (see `scripts/run-macos-dev.sh`), never in `/Applications/Zeron.app`, which
-  hosts the running sessions. Pick an `N` no other bundle uses and set
+- Visual proofs run in an isolated Dev app on its own engine, port and data
+  (`scripts/run-zgx-dev.sh`, which `zeron app launch --zgx` runs), never in
+  `/Applications/Zeron.app`, which hosts the running sessions. Pick an `N` no other bundle uses and set
   `ZERON_DEV_ROOT`, `ZERON_DEV_APP_NAME`, `ZERON_DEV_BUNDLE_ID` and
   `ZERON_DEV_IPC_PORT` from it (`docs/app-api.md`, "Launching a Dev
   bundle to drive"); the defaults are shared by every checkout. Inspect and
@@ -73,13 +73,13 @@ in the same hand-off, without waiting to be asked:
 2. No overlap: `git merge --no-edit <branch>`. A conflict means abort
    (`git merge --abort`), report, stop.
 3. Merge landed: build the crates you touched on `main` (`cargo build -p
-   <crate>`; for `crates/ui`, `cargo test -p zeron-ui --lib --
-   --test-threads=1`) and run the filtered tests of the modules you changed,
+   <crate>`; for `apps/zgx`, `cargo test` there plus
+   `scripts/ci/test-zgx.sh ui <zgx>` for the Luau UI suite) and run the filtered tests of the modules you changed,
    which the worktree skipped. A failure means revert the merge commit and
    report.
 4. Green: `git worktree remove --force .maestro/worktree/<slug>` and
-   `git branch -d <branch>`. Quit your `Zeron Dev <N>` and move its
-   `target/macos-dev<N>` folder to `~/.Trash` (the dcg guard blocks recursive
+   `git branch -d <branch>`. Quit your Dev app and move its
+   `ZERON_DEV_ROOT` folder to `~/.Trash` (the dcg guard blocks recursive
    deletes; `mv` is the sanctioned path).
 5. Report the merge commit, the check you ran, and that the running app still
    carries the old code until Reina rebuilds.
@@ -91,7 +91,7 @@ the next session does not mistake them for abandoned.
 
 - Verification is required; new tests are not. Spacing, color, size, copy,
   and layout tweaks are proven with a `Zeron Dev <N>` screenshot, never a new
-  gpui fixture test that pins pixel bounds.
+  UI fixture test that pins pixel bounds.
 - Add a test only for behavior no existing test covers and that could
   plausibly regress; extend a nearby test before building a new fixture.
 
@@ -107,5 +107,5 @@ the next session does not mistake them for abandoned.
 - Never `cargo fmt --all` or `cargo fmt -p`; format only files you changed,
   each through stdin: `rustfmt --edition 2024 < f > f.tmp && mv f.tmp f`.
   `rustfmt <path>` also rewrites the file's `mod` children (`shell.rs`,
-  `transcript.rs`, `crates/ui/src/lib.rs`, `crates/engine/src/lib.rs`,
+  `crates/engine/src/lib.rs`,
   `crates/engine/src/computer/mod.rs` and any other file with `mod x;`).
