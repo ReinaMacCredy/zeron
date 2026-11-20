@@ -137,8 +137,13 @@ local function create_bot(name: string?, goal: string?)
 		end
 		route.open_session(id)
 		if goal and goal ~= "" then
+			-- A chat just made sends with an agent: the composer's defaults.
 			local store: any = require("@app/screens/chat/store")
-			store.send({ session = id, text = goal, fresh = true } :: any)
+			local d = if store.new_defaults then store.new_defaults:peek() else {}
+			local m = store.new_chat_model(nil)
+			local model = (m and m.value) or d.model
+			local harness = (m and m.harness) or d.harness or (model and string.match(model, "^([^/]+)/"))
+			store.send({ session = id, text = goal, fresh = true, model = model, harness = harness, effort = d.effort, access = d.access } :: any)
 		end
 	end)
 end
