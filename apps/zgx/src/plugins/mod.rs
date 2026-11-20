@@ -3309,6 +3309,11 @@ impl Bridge {
             let reply = call("BotInbox", value_json(&arg)).await?;
             Ok(json_value(&reply))
         });
+        // A Bot's board: `{ botId, action: list|claim|release|status|folder|note, ... }`.
+        host.async_action("bots.board", |arg| async move {
+            let reply = call("BotBoard", value_json(&arg)).await?;
+            Ok(json_value(&reply))
+        });
         host.async_action("plugins.new", |name| async move { crate::plugins::preview::refuse("plugins.new")?;
             let name = text(&name).trim().to_string();
             let id = slug(&name);

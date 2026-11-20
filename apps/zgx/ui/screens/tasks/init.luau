@@ -4,6 +4,8 @@ local ds = require("@ds")
 local locale = require("@ds/locale")
 local Lightbox = require("@ds/lightbox")
 local store = require("@app/screens/tasks/store")
+local bot_board = require("@app/screens/tasks/bot_board")
+local sessions = require("@account/sessions")
 local card = require("@app/screens/tasks/card")
 local motion = require("@ds/motion")
 
@@ -95,6 +97,16 @@ function M.meta(t: store.Task, given: store.State?, ghost: boolean?): { Node }
 			add(ui.text { locale.s("tasks.not_sent"), color = "$warning", shrink = 0 })
 		elseif s.gone then
 			add(ui.text { locale.s("tasks.chat_deleted"), shrink = 0 })
+		end
+		local board = bot_board.rows:peek()[t.id]
+		if board then
+			add(ui.text { bot_board.WORDS[board.status] or board.status, color = bot_board.TONES[board.status], shrink = 0 })
+			if board.folder then
+				add(ui.text { board.folder, literal = true, truncate = true, max_w = 160, shrink = 1, min_w = 0 })
+			end
+			if board.note and board.note ~= "" then
+				add(ui.text { board.note, literal = true, truncate = true, max_w = 260, shrink = 1, min_w = 0 })
+			end
 		end
 		local open, titles = false, {}
 		for _, id in t.depends or {} do
@@ -298,9 +310,10 @@ function M.line_of(t: store.Task, project: string?): Line
 		end
 	end
 	local open = s.column ~= "done"
-	local meta = project ~= nil or t.due ~= nil or (open and (c ~= nil or s.reason == "not_sent" or s.gone or blockers ~= ""))
+	local board = bot_board.said(t.id)
+	local meta = project ~= nil or t.due ~= nil or (open and (c ~= nil or s.reason == "not_sent" or s.gone or blockers ~= "" or board ~= ""))
 	local slim = { column = s.column, reason = s.reason, step = s.step, progress = s.progress, gone = s.gone, chat = if c then { id = c.id, title = c.title, status = c.status } else nil }
-	return { kind = "task", task = t, key = t.id, state = slim, said = `{project or ""}|{blockers}`, meta = meta }
+	return { kind = "task", task = t, key = t.id, state = slim, said = `{project or ""}|{blockers}|{board}`, meta = meta }
 end
 
 -- What the list shows: open rows, the Done toggle, and done rows while open.
@@ -932,6 +945,11 @@ local function Ghosts(): Node
 end
 
 M.Page = ui.component(function(): Node
+	ui.effect(function()
+		local _ = sessions.places:get()
+		bot_board.load()
+	end)
+	ui.every(20000, bot_board.load)
 	ui.on_mount(function()
 		store.saw_captured(false)
 	end)
