@@ -15,6 +15,7 @@
 //! templates for agents. This file does the IO around them.
 
 pub mod agents;
+pub mod bots;
 pub mod broker;
 pub mod capability;
 pub mod files;
@@ -177,6 +178,7 @@ pub fn handles(method: &str) -> bool {
             | methods::WATCH_THEMES
     ) || lifecycle::handles(method)
         || themes::handles(method)
+        || bots::handles(method)
 }
 
 /// How long `PluginStatus` waits for the window's account.
@@ -2087,6 +2089,14 @@ impl Plugins {
                 Ok(RpcReply::Stream(self.inner.channel.subscribe(|| {})))
             }
             methods::WATCH_THEMES => Ok(RpcReply::Stream(self.inner.themes.subscribe(|| {}))),
+            method if bots::handles(method) => {
+                let (data_dir, asked) = (self.inner.data_dir.clone(), method.to_owned());
+                let reply = tokio::task::spawn_blocking(move || bots::answer(&data_dir, &asked, &params))
+                    .await
+                    .map_err(|_| failed("Couldn't reach the Bot's files"))?
+                    .map_err(failed)?;
+                RpcReply::value(&reply)
+            }
             method if themes::handles(method) => {
                 if let Some(by) = zeron_rpc::caller().record() {
                     tracing::info!(method, %by, "themes: asked by an agent");

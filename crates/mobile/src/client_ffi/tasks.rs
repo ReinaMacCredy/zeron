@@ -352,6 +352,25 @@ impl CoreClient {
         on_runtime(async move { client.set_task_completed(&task_id, completed).await }).await
     }
 
+    /// A Bot's memory, Inbox, board or schedules (`method`: `BotMemory`,
+    /// `BotInbox`, `BotBoard`, `BotSchedule`), its params and answer as JSON.
+    pub async fn bot_call_json(
+        &self,
+        device_id: String,
+        method: String,
+        params_json: String,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        let params = serde_json::from_str(&params_json).unwrap_or_else(|_| serde_json::json!({}));
+        on_runtime(async move {
+            client
+                .bot_call(&device_id, &method, params)
+                .await
+                .map(|v| v.to_string())
+        })
+        .await
+    }
+
     pub async fn delete_task(&self, task_id: String) -> CoreResult<()> {
         let client = self.client.clone();
         on_runtime(async move { client.delete_task(&task_id).await }).await

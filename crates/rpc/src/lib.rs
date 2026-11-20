@@ -170,6 +170,18 @@ pub mod methods {
     pub const TASK_STATUS: &str = "TaskStatus";
     /// `{chatId, taskId}` → `{status}`: `cancel_requested` or the final status.
     pub const TASK_CANCEL: &str = "TaskCancel";
+    /// `{botId, action: list|read|write|delete, path?, content?}`: a Bot's
+    /// memory notes (`{data_dir}/bots/<botId>/memory/`).
+    pub const BOT_MEMORY: &str = "BotMemory";
+    /// `{botId, action: list|create|update|close|resolve|snooze, ...}`: a
+    /// Bot's Inbox cards for its owner.
+    pub const BOT_INBOX: &str = "BotInbox";
+    /// `{botId, action: list|claim|release|status|note|folder, taskId, ...}`:
+    /// a Bot's board state for its tasks (status, claim, folder, note).
+    pub const BOT_BOARD: &str = "BotBoard";
+    /// `{botId, action: list|create|pause|resume|redate|close|delete, ...}`:
+    /// a Bot's schedules and promises, sent to its chat when due.
+    pub const BOT_SCHEDULE: &str = "BotSchedule";
     /// `{chatId, taskId}` → `{}`: a timed-out `mode: wait` hands the result
     /// back to the wake.
     pub const TASK_WAKE_ALWAYS: &str = "TaskWakeAlways";
