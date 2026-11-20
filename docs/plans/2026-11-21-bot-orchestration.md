@@ -106,39 +106,83 @@ the board; ordinary Tasks keep today's columns.
 
 A third official template beside Zeron v3 and Zeron v2, laid over the default
 like `ui/templates/zeron-v2/` and registered in `apps/zgx/src/plugins/official.rs`.
-Reversible by design (View → Use Zeron v3).
+Reversible by design (View → Use Zeron v3). Reference: Reina's two screen
+recordings of the Devin desktop app (2026-11-21); the layout below copies them.
 
 ```
-┌───────────────┬──────────────────────────────────────┬──────────────────┐
-│ ◉ Bot name  ⌄ │  Bot › Fix login redirect             │ Inbox · 3        │
-│ ─────────────│                                      │ ───────────────  │
-│ Needs you  3  │   transcript (Bot or a ticket's       │ ▣ Review PR #12  │
-│               │   thread), max width 720              │   summary line   │
-│ ▾ Project A   │                                      │   [Open PR]      │
-│   ● Fix login │                                      │ ◇ Pick a default │
-│   ○ Add docs  │                                      │   [A] [B★]       │
-│ ▸ Backlog     │                                      │ ───────────────  │
-│ ▸ Done        │  ┌──────────────────────────────┐    │ Board │ Changes  │
-│               │  │ Message the Bot…          ↑  │    │ Files │ Terminal │
-│ ⚙             │  └──────────────────────────────┘    │                  │
-└───────────────┴──────────────────────────────────────┴──────────────────┘
+┌──┬────────────────────┬──────────────────────────────────────────────┐
+│⌂ │ Bots          + ⋯  │                    (◉)                       │
+│◉ │ ◉ Code Reaper      │               Code Reaper                    │
+│⌕ │   last line…       │               2 need you                     │
+│⛨ │ ◉ Chief of Staff • │  Code Reaper                                 │
+│⋯ │   last line…       │  ┌──────────────────────┐                    │
+│  │                    │  │ Bot bubble (grey)    │  ┌───────────────┐ │
+│  │ Needs you 2        │  └──────────────────────┘  │ You (accent)  │ │
+│  │ Pull requests 2    │  ┌──────────────────────┐  └───────────────┘ │
+│  │  ⇅ #8 Plan: Bot…   │  │ ● Needs you          │                    │
+│  │                    │  │ text, links, ⇅ #8    │                    │
+│  │ Sessions ⌄     ⇵   │  └──────────────────────┘                    │
+│  │ ▣ Bot orchestr. 1  │  ·· Action required: Review the plan         │
+│  │   Plan bot orch…   │  ┌────────────────────────────────────────┐  │
+│? │   PR ready · ⇅ 1   │  │ Guide Code Reaper while it works…      │  │
+│⚙ │ ⌕ Dead code 2      │  │ +  /                  model  🎙  ↑     │  │
+│R │   Remove unused…   │  └────────────────────────────────────────┘  │
+└──┴────────────────────┴──────────────────────────────────────────────┘
 ```
 
-- **Sidebar** (`screens/shell/sidebar.luau`, `ds/sidebar.luau`): the Bot's row
-  on top (opens its chat), a **Needs you** row with the open card count, then
-  ticket folders (reusing Sections), each ticket one compact line: status dot,
-  title, agent mark. Done collapsed. No app rail: Tasks, Skills, Pull requests
-  move to the Cmd+K palette and the Bot menu (⌄).
-- **Center** (`screens/shell/page.luau`): one chat at a time, Bot by default; a
-  ticket opens its thread with a breadcrumb back to the Bot. Composer is the
-  default composer without the Mission key (the Bot always leads).
-- **Right panel** (`screens/panel/init.luau`): **Inbox** first (cards, highest
-  priority on top, buttons inline), then **Board** (the Kanban in a narrow
-  column), then the existing Changes / Files / Terminal tabs.
-- **Look** (`ds/tokens.luau`, `theme.luau`): opaque surfaces, no window art,
-  1 px hairlines instead of shadows and glass, one accent, 13 px body / 12 px
-  meta, 8 px radius, 4 px spacing grid, status in colour dots only. Home widgets,
-  usage ring and "agent updates" pill hidden (reachable from the Bot menu).
+- **Rail** (`screens/shell/rail.luau`): a slim icon column. From top to bottom it
+  holds Home, Bots, Search, Security/Review, and a ⋯ overflow (Review,
+  Automations, Wiki, Apps), with Help, Settings and the avatar at the bottom.
+  It replaces the current app rail and its labels.
+- **Sidebar, Bots mode** (`screens/shell/sidebar.luau`, `ds/sidebar.luau`):
+  - **Bots** header with `+` (new Bot) and `⋯`. Each Bot row has a square avatar,
+    its name, the last line it said in muted text, a blue dot when unread, and
+    a hover `⋯`.
+  - **Needs you N**: the open Inbox cards grouped by kind, for example
+    **Pull requests N** with one line per PR (`⇅ #8 title`).
+  - **Sessions ⌄** with a filter button: ticket folders (reusing Sections),
+    each with an icon and a count. Every ticket is two lines: the title, then a
+    status line such as `Working`, `PR ready, waiting for CI · ⇅ 1` or
+    `PR is ready · ⇅ 4`, coloured green when ready. A spinner dot marks work
+    that is running.
+- **Sidebar, Home mode**: **New session**, Recent, and Pinned groups (a parent
+  with its child sessions, `☁ 3 minutes ago`, unread dots).
+- **Center, Bot chat** (`screens/shell/page.luau`, `screens/chat/`):
+  - The Bot's avatar is centred at the top with its name and `N need you` in
+    orange; clicking it opens the Inbox.
+  - Bot messages are grey bubbles under a small name label, with the avatar
+    beside the last bubble. User messages are accent (magenta) bubbles on the
+    right. The column is about 480 px wide.
+  - When the Bot raises an Inbox card, it appears in the transcript as a
+    bubble with an orange `● Needs you` header and inline links (`⇅ zeron#8`).
+    A muted `Action required: …` line follows.
+  - The composer reads "Guide <Bot> while it works, or press ⌘↵ to queue" and
+    has `+`, `/`, model, mic and send controls.
+- **Inbox card overlay** (new `screens/inbox/card.luau`, fed by `screens/chat/asks.luau`): clicking `N need you`
+  or a card dims the transcript and opens one card at a time. The card shows
+  `Needs you 1/N` with ↑/↓, ⋯ and ✕, then the title, the age, a summary of 2 or 3
+  lines, the subject card (PR title, `+173 −0`, author), and the actions:
+  **Dismiss ⌄** plus the primary button (Merge, Approve, or one per option).
+  A disabled action explains itself in a popover. The composer switches to
+  "Replying to <card title>", so a typed reply answers that card.
+- **Home** (`screens/chat/home.luau`, `home_cards.luau`): a centred brand mark, a composer with Cloud/Local,
+  folder and harness pickers, and a **Your Bots** grid of avatar, name and last
+  line with **View all →**.
+- **New Bot** (new `screens/bot/new.luau`): a two-pane modal. The left pane is
+  art with "Your custom Bot"; the right pane asks "What's your goal?" with a
+  searchable template list (name plus a one-line purpose, `On your team` for
+  existing Bots) and **Continue**. Templates are playbooks with a Bot prompt.
+- **No right panel by default.** It opens from the titlebar toggle and keeps
+  the existing Changes / Files / Terminal tabs, with Board added as a tab.
+- **Look** (`ds/tokens.luau`, `theme.luau`):
+  - Colour: a light grey window (`#F7F7F8`), a white content area, and 1 px
+    hairlines with no shadows or glass. The accent is magenta for user bubbles
+    and avatars' rings; orange marks Needs you, green marks ready, and blue
+    dots mark unread.
+  - Type and shape: 13 px body and 12 px meta, a 12 px radius on bubbles and
+    cards, 8 px on rows, and a 4 px spacing grid.
+  - Hidden from the primary layout: home widgets, the usage ring and the
+    "agent updates" pill.
 - Every screen kept is the default's file; the template overrides only the
   files above, so it stays current as the default changes (the `.base.json`
   staleness guard covers it).
@@ -153,7 +197,7 @@ Reversible by design (View → Use Zeron v3).
 | 4 | Task fields + `tasks` tool `dispatch/claim/status_note`; In review column | 2 | registry tests, Tasks fixture |
 | 5 | `asks` table + `inbox` tool + Inbox update routing; questions as cards | 2 | engine lib tests, MCP contract test |
 | 6 | Schedules + promises, headless | 2 | `--test` with a fake clock |
-| 7 | `zeron-bot` template: sidebar, center, Inbox/Board panel, tokens | 4, 5 | Zeron Dev screenshot, `scripts/ci/test-zgx.sh ui` |
+| 7 | `zeron-bot` template: rail, Bots sidebar, Bot chat bubbles, Inbox card overlay, New Bot modal, tokens | 4, 5 | Zeron Dev screenshot, `scripts/ci/test-zgx.sh ui` |
 | 8 | iOS: Inbox cards and Bot chat on the phone | 5 | Simulator screenshot |
 | 9 | Docs articles: Bot, Inbox cards, Schedules | 2-7 | — |
 
@@ -165,9 +209,11 @@ PRs 3-6 are independent after 2 and can run as parallel threads.
    tracker, Kanban and `tasks` tool reused.
 2. Ship the layout as a template, not a change to Zeron v3: reversible, does not
    fight upstream merges from zeronsh/zeron.
-3. Inbox cards replace the Cmd+I tray's "Needs you" for Bot spaces; the
-   Waiting pill stays for the chat in front of you.
+3. Inbox cards replace the Cmd+I tray's "Needs you" for Bot spaces and open
+   as a centred overlay, not a right-panel tab; the Waiting pill stays for the
+   chat in front of you.
 4. Memory is a git folder (same format as Devin's), not a SQLite table: readable,
    diffable, and agents already know the format.
 5. Schedules are engine-owned so they work for every harness and headless.
-6. One Bot per space to start; multi-Bot is a later step.
+6. Several Bots from the start (the sidebar lists them, as in the Devin app),
+   each owning one space; Bots sharing a space come later.
