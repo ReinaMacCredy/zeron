@@ -179,6 +179,9 @@ pub mod methods {
     /// `{botId, action: list|claim|release|status|note|folder, taskId, ...}`:
     /// a Bot's board state for its tasks (status, claim, folder, note).
     pub const BOT_BOARD: &str = "BotBoard";
+    /// `{botId, action: list|create|pause|resume|redate|close|delete, ...}`:
+    /// a Bot's schedules and promises, sent to its chat when due.
+    pub const BOT_SCHEDULE: &str = "BotSchedule";
     /// `{chatId, taskId}` → `{}`: a timed-out `mode: wait` hands the result
     /// back to the wake.
     pub const TASK_WAKE_ALWAYS: &str = "TaskWakeAlways";

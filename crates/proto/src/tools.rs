@@ -198,6 +198,10 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "bot_board",
                 "Claim a Bot's tasks and set their status, folder and note.",
             ),
+            tool(
+                "bot_schedule",
+                "Keep a Bot's schedules and promises, fired by the engine when due.",
+            ),
         ],
     },
     ToolGroupInfo {

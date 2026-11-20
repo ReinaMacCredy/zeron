@@ -7,6 +7,7 @@ use crate::plugins::tool;
 pub(crate) const BOT_MEMORY: &str = "bot_memory";
 pub(crate) const BOT_INBOX: &str = "bot_inbox";
 pub(crate) const BOT_BOARD: &str = "bot_board";
+pub(crate) const BOT_SCHEDULE: &str = "bot_schedule";
 
 pub(crate) fn tools() -> Vec<Value> {
     let s = |what: &str| json!({ "type": "string", "description": what });
@@ -70,6 +71,26 @@ pub(crate) fn tools() -> Vec<Value> {
                 "required": ["action"]
             }),
         ),
+        tool(
+            BOT_SCHEDULE,
+            "Your schedules and promises as a Bot, kept and fired by Zeron's engine even with no window open: a `schedule` sends its `prompt` to this chat `at` a time (Unix ms) or every `everyMinutes`; a `promise` (kind promise) records an `outcome` you told someone they'll get, owed at `replyTo`, and reminds you at `dueAt`. `list` them, `pause`/`resume` one, `redate` a promise (new `at`), `close` it once delivered, or `delete` one.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "create", "pause", "resume", "redate", "close", "delete"] },
+                    "id": s("The schedule's id, from list or create."),
+                    "kind": { "type": "string", "enum": ["schedule", "promise"] },
+                    "prompt": s("For a schedule: what you're asked when it fires."),
+                    "everyMinutes": { "type": "integer", "minimum": 1 },
+                    "at": { "type": "integer", "description": "When (Unix ms)." },
+                    "dueAt": { "type": "integer", "description": "For a promise: when it's owed (Unix ms)." },
+                    "outcome": s("For a promise: what you said they'd get."),
+                    "replyTo": s("For a promise: where the result is owed."),
+                    "botId": s("Another Bot's id (its lead chat). Default: this chat.")
+                },
+                "required": ["action"]
+            }),
+        ),
     ]
 }
 
@@ -92,6 +113,7 @@ impl ThreadTools {
         let method = match method {
             BOT_MEMORY => methods::BOT_MEMORY,
             BOT_BOARD => methods::BOT_BOARD,
+            BOT_SCHEDULE => methods::BOT_SCHEDULE,
             _ => methods::BOT_INBOX,
         };
         self.client

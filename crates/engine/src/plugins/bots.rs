@@ -335,12 +335,136 @@ fn board(data_dir: &Path, params: &Json) -> Result<Json, String> {
     Ok(out)
 }
 
+const MINUTE_MS: i64 = 60_000;
+
+/// A Bot's schedules: a prompt sent to the Bot's own chat at a time
+/// (`at`, Unix ms) or every `everyMinutes`, and promises (`kind: promise`:
+/// an `outcome` owed by `dueAt`, the Bot reminded then). The engine sends
+/// what is due (see [`fire_due`]), so they run with no window open.
+fn schedule(data_dir: &Path, params: &Json) -> Result<Json, String> {
+    let path = bot_dir(data_dir, params)?.join("schedules.json");
+    let mut items = read_inbox(&path);
+    let action = text(params, "action").unwrap_or("list");
+    if action == "list" {
+        return Ok(json!({ "schedules": items }));
+    }
+    if action == "create" {
+        let now = now_ms();
+        let kind = one_of(params, "kind", &["schedule", "promise"], "schedule")?;
+        let every = params
+            .get("everyMinutes")
+            .and_then(Json::as_i64)
+            .filter(|m| *m >= 1);
+        let at = params
+            .get("at")
+            .or(params.get("dueAt"))
+            .and_then(Json::as_i64);
+        let prompt = if kind == "promise" {
+            let outcome =
+                text(params, "outcome").ok_or("`outcome`: what you told them they'd get")?;
+            format!(
+                "A promise is due: {outcome}. Deliver it where it is owed ({}), or tell them where it stands and re-date it.",
+                text(params, "replyTo").unwrap_or("where you said")
+            )
+        } else {
+            text(params, "prompt")
+                .ok_or("`prompt`: what the Bot is asked when it fires")?
+                .to_owned()
+        };
+        let next = match (at, every) {
+            (Some(at), _) => at,
+            (None, Some(m)) => now + m * MINUTE_MS,
+            (None, None) => return Err("Say when: `at` (Unix ms) or `everyMinutes`".into()),
+        };
+        let item = json!({
+            "id": format!("sch-{now:x}-{}", items.len()),
+            "kind": kind,
+            "prompt": prompt,
+            "outcome": text(params, "outcome"),
+            "replyTo": text(params, "replyTo"),
+            "everyMinutes": every,
+            "nextAt": next,
+            "enabled": true,
+            "createdAt": now,
+        });
+        items.push(item.clone());
+        write_inbox(&path, &items)?;
+        return Ok(item);
+    }
+    let id = text(params, "id").ok_or("`id`: the schedule's id, from list")?;
+    let at = items
+        .iter()
+        .position(|i| i["id"] == id)
+        .ok_or_else(|| format!("No schedule {id}"))?;
+    let out = match action {
+        "pause" | "resume" => {
+            items[at]["enabled"] = json!(action == "resume");
+            items[at].clone()
+        }
+        "redate" => {
+            let next = params
+                .get("at")
+                .or(params.get("dueAt"))
+                .and_then(Json::as_i64)
+                .ok_or("`at`: the new time (Unix ms)")?;
+            items[at]["nextAt"] = json!(next);
+            items[at]["enabled"] = json!(true);
+            items[at].clone()
+        }
+        "delete" | "close" => items.remove(at),
+        other => {
+            return Err(format!(
+                "`action` {other}: list, create, pause, resume, redate, close or delete"
+            ));
+        }
+    };
+    write_inbox(&path, &items)?;
+    Ok(out)
+}
+
+/// The prompts due by `now` across every Bot, as `(botId, prompt)`: each
+/// moved on (an `everyMinutes` one to its next time; a one-off disabled).
+pub fn take_due(data_dir: &Path, now: i64) -> Vec<(String, String)> {
+    let mut due = Vec::new();
+    let Ok(bots) = std::fs::read_dir(data_dir.join("bots")) else {
+        return due;
+    };
+    for bot in bots.flatten() {
+        let path = bot.path().join("schedules.json");
+        let mut items = read_inbox(&path);
+        let mut moved = false;
+        for item in items.iter_mut() {
+            let next = item["nextAt"].as_i64().unwrap_or(i64::MAX);
+            if item["enabled"] != true || next > now {
+                continue;
+            }
+            due.push((
+                bot.file_name().to_string_lossy().into_owned(),
+                item["prompt"].as_str().unwrap_or("").to_owned(),
+            ));
+            match item["everyMinutes"].as_i64().filter(|m| *m >= 1) {
+                Some(m) => {
+                    item["nextAt"] =
+                        json!(next + ((now - next) / (m * MINUTE_MS) + 1) * m * MINUTE_MS)
+                }
+                None => item["enabled"] = json!(false),
+            }
+            moved = true;
+        }
+        if moved {
+            let _ = write_inbox(&path, &items);
+        }
+    }
+    due
+}
+
 /// `method` with `params`, over the files in `data_dir`.
 pub fn answer(data_dir: &Path, method: &str, params: &Json) -> Result<Json, String> {
     match method {
         methods::BOT_MEMORY => memory(data_dir, params),
         methods::BOT_INBOX => inbox(data_dir, params),
         methods::BOT_BOARD => board(data_dir, params),
+        methods::BOT_SCHEDULE => schedule(data_dir, params),
         _ => Err(format!("{method}: not a Bot method")),
     }
 }
@@ -410,6 +534,33 @@ mod tests {
         assert!(
             at(json!({ "botId": "b", "action": "status", "taskId": "t1", "status": "done" }))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn schedules_fire_once_or_on_their_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let at = |p: Json| call(d, methods::BOT_SCHEDULE, p);
+        at(json!({ "botId": "b", "action": "create", "prompt": "Sweep", "at": 1_000 })).unwrap();
+        at(json!({ "botId": "b", "action": "create", "prompt": "Weekly", "everyMinutes": 10, "at": 1_000 })).unwrap();
+        at(json!({ "botId": "b", "action": "create", "kind": "promise", "outcome": "the fix PR", "dueAt": 5_000_000 })).unwrap();
+        assert!(at(json!({ "botId": "b", "action": "create", "prompt": "x" })).is_err());
+        let due = take_due(d, 2_000);
+        assert_eq!(
+            due,
+            [
+                ("b".to_string(), "Sweep".to_string()),
+                ("b".to_string(), "Weekly".to_string())
+            ]
+        );
+        assert!(take_due(d, 2_000).is_empty());
+        let due = take_due(d, 1_000 + 10 * MINUTE_MS);
+        assert_eq!(due.len(), 1);
+        assert!(
+            take_due(d, 5_000_000)
+                .iter()
+                .any(|(_, said)| said.contains("the fix PR"))
         );
     }
 
