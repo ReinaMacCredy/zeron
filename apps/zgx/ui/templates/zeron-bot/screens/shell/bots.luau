@@ -301,10 +301,72 @@ local function Empty(list: any, say: string): Node
 	}
 end
 
+-- The Bots' open Inbox cards (what only you can do), asked of the engine
+-- for each Bot as the list changes and every 15 seconds.
+local cards = ui.state("zeron_bot_cards", {} :: { any })
+local function load_cards(list: { any })
+	local got: { any } = {}
+	local left = #list
+	if left == 0 then
+		cards:set({})
+		return
+	end
+	for _, b in list do
+		ui.call("bots.inbox", { botId = b.id, action = "list" }):after(function(reply: any)
+			for _, item in (reply and reply.items) or {} do
+				item.bot = b.id
+				table.insert(got, item)
+			end
+			left -= 1
+			if left == 0 then
+				cards:set(got)
+			end
+		end, function()
+			left -= 1
+			if left == 0 then
+				cards:set(got)
+			end
+		end)
+	end
+end
+
+local function CardRow(item: any): Node
+	return ui.button {
+		class = "session-row inbox-card",
+		label = item.title,
+		w_full = true,
+		h = 40,
+		px = "$space.2",
+		gap = "$space.2",
+		items = "center",
+		justify = "start",
+		rounded = "$radius.md",
+		bg = "#00000000",
+		hover = { bg = "$hover" },
+		on_click = function()
+			route.open_session(item.bot)
+		end,
+		ui.div { w = 6, h = 6, shrink = 0, rounded = "$radius.full", bg = if item.urgency == "blocking" then "$danger" else "$warning" },
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			gap = 1,
+			ui.text { item.title or "", literal = true, truncate = true, text_size = "$font.size.sm", color = "$text.primary" },
+			ui.text { item.summary or item.kind or "", literal = true, truncate = true, text_size = "$font.size.xs", color = "$text.tertiary" },
+		},
+	}
+end
+
 local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 	local bot_list = ui.computed(bots)
 	local need_list = ui.computed(needs)
 	local folder_list = ui.computed(folders)
+	ui.effect(function()
+		load_cards(bot_list:get())
+	end)
+	ui.every(15000, function()
+		load_cards(bot_list:peek())
+	end)
 	return ui.column {
 		id = "sidebar",
 		hook = "shell.sidebar",
@@ -348,10 +410,17 @@ local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 				ui.each(bot_list, BotRow),
 				Empty(bot_list, "No Bots yet. Press + to make one."),
 				Heading("Needs you", function(): number
-					return #need_list:get()
+					return #need_list:get() + #cards:get()
 				end),
+				ui.each(cards, CardRow),
 				ui.each(need_list, NeedRow),
-				Empty(need_list, "Nothing needs you."),
+				Empty(ui.computed(function(): { any }
+					local all = table.clone(need_list:get())
+					for _, c in cards:get() do
+						table.insert(all, c)
+					end
+					return all
+				end), "Nothing needs you."),
 				Heading("Sessions"),
 				ui.each(folder_list, Folder),
 				Empty(folder_list, "No sessions yet."),
