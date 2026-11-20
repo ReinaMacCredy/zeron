@@ -88,6 +88,9 @@ impl Harness for ApprovalHarness {
     fn display_name(&self) -> &str {
         "Approvals"
     }
+    fn access_modes(&self) -> &[AccessMode] {
+        &AccessMode::ALL
+    }
     fn supports_steering(&self) -> bool {
         self.steerable
     }

@@ -93,6 +93,7 @@ pub const BLOCKED: &[&str] = &[
     "chat.steer_all",
     "chat.limit",
     "chat.compact",
+    "chat.mission_size",
     // (A /config write runs Claude Code and rewrites its settings file.)
     "claude_panel.set",
     "claude_panel.close",

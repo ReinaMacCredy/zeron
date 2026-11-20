@@ -220,6 +220,7 @@ end
 stub_store.interrupt = function(id: string)
 	note(`stop:{id}`)
 end
+stub_store.open = function(_id: string?) end
 -- The host's lane views: a watched chat says its id in its transcript.
 local stub_lanes = lanes :: any
 stub_lanes.on_screen = function(slot: string, shown: boolean)
