@@ -217,3 +217,21 @@ PRs 3-6 are independent after 2 and can run as parallel threads.
 5. Schedules are engine-owned so they work for every harness and headless.
 6. Several Bots from the start (the sidebar lists them, as in the Devin app),
    each owning one space; Bots sharing a space come later.
+
+## Status (built on this branch)
+
+| Piece | Where |
+| --- | --- |
+| Zeron Bot template: Bots, Needs you, Sessions by folder, theme, bubbles | `apps/zgx/ui/templates/zeron-bot/` |
+| New Bot dialog (goal, templates) and + | `screens/shell/bots.luau` |
+| Needs-you card overlay (Open Bot, Dismiss, Approve) | `screens/shell/bots.luau`, host action `bots.inbox` |
+| Bot memory, Inbox, board, schedules and promises | `crates/engine/src/plugins/bots.rs`, MCP `bot_memory`, `bot_inbox`, `bot_board`, `bot_schedule` |
+| Engine-fired schedules (30 s ticker) | `EngineRpc::new` in `crates/engine/src/rpc.rs` |
+| Session preamble (MEMORY.md, open cards) | MCP `initialize` `instructions`, `crates/mcp/src/bots.rs` |
+
+A Bot is a pinned lead chat, and its files live under `{data_dir}/bots/<chat id>/`. That replaces the separate Bot registry row of §2: a chat already carries its name, agent, model and profile.
+
+Not built:
+- iOS.
+- The rail's Review page.
+- Showing the board fields on the Tasks screen.
