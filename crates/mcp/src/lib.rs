@@ -960,7 +960,7 @@ impl ThreadTools {
             themes::UPDATE_THEME => self.theme(methods::UPDATE_THEME, args).await,
             themes::DELETE_THEME => self.theme(methods::DELETE_THEME, args).await,
             themes::USE_THEME => self.theme(methods::USE_THEME, args).await,
-            bots::BOT_MEMORY | bots::BOT_INBOX => self.bot_files(name, args).await,
+            bots::BOT_MEMORY | bots::BOT_INBOX | bots::BOT_BOARD => self.bot_files(name, args).await,
             plugin if plugins::is_plugin_tool_name(plugin) => {
                 self.call_plugin_tool(plugin, args).await
             }
@@ -4038,7 +4038,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 55] = [
+    const THREAD_TOOLS: [&str; 56] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -4094,6 +4094,7 @@ mod tests {
         "use_theme",
         "bot_memory",
         "bot_inbox",
+        "bot_board",
     ];
 
     fn chat(id: &str, space: Option<&str>, archived: bool, created_by: Option<&str>) -> Value {

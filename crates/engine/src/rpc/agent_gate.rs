@@ -78,6 +78,7 @@ fn tool_switch(method: &str, params: &Value) -> Option<&'static str> {
         methods::TASK_CANCEL => "task_cancel",
         methods::BOT_MEMORY => "bot_memory",
         methods::BOT_INBOX => "bot_inbox",
+        methods::BOT_BOARD => "bot_board",
         methods::START_REVIEW => "review_changes",
         methods::RESOLVE_REVIEW_FINDINGS => "resolve_findings",
         methods::LIST_AGENT_PROFILES | methods::UPSERT_AGENT_PROFILE | methods::DELETE_AGENT_PROFILE => "agent_profiles",

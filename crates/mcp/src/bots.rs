@@ -6,6 +6,7 @@ use crate::plugins::tool;
 
 pub(crate) const BOT_MEMORY: &str = "bot_memory";
 pub(crate) const BOT_INBOX: &str = "bot_inbox";
+pub(crate) const BOT_BOARD: &str = "bot_board";
 
 pub(crate) fn tools() -> Vec<Value> {
     let s = |what: &str| json!({ "type": "string", "description": what });
@@ -51,6 +52,24 @@ pub(crate) fn tools() -> Vec<Value> {
                 "required": ["action"]
             }),
         ),
+        tool(
+            BOT_BOARD,
+            "Your board as a Bot: each task's status (up_next, working, in_review, complete), the chat working it, its folder and a short status note. `claim` a task for the chat doing it (it moves to working; refused when another chat holds it unless `takeOver`), `release` it when that chat stops, set its `status` (in_review while a PR or handoff waits on someone, complete when it's done), leave a `note` (1-3 short lines: what was done, what to look at), file it in a `folder`, or `list` the tasks (optionally one folder's).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "claim", "release", "status", "note", "folder"] },
+                    "taskId": s("The task's id (from tasks)."),
+                    "chatId": s("For claim: the chat working it."),
+                    "takeOver": { "type": "boolean" },
+                    "status": { "type": "string", "enum": ["up_next", "working", "in_review", "complete"] },
+                    "note": s("For note: 1-3 short lines."),
+                    "folder": s("For folder: its name; for list: only this folder."),
+                    "botId": s("Another Bot's id (its lead chat). Default: this chat.")
+                },
+                "required": ["action"]
+            }),
+        ),
     ]
 }
 
@@ -70,10 +89,10 @@ impl ThreadTools {
         {
             map.insert("botId".into(), json!(self.chat_id));
         }
-        let method = if method == BOT_MEMORY {
-            methods::BOT_MEMORY
-        } else {
-            methods::BOT_INBOX
+        let method = match method {
+            BOT_MEMORY => methods::BOT_MEMORY,
+            BOT_BOARD => methods::BOT_BOARD,
+            _ => methods::BOT_INBOX,
         };
         self.client
             .call(method, args)

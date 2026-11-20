@@ -15,7 +15,10 @@ const KINDS: [&str; 5] = ["approval", "decision", "review", "fyi", "other"];
 const URGENCIES: [&str; 3] = ["blocking", "important", "low"];
 
 pub fn handles(method: &str) -> bool {
-    matches!(method, methods::BOT_MEMORY | methods::BOT_INBOX)
+    matches!(
+        method,
+        methods::BOT_MEMORY | methods::BOT_INBOX | methods::BOT_BOARD
+    )
 }
 
 fn text<'a>(params: &'a Json, key: &str) -> Option<&'a str> {
@@ -255,11 +258,89 @@ fn inbox(data_dir: &Path, params: &Json) -> Result<Json, String> {
     }
 }
 
+const STATUSES: [&str; 4] = ["up_next", "working", "in_review", "complete"];
+
+/// A Bot's board over its tasks: each task's status (Up next, Working, In
+/// review, Complete), the chat working it, its folder and a short note,
+/// by task id. A task with no row reads Up next.
+fn board(data_dir: &Path, params: &Json) -> Result<Json, String> {
+    let path = bot_dir(data_dir, params)?.join("board.json");
+    let mut rows: serde_json::Map<String, Json> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let action = text(params, "action").unwrap_or("list");
+    if action == "list" {
+        let folder = text(params, "folder");
+        let tasks: Vec<Json> = rows
+            .iter()
+            .filter(|(_, r)| folder.is_none_or(|f| r["folder"] == f))
+            .map(|(id, r)| {
+                let mut r = r.clone();
+                r["taskId"] = json!(id);
+                r
+            })
+            .collect();
+        return Ok(json!({ "tasks": tasks }));
+    }
+    let task = text(params, "taskId")
+        .ok_or("`taskId`: the task's id")?
+        .to_owned();
+    let row = rows
+        .entry(task.clone())
+        .or_insert_with(|| json!({ "status": "up_next" }));
+    match action {
+        "claim" => {
+            let by = text(params, "chatId").ok_or("`chatId`: the chat taking the task")?;
+            if let Some(held) = row["claimedBy"].as_str().filter(|h| *h != by)
+                && !params
+                    .get("takeOver")
+                    .and_then(Json::as_bool)
+                    .unwrap_or(false)
+            {
+                return Err(format!(
+                    "{task} is claimed by {held}; pass takeOver to take it"
+                ));
+            }
+            row["claimedBy"] = json!(by);
+            if row["status"] == "up_next" {
+                row["status"] = json!("working");
+            }
+        }
+        "release" => {
+            if let Some(obj) = row.as_object_mut() {
+                obj.remove("claimedBy");
+            }
+        }
+        "status" => row["status"] = json!(one_of(params, "status", &STATUSES, "working")?),
+        "note" => row["note"] = json!(text(params, "note").unwrap_or("")),
+        "folder" => row["folder"] = json!(text(params, "folder").ok_or("`folder`: its name")?),
+        other => {
+            return Err(format!(
+                "`action` {other}: list, claim, release, status, note or folder"
+            ));
+        }
+    }
+    row["updatedAt"] = json!(now_ms());
+    let mut out = row.clone();
+    out["taskId"] = json!(task);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(&rows).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
 /// `method` with `params`, over the files in `data_dir`.
 pub fn answer(data_dir: &Path, method: &str, params: &Json) -> Result<Json, String> {
     match method {
         methods::BOT_MEMORY => memory(data_dir, params),
         methods::BOT_INBOX => inbox(data_dir, params),
+        methods::BOT_BOARD => board(data_dir, params),
         _ => Err(format!("{method}: not a Bot method")),
     }
 }
@@ -304,6 +385,31 @@ mod tests {
                 json!({ "botId": "../b", "action": "list" })
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn board_claims_once_and_moves_to_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let at = |p: Json| call(d, methods::BOT_BOARD, p);
+        let row =
+            at(json!({ "botId": "b", "action": "claim", "taskId": "t1", "chatId": "c1" })).unwrap();
+        assert_eq!(
+            (row["status"].as_str(), row["claimedBy"].as_str()),
+            (Some("working"), Some("c1"))
+        );
+        assert!(
+            at(json!({ "botId": "b", "action": "claim", "taskId": "t1", "chatId": "c2" })).is_err()
+        );
+        at(json!({ "botId": "b", "action": "status", "taskId": "t1", "status": "in_review" }))
+            .unwrap();
+        at(json!({ "botId": "b", "action": "folder", "taskId": "t1", "folder": "Zeron" })).unwrap();
+        let listed = at(json!({ "botId": "b", "folder": "Zeron" })).unwrap();
+        assert_eq!(listed["tasks"][0]["status"], "in_review");
+        assert!(
+            at(json!({ "botId": "b", "action": "status", "taskId": "t1", "status": "done" }))
+                .is_err()
         );
     }
 

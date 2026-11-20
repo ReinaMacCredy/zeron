@@ -176,6 +176,9 @@ pub mod methods {
     /// `{botId, action: list|create|update|close|resolve|snooze, ...}`: a
     /// Bot's Inbox cards for its owner.
     pub const BOT_INBOX: &str = "BotInbox";
+    /// `{botId, action: list|claim|release|status|note|folder, taskId, ...}`:
+    /// a Bot's board state for its tasks (status, claim, folder, note).
+    pub const BOT_BOARD: &str = "BotBoard";
     /// `{chatId, taskId}` → `{}`: a timed-out `mode: wait` hands the result
     /// back to the wake.
     pub const TASK_WAKE_ALWAYS: &str = "TaskWakeAlways";
