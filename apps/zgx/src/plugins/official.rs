@@ -484,7 +484,7 @@ mod tests {
         assert!(!missing(&ui(), &gone));
         std::fs::remove_dir_all(gone.join("zeron-v2")).unwrap();
         assert!(missing(&ui(), &gone));
-        assert_eq!(install(&ui(), &t), ["zeron-v2-3"]);
+        assert_eq!(install(&ui(), &t), ["zeron-v2-3", "zeron-bot"]);
         assert_eq!(std::fs::read_to_string(at.join("screens/extra.luau")).unwrap(), "-- an agent's");
     }
 

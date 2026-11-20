@@ -502,7 +502,7 @@ local function CardBody(): Node
 			gap = "$space.2",
 			items = "center",
 			ui.div { w = 8, h = 8, rounded = "$radius.full", bg = "$warning" },
-			ui.text { "Needs you", text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$warning" },
+			ui.text { if item.kind == "review" then "Review" else "Needs you", text_size = "$font.size.xs", weight = "$font.weight.medium", color = "$warning" },
 		},
 		ui.text { item.title or "", literal = true, wrap = true, text_size = "$font.size.lg", weight = "$font.weight.semibold", color = "$text.primary" },
 		ui.text { item.summary or "", literal = true, wrap = true, text_size = "$font.size.sm", color = "$text.secondary" },
