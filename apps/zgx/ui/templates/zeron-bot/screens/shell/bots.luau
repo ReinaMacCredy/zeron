@@ -7,6 +7,7 @@
 local ds = require("@ds")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
+local boundary = require("@app/screens/shell/boundary")
 
 local W = 264
 local NEEDS = { input = true, failed = true, approval = true, waiting = true }
@@ -111,6 +112,30 @@ local function status_line(c: any): (string, string)
 		return "Done", "$success"
 	end
 	return "Idle", "$text.tertiary"
+end
+
+local function new_id(): string
+	local function hex(n: number): string
+		local out = {}
+		for _ = 1, n do
+			table.insert(out, string.format("%x", math.random(0, 15)))
+		end
+		return table.concat(out)
+	end
+	return `{hex(8)}-{hex(4)}-4{hex(3)}-{string.format("%x", math.random(8, 11))}{hex(3)}-{hex(12)}`
+end
+
+-- A new Bot: a chat of its own, named, pinned (so it stays a Bot) and opened.
+local function create_bot()
+	local id = new_id()
+	local name = `Bot {#sessions.places:peek().pinned + 1}`
+	sessions.create({ id = id, title = name }):after(function()
+		local sidebar: any = boundary.load("@app/screens/shell/sidebar")
+		if sidebar and sidebar.pin then
+			sidebar.pin(id)
+		end
+		route.open_session(id)
+	end)
 end
 
 local function open(c: any)
@@ -307,9 +332,7 @@ local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 				rounded = "$radius.sm",
 				bg = "#00000000",
 				hover = { bg = "$hover" },
-				on_click = function()
-					route.new_chat(nil, nil)
-				end,
+				on_click = create_bot,
 				ui.text { "+", text_size = "$font.size.md", color = "$text.secondary" },
 			},
 		},
@@ -323,7 +346,7 @@ local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 				gap = 1,
 				pb = "$space.4",
 				ui.each(bot_list, BotRow),
-				Empty(bot_list, "No Bots yet. Press + and send a first message to start one."),
+				Empty(bot_list, "No Bots yet. Press + to make one."),
 				Heading("Needs you", function(): number
 					return #need_list:get()
 				end),
