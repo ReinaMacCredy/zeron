@@ -1195,6 +1195,24 @@ impl Client {
             .ok_or_else(|| ClientError::HostUnavailable("no host is online".into()))
     }
 
+    /// A Bot's files on `device_id`'s engine (`BotMemory`, `BotInbox`,
+    /// `BotBoard`, `BotSchedule`): its answer.
+    pub async fn bot_call(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let method = match method {
+            "BotMemory" => zeron_rpc::methods::BOT_MEMORY,
+            "BotInbox" => zeron_rpc::methods::BOT_INBOX,
+            "BotBoard" => zeron_rpc::methods::BOT_BOARD,
+            "BotSchedule" => zeron_rpc::methods::BOT_SCHEDULE,
+            other => return Err(ClientError::NotFound(other.to_owned())),
+        };
+        self.inner.host_rpc(device_id, method, params).await
+    }
+
     async fn mutate(&self, device_id: &str, params: serde_json::Value) -> Result<()> {
         self.inner
             .host_rpc(device_id, zeron_rpc::methods::MUTATE, params)
