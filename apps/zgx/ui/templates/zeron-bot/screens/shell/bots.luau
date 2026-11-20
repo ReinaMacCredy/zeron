@@ -125,17 +125,144 @@ local function new_id(): string
 	return `{hex(8)}-{hex(4)}-4{hex(3)}-{string.format("%x", math.random(8, 11))}{hex(3)}-{hex(12)}`
 end
 
--- A new Bot: a chat of its own, named, pinned (so it stays a Bot) and opened.
-local function create_bot()
+-- A new Bot: a chat of its own, named, pinned (so it stays a Bot) and
+-- opened; its goal, when it has one, its first message.
+local function create_bot(name: string?, goal: string?)
 	local id = new_id()
-	local name = `Bot {#sessions.places:peek().pinned + 1}`
-	sessions.create({ id = id, title = name }):after(function()
+	local title = if name and name ~= "" then name else `Bot {#sessions.places:peek().pinned + 1}`
+	sessions.create({ id = id, title = title }):after(function()
 		local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 		if sidebar and sidebar.pin then
 			sidebar.pin(id)
 		end
 		route.open_session(id)
+		if goal and goal ~= "" then
+			local store: any = require("@app/screens/chat/store")
+			store.send({ session = id, text = goal, fresh = true } :: any)
+		end
 	end)
+end
+
+-- The New Bot dialog: what it's for, from a template or in your words.
+local TEMPLATES = {
+	{ name = "Code Reaper", goal = "Find code nothing uses any more in my repositories and open a small pull request for each removal, with the evidence nothing depends on it." },
+	{ name = "Reviewer", goal = "Review the pull requests opened in my repositories and leave clear, actionable comments." },
+	{ name = "Release manager", goal = "Track what is ready to ship, draft release notes and tell me what blocks a release." },
+	{ name = "Custom Bot", goal = "" },
+}
+local new_open = ui.state("zeron_bot_new", false)
+local new_goal = ui.state("zeron_bot_new_goal", "")
+local new_name = ui.state("zeron_bot_new_name", "")
+
+local function NewBotBody(): Node
+	return ui.row {
+		w_full = true,
+		h = 420,
+		ui.column {
+			w = 240,
+			h_full = true,
+			shrink = 0,
+			p = "$space.4",
+			justify = "end",
+			bg = "alpha($accent, 0.12)",
+			ui.text { "Your custom Bot", text_size = "$font.size.lg", weight = "$font.weight.semibold", color = "$text.primary" },
+			ui.text { "A Bot keeps its memory, files what needs you and starts sessions for its work.", text_size = "$font.size.sm", color = "$text.secondary" },
+		},
+		ui.column {
+			grow = 1,
+			min_w = 0,
+			h_full = true,
+			p = "$space.4",
+			gap = "$space.2",
+			bg = "$background",
+			ui.text { "What's your goal?", text_size = "$font.size.lg", weight = "$font.weight.semibold", color = "$text.primary" },
+			ui.input {
+				label = "Goal",
+				placeholder = "Describe what this Bot should do",
+				placeholder_color = "$text.tertiary",
+				value = function(): string
+					return new_goal:get()
+				end,
+				on_change = function(v: string)
+					new_goal:set(v)
+				end,
+			},
+			ui.each(TEMPLATES, function(t: any): Node
+				return ui.button {
+					label = t.name,
+					w_full = true,
+					h = 44,
+					px = "$space.2",
+					gap = "$space.2",
+					items = "center",
+					justify = "start",
+					rounded = "$radius.md",
+					bg = function(): string
+						return if new_name:get() == t.name then "$zeron.selected.flat.bg" else "#00000000"
+					end,
+					hover = { bg = "$hover" },
+					on_click = function()
+						new_name:set(t.name)
+						if t.goal ~= "" then
+							new_goal:set(t.goal)
+						end
+					end,
+					ui.div { w = 24, h = 24, shrink = 0, rounded = "$radius.md", overflow = "hidden", ds.Avatar { seed = t.name, size = 24, label = t.name } },
+					ui.column {
+						grow = 1,
+						min_w = 0,
+						ui.text { t.name, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
+						ui.text { if t.goal ~= "" then t.goal else "Start from your own goal." , truncate = true, text_size = "$font.size.xs", color = "$text.tertiary" },
+					},
+				}
+			end),
+			ui.div { grow = 1 },
+			ui.row {
+				w_full = true,
+				justify = "end",
+				gap = "$space.2",
+				ui.button {
+					label = "Cancel",
+					h = 32,
+					px = "$space.3",
+					rounded = "$radius.md",
+					bg = "#00000000",
+					hover = { bg = "$hover" },
+					on_click = function()
+						new_open:set(false)
+					end,
+					ui.text { "Cancel", text_size = "$font.size.sm", color = "$text.secondary" },
+				},
+				ui.button {
+					label = "Continue",
+					h = 32,
+					px = "$space.3",
+					rounded = "$radius.md",
+					bg = "$accent",
+					on_click = function()
+						local name = new_name:peek()
+						create_bot(if name == "Custom Bot" then nil else name, new_goal:peek())
+						new_open:set(false)
+						new_goal:set("")
+						new_name:set("")
+					end,
+					ui.text { "Continue", text_size = "$font.size.sm", weight = "$font.weight.medium", color = "#FFFFFF" },
+				},
+			},
+		},
+	}
+end
+
+local function NewBot(): Node
+	return ui.modal {
+		open = new_open,
+		label = "New Bot",
+		w = 720,
+		p = 0,
+		gap = 0,
+		rounded = "$radius.xl",
+		build = NewBotBody,
+	}
 end
 
 local function open(c: any)
@@ -394,10 +521,13 @@ local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 				rounded = "$radius.sm",
 				bg = "#00000000",
 				hover = { bg = "$hover" },
-				on_click = create_bot,
+				on_click = function()
+					new_open:set(true)
+				end,
 				ui.text { "+", text_size = "$font.size.md", color = "$text.secondary" },
 			},
 		},
+		NewBot(),
 		ui.scroll {
 			w_full = true,
 			grow = 1,
