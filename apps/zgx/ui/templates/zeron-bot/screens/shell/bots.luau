@@ -249,6 +249,21 @@ local function Folder(f: any): Node
 	}
 end
 
+-- What a list says while it has nothing to show.
+local function Empty(list: any, say: string): Node
+	return ui.text {
+		say,
+		hidden = function(): boolean
+			return #list:get() > 0
+		end,
+		w_full = true,
+		px = "$space.2",
+		py = "$space.1",
+		text_size = "$font.size.sm",
+		color = "$text.tertiary",
+	}
+end
+
 local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 	local bot_list = ui.computed(bots)
 	local need_list = ui.computed(needs)
@@ -296,12 +311,15 @@ local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 				gap = 1,
 				pb = "$space.4",
 				ui.each(bot_list, BotRow),
+				Empty(bot_list, "No Bots yet. Pin a chat to make it a Bot, or press + to start one."),
 				Heading("Needs you", function(): number
 					return #need_list:get()
 				end),
 				ui.each(need_list, NeedRow),
+				Empty(need_list, "Nothing needs you."),
 				Heading("Sessions"),
 				ui.each(folder_list, Folder),
+				Empty(folder_list, "No sessions yet."),
 			},
 		},
 	}
