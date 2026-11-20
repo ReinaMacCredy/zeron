@@ -88,6 +88,7 @@ store.catalog:set({
 		{ value = "claude-code/sonnet-5", label = "Sonnet 5", harness = "claude-code" },
 		{ value = "codex/gpt-6.1", label = "GPT-6.1", harness = "codex" },
 		{ value = "codex/gpt-6.1-mini", label = "GPT-6.1 mini", harness = "codex" },
+		{ value = "codex/gpt-6.1-pro", label = "GPT-6.1 pro", harness = "codex", efforts = { { value = "low", label = "Low" }, { value = "medium", label = "Medium" }, { value = "high", label = "High" } } },
 	},
 } :: any)
 store.messages:set({
@@ -343,6 +344,9 @@ ui.command { id = "lane_find", title = "⌘F", run = function()
 end }
 ui.command { id = "lane_model", title = "⌘/", run = function()
 	note(`model:{Panel.model_in_lane()}`)
+end }
+ui.command { id = "lane_effort_up", title = "⌘=", run = function()
+	note(`effort:{Panel.effort_in_lane(1)}`)
 end }
 stub_store.retry = function(id: string, message: string)
 	note(`retry:{id}:{message}`)

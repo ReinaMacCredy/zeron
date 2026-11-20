@@ -524,8 +524,8 @@ return ui.component(function(props: Props): Node
 						at = i
 					end
 				end
-				local to = ls[math.clamp(at + s.by, 1, #ls)]
-				if at > 0 and to and to.value ~= slider_value:peek() then
+				local to = if at > 0 then ls[math.clamp(at + s.by, 1, #ls)] else nil
+				if to and to.value ~= slider_value:peek() then
 					stepping = true
 					set_level(to.value)
 					ui.after(0, function()

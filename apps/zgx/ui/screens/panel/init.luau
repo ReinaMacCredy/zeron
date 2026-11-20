@@ -137,6 +137,7 @@ type LaneModule = {
 	state: ((tab: any) -> string?)?,
 	open_find: ((tab: any) -> boolean)?,
 	open_model: ((tab: any) -> boolean)?,
+	step_effort: ((tab: any, by: number) -> boolean)?,
 }
 local Lanes: LaneModule? = nil
 local lanes_card: any = nil
@@ -484,22 +485,29 @@ function M.find_in_lane(): boolean
 	return if Lanes.open_find then Lanes.open_find(tab) else false
 end
 
--- The app's ⌘/, in a side chat with the keyboard: its own model picker: true;
--- else false, and the shell opens the chat page's.
-function M.model_in_lane(): boolean
+local function side_chat_with_keys(): any?
 	local k = shown_now()
 	if not k or not Lanes or focus_in ~= k then
-		return false
+		return nil
 	end
 	local s = state.of(k)
 	local tab = if s.active then state.find(k, s.active) else nil
 	if tab and tab.kind == "threads" and Threads then
 		tab = Threads.lane_of(tab)
 	end
-	if not tab or tab.kind ~= "side_chat" then
-		return false
-	end
-	return if Lanes.open_model then Lanes.open_model(tab) else false
+	return if tab and tab.kind == "side_chat" then tab else nil
+end
+
+-- The app's ⌘/, in a side chat with the keyboard: its own model picker: true;
+-- else false, and the shell opens the chat page's.
+function M.model_in_lane(): boolean
+	local tab = side_chat_with_keys()
+	return tab ~= nil and Lanes ~= nil and Lanes.open_model ~= nil and Lanes.open_model(tab)
+end
+
+function M.effort_in_lane(by: number): boolean
+	local tab = side_chat_with_keys()
+	return tab ~= nil and Lanes ~= nil and Lanes.step_effort ~= nil and Lanes.step_effort(tab, by)
 end
 
 -- Close the visible panel's active tab regardless of keyboard focus. The

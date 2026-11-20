@@ -38,6 +38,7 @@ local ContextMenu = require("@ds/context_menu")
 local SCRIPT = require("@app/screens/panel/annotate_script")
 local Builtins = require("@app/screens/plugins/builtins")
 local FIND_SCRIPT = require("@app/screens/panel/find_script")
+local boundary = require("@app/screens/shell/boundary")
 -- The composer's cargo (screens/chat/shared), if the chat page is here (a
 -- fixture mounts the panel alone).
 local shared: any = nil
@@ -216,8 +217,11 @@ local function zoom_command(id: string, title: string, key: string, by: number)
 				showing.zoom(by)
 				return true
 			end
-			if by ~= 0 and shared and shared.step_effort_by(by) then
-				return true
+			if by ~= 0 then
+				local panel: any = boundary.load("@app/screens/panel")
+				if (panel and panel.effort_in_lane and panel.effort_in_lane(by)) or (shared and shared.step_effort_by(by)) then
+					return true
+				end
 			end
 			zoom_window(by)
 			return true

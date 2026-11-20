@@ -235,6 +235,7 @@ end
 -- Each tab's find bar and model picker, by its slot, while it's made.
 local finders: { [string]: any } = {}
 local pickers: { [string]: State<number> } = {}
+local steppers: { [string]: State<{ n: number, by: number }> } = {}
 -- Each chat's composer field here, by its chat: where a passage mentioned from its transcript goes.
 local fields: { [string]: any } = {}
 
@@ -249,6 +250,15 @@ function M.open_model(tab: any): boolean
 		return false
 	end
 	picker:add(1)
+	return true
+end
+
+function M.step_effort(tab: any, by: number): boolean
+	local stepper = steppers[tab.id]
+	if not stepper then
+		return false
+	end
+	stepper:set({ n = stepper:peek().n + 1, by = by })
 	return true
 end
 
@@ -271,7 +281,7 @@ local function pills_reach(slot: string): State<number>
 	return ui.state(`chat_lane_pills_reach_{slot}`, 0)
 end
 
-local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, split: boolean?, focused: (() -> boolean)?, panel_key: string?, tab_id: string?, placeholder: string?): Node
+local function composer(chat: string, view: any, name: string, focus: State<number>, open_model: State<number>, step_effort: State<{ n: number, by: number }>, split: boolean?, focused: (() -> boolean)?, panel_key: string?, tab_id: string?, placeholder: string?): Node
 	local reach = pills_reach(tab_id or name)
 	local lifted = Dock.lift(tab_id or name)
 	-- (Its draft kept by the chat, as its picks: a switch of tabs or a
@@ -1097,6 +1107,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		model_retry = store.load_catalog,
 		model_close = close_picker,
 		open_model = open_model,
+		step_effort = step_effort,
 		context_tokens = function(): number?
 			local s: any = session:get()
 			return if s then s.context_tokens else nil
@@ -1401,6 +1412,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 	local focus = ui.use_state(0)
 	-- Bumped, its model picker opens (⌘/, /model), as the chat page's.
 	local open_model = ui.use_state(0)
+	local step_effort = ui.use_state({ n = 0, by = 0 })
 	-- ⌘F's own, over its own transcript.
 	local find = Find.bind(`chat.lane.{slot}.find`, view.messages, function(): boolean
 		return true
@@ -1408,10 +1420,10 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 		local s = view.session:get()
 		return if s and s.state ~= "missing" then s.id else nil
 	end)
-	finders[slot], pickers[slot] = find, open_model
+	finders[slot], pickers[slot], steppers[slot] = find, open_model, step_effort
 	ui.on_cleanup(function()
 		if finders[slot] == find then
-			finders[slot], pickers[slot] = nil, nil
+			finders[slot], pickers[slot], steppers[slot] = nil, nil, nil
 		end
 	end)
 	local zone, carrying, carrying_session = nil :: any, nil :: any, nil :: any
@@ -1774,7 +1786,7 @@ M.Tab = ui.component(function(props: { tab: any, panel_key: string? }): Node
 					hidden = function(): boolean
 						return split and focused_now()
 					end,
-					Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, split), composer(chat, view, `lane.{slot}`, focus, open_model, data.split == true, if split then focused_now else nil, props.panel_key, slot, tab.placeholder) }, id = `lane-composer-{slot}` },
+					Dock.Dock { height = dock_h, composer = ui.column { w_full = true, owners(chat, split), composer(chat, view, `lane.{slot}`, focus, open_model, step_effort, data.split == true, if split then focused_now else nil, props.panel_key, slot, tab.placeholder) }, id = `lane-composer-{slot}` },
 				},
 			}
 			if zone then
