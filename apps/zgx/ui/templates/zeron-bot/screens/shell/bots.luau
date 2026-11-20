@@ -1,8 +1,8 @@
 -- Zeron Bot's sidebar: the Bots first (each a lead chat: its avatar, its
 -- name, the last thing it said), then what needs you, then the sessions by
 -- folder, each with a status line. A Bot is a pinned chat, or, with none
--- pinned, a chat that has started others; folders are the sidebar's
--- sections.
+-- pinned, a chat that has started others, or else one of the latest chats;
+-- folders are the sidebar's sections.
 
 local ds = require("@ds")
 local sessions = require("@account/sessions")
@@ -33,6 +33,18 @@ local function bots(): { any }
 			if (c.side_chats or 0) > 0 or (c.running_subagents or 0) > 0 then
 				table.insert(out, c)
 			end
+		end
+	end
+	-- None yet: the latest chats stand in, so a first chat is a Bot at once.
+	if #out == 0 then
+		for _, c in sessions.now:get().chats do
+			table.insert(out, c)
+		end
+		table.sort(out, function(a: any, b: any): boolean
+			return (a.updated or 0) > (b.updated or 0)
+		end)
+		while #out > 5 do
+			table.remove(out)
 		end
 	end
 	return out
@@ -311,7 +323,7 @@ local function Sidebar(props: { collapsed: any?, [string]: any }): Node
 				gap = 1,
 				pb = "$space.4",
 				ui.each(bot_list, BotRow),
-				Empty(bot_list, "No Bots yet. Pin a chat to make it a Bot, or press + to start one."),
+				Empty(bot_list, "No Bots yet. Press + and send a first message to start one."),
 				Heading("Needs you", function(): number
 					return #need_list:get()
 				end),
