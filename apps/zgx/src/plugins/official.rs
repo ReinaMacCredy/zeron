@@ -52,8 +52,14 @@ pub struct Official {
 
 /// Every official template, in the order the Templates page lists them
 /// (after the default).
-pub const OFFICIAL: &[Official] =
-    &[Official { id: "zeron-v2", name: "Zeron v2", description: "The single-page layout from before Zeron v3." }];
+pub const OFFICIAL: &[Official] = &[
+    Official { id: "zeron-v2", name: "Zeron v2", description: "The single-page layout from before Zeron v3." },
+    Official {
+        id: "zeron-bot",
+        name: "Zeron Bot",
+        description: "Bots first: your Bots, what needs you, and sessions by folder.",
+    },
+];
 
 /// The default template's name and description (its id is `live::BUILTIN`).
 pub const DEFAULT_NAME: &str = "Zeron v3";
@@ -389,6 +395,45 @@ mod tests {
         let page = std::fs::read_to_string(ui().join("screens/shell/page.luau")).unwrap();
         assert!(page.contains("@app/screens/shell/split"), "v3's page lays out split chats");
         assert!(ui().join("screens/shell/split.luau").is_file());
+    }
+
+    const BOT: Official = OFFICIAL[1];
+
+    /// Zeron Bot's staleness guard, as v2's: the default files it lays a copy
+    /// over, hashed as they were when it was last brought in step. Record it
+    /// with `ZERON_BOT_BLESS=1 cargo test --bin zeron-zgx zeron_bot_is_in_step`.
+    #[test]
+    fn zeron_bot_is_in_step_with_the_default() {
+        let src = source(&ui(), &BOT);
+        let base_path = src.join(BASE);
+        let base: BTreeMap<String, String> = serde_json::from_slice(&std::fs::read(&base_path).unwrap_or_default()).unwrap_or_default();
+        let now: BTreeMap<String, String> = live::files(&src, |_| true)
+            .into_keys()
+            .map(|rel| {
+                let bytes = std::fs::read(ui().join(&rel)).unwrap_or_default();
+                let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+                (rel, live::hash(text.as_bytes()))
+            })
+            .collect();
+        if std::env::var_os("ZERON_BOT_BLESS").is_some() {
+            let mut json = serde_json::to_vec_pretty(&now).unwrap();
+            json.push(b'\n');
+            std::fs::write(&base_path, json).unwrap();
+            return;
+        }
+        assert_eq!(base, now, "The default changed under Zeron Bot's copies (ui/templates/zeron-bot/); bring it over, then ZERON_BOT_BLESS=1");
+    }
+
+    /// Zeron Bot swaps the sessions sidebar for the Bots one and keeps the rest.
+    #[test]
+    fn zeron_bot_mounts_the_bots_sidebar() {
+        let files: Vec<String> = live::files(&source(&ui(), &BOT), |_| true).into_keys().collect();
+        assert_eq!(files, ["screens/shell/bots.luau", "screens/shell/init.luau"], "Zeron Bot's files");
+        let shell = std::fs::read_to_string(source(&ui(), &BOT).join("screens/shell/init.luau")).unwrap();
+        assert!(shell.contains("\"@app/screens/shell/bots\""));
+        for rel in &files {
+            assert!(!live::never_templated(rel), "{rel}");
+        }
     }
 
     #[test]
