@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn zeron_bot_mounts_the_bots_sidebar() {
         let files: Vec<String> = live::files(&source(&ui(), &BOT), |_| true).into_keys().collect();
-        assert_eq!(files, ["screens/shell/bots.luau", "screens/shell/init.luau", "theme.luau"], "Zeron Bot's files");
+        assert_eq!(files, ["ds/tokens.luau", "screens/shell/bots.luau", "screens/shell/init.luau", "theme.luau"], "Zeron Bot's files");
         let shell = std::fs::read_to_string(source(&ui(), &BOT).join("screens/shell/init.luau")).unwrap();
         assert!(shell.contains("\"@app/screens/shell/bots\""));
         for rel in &files {
