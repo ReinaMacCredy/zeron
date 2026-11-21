@@ -6,6 +6,7 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local store = require("@app/screens/bots/store")
 local avatar = require("@app/screens/bots/avatar")
+local create = require("@app/screens/bots/create")
 
 local M = {}
 
@@ -792,7 +793,7 @@ local function Header(): Node
 end
 
 M.create = function()
-	store.gallery()
+	create.open("panel")
 end
 
 for i = 1, 9 do
@@ -886,6 +887,7 @@ M.Panel = ui.component(function(): Node
 			},
 		},
 		EditDialog(),
+		create.Dialog { from = "panel" },
 	}
 end)
 

@@ -41,6 +41,9 @@ M.host = {
 	delete = function(args: any): any
 		return call("bots.delete", args)
 	end,
+	image = function(args: any): any
+		return call("bots.image", args)
+	end,
 }
 
 local function all(): { Bot }
@@ -145,6 +148,16 @@ function M.go(bot: Bot)
 		M.host.update { id = bot.id, unread = false }
 	end
 	route.open_session(bot.chat)
+end
+
+-- A Bot just made, by its chat (its row may not have arrived yet).
+function M.go_chat(chat: string)
+	route.open_session(chat)
+end
+
+-- The image at `path` as an avatar's: a promise of its data URL.
+function M.image(path: string): any
+	return M.host.image { path = path }
 end
 
 function M.gallery()
