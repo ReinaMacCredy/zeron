@@ -1,5 +1,3 @@
--- The shell fixture with a stub Bot host that edits `bots.list` and records `bots_calls`.
-
 local node = require("./shell_fixture")
 local store = require("@app/screens/bots/store")
 
@@ -109,7 +107,6 @@ store.host.create = function(args: any): any
 	local id, chat = `n{made}`, `c{made}`
 	local a = args.avatar or {}
 	note(`create:{args.name}:{tostring(args.template)}:{tostring(a.glyph)}/{tostring(a.frame)}/{tostring(a.color)}/{if a.image then "image" else "none"}`)
-	-- (Newest first among the ones not pinned, as the engine lists them.)
 	table.insert(bots, 1, bot(id, args.name, chat, { avatar = a }))
 	publish()
 	return done({ id = id, chat = chat })

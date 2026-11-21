@@ -2015,7 +2015,6 @@ ui.command {
 		seed()
 	end,
 }
--- A chat with nothing said in it yet (a new Bot's: ui/bots_chat_fixture.luau), opened.
 ui.command {
 	id = "go_empty",
 	title = "A chat with nothing said yet",

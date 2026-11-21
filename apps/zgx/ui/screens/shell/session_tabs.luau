@@ -544,7 +544,6 @@ end
 
 local function title(id: string): string
 	local c = chat_of(face(id))
-	-- (A Bot's chat is named for its Bot.)
 	local bot = if c then bots.of_chat(c.id) else nil
 	return if bot then bot.name elseif c then c.title else ""
 end

@@ -43,7 +43,6 @@ local function Tab(props: { id: string, word: string, count: () -> number, on: (
 	}
 end
 
--- A card of the grid: its box, and the fill that eases in under the pointer.
 local Card = ui.component(function(props: { id: string, label: any, on_click: () -> (), build: () -> { any } }): Node
 	local over = ui.use_state(false)
 	local out: { [any]: any } = {
@@ -149,7 +148,6 @@ M.Page = ui.component(function(): Node
 		end
 		return out
 	end
-	-- Rows of three; the last From you row ends in the Create Bot card.
 	local rows = ui.computed(function(): { { any } }
 		local archived = tab:get() == "archived"
 		store.list:get()

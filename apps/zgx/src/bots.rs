@@ -1,5 +1,3 @@
-//! The engine's Bots (`WatchBots`, `Mutate` Bot ops) as `bots.list` and the `bots.*` actions ui/screens/bots reads and calls.
-
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -26,7 +24,6 @@ thread_local! {
     static BOTS: Rc<Bots> = Rc::new(Bots::default());
 }
 
-/// A Bot as scripts read it.
 fn shaped(bot: &Json) -> Json {
     json!({
         "id": bot["id"],
@@ -95,7 +92,6 @@ fn json_of(value: Option<&Value>) -> Json {
         .unwrap_or(Json::Null)
 }
 
-/// The avatar a script names: its glyph, frame and colour, or its image.
 fn avatar_of(args: &Value) -> Option<Json> {
     let avatar = json_of(args.field("avatar"));
     avatar.is_object().then(|| {
@@ -115,7 +111,6 @@ async fn mutate(params: Json) -> Result<Value, String> {
         .map(|_| Value::Nil)
 }
 
-/// A patch of the Bot's own marks: `pinned`, `archived`, `unread`, as the call names them.
 fn marks_of(args: &Value) -> Json {
     let mut patch = json!({});
     for key in ["pinned", "archived", "unread"] {
@@ -126,13 +121,10 @@ fn marks_of(args: &Value) -> Json {
     patch
 }
 
-/// The largest image file an avatar is made from.
 const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// The avatar's screen, which shows through an image's clear parts.
 const SCREEN: [u8; 3] = [0x11, 0x11, 0x11];
 
-/// The image at `path` as a Bot's avatar: its middle square, made the largest
-/// and sharpest JPEG data URL that syncs (`BotAvatar::MAX_IMAGE_BYTES`).
 fn avatar_image(path: &str) -> Result<String, String> {
     use base64::Engine as _;
     if !std::path::Path::new(path).is_absolute() {
@@ -209,8 +201,6 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             }));
         });
     }
-    // An image the person chose as an avatar (`path`): a data URL small
-    // enough to sync, or why not (`too_large`, `invalid`, `not_found`).
     host.async_action("bots.image", |args| async move {
         let path = args.field("path").map(text).unwrap_or_default();
         let (tx, mut rx) = zgx::task::latest();
@@ -222,9 +212,6 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             .ok_or("failed")?
             .map(|url| Value::from(url.as_str()))
     });
-    // A Bot and its chat: `name`, `avatar`, `template`, `instructions`, the
-    // composer's `picks` (its agent, model, effort and access) and where its
-    // chat works (`project`, `device`). Answers `{ id, chat }`.
     host.async_action("bots.create", |args| async move {
         crate::plugins::preview::refuse("bots.create")?;
         let field = |key: &str| args.field(key).map(text).filter(|s| !s.is_empty());
@@ -253,7 +240,6 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         mutate(params).await?;
         Ok(Value::from_json(&json!({ "id": id, "chat": chat }).to_string()).unwrap_or(Value::Nil))
     });
-    // Its name and avatar (what the person edits), and its marks.
     let a = t.clone();
     host.async_action("bots.update", move |args| {
         let a = a.clone();

@@ -1775,8 +1775,6 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.update_bot(bot_id, patch, Utc::now()))?)
     }
 
-    /// The Bot's row flagged deleted and its chat's row tombstoned, in one
-    /// write; its chat's id, for the caller to tear its run down.
     pub fn delete_bot(&self, bot_id: &str) -> Result<Option<String>, EngineError> {
         Ok(self.mutate(|doc| doc.delete_bot(bot_id, Utc::now()))?)
     }

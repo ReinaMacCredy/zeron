@@ -47,9 +47,7 @@ pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
-/// Bots (a named agent and its chat); see `bots`.
 pub const KIND_BOTS: &str = "bots";
-/// A Bot's uploaded avatar image, in a row of its own under the Bot's id.
 pub const KIND_BOT_AVATARS: &str = "botAvatars";
 mod bots;
 mod plans;

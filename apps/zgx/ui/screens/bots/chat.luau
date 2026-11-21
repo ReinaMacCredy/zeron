@@ -1,7 +1,3 @@
--- A Bot's chat, over Zeron's ordinary transcript: its avatar and name
--- above the conversation (the name opens the Bot's menu), and what opens
--- the conversation: its greeting and what it offers to do first.
-
 local ds = require("@ds")
 local Menu = require("@app/screens/bots/menu")
 local panel = require("@app/screens/bots/panel")
@@ -13,7 +9,6 @@ local M = {}
 
 M.HEAD_H = 112
 
--- The Bot whose chat `chat` is (nil: an ordinary chat).
 function M.of(chat: string?): store.Bot?
 	return store.of_chat(chat)
 end
@@ -96,8 +91,6 @@ M.Header = ui.component(function(props: { bot: () -> store.Bot? }): Node
 	}
 end)
 
--- What opens the conversation: "Hi, I'm <name>.", the template's two lines,
--- then what it offers; once the person has answered, one line saying so.
 M.Lead = ui.component(function(props: { bot: () -> store.Bot?, answered: () -> boolean, on_pick: (title: string) -> () }): Node
 	local function name(): string
 		local b = props.bot()

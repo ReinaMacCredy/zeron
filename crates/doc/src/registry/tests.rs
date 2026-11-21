@@ -4163,7 +4163,6 @@ fn a_bot_is_created_edited_archived_and_deleted_with_its_chat_across_devices() {
     assert!(!synced.pinned && !synced.archived && !synced.unread);
     assert!(b.chat("bot-chat").unwrap().is_some(), "its chat came with it");
 
-    // A rename on one device and a pin and an unread mark on the other all land.
     let mut draft: zeron_proto::AgentProfileDraft =
         serde_json::from_value(json!({ "name": "Release keeper", "harness": "mock", "model": "mock-1", "instructions": "Keep the build green." })).unwrap();
     let rename = zeron_proto::BotPatch { profile: Some(draft.clone()), ..Default::default() };
@@ -4177,13 +4176,11 @@ fn a_bot_is_created_edited_archived_and_deleted_with_its_chat_across_devices() {
     assert_eq!(merged.profile.name, "Release keeper");
     assert!(merged.pinned && merged.unread);
     assert_eq!(merged.profile.instructions, "Keep the build green.", "what the edit left alone stays");
-    // (An edit that changes nothing writes nothing.)
     let pending = a.pending_len();
     draft.name = "Release keeper".into();
     a.update_bot("b1", &zeron_proto::BotPatch { profile: Some(draft), pinned: Some(true), ..Default::default() }, ts(5_002)).unwrap();
     assert_eq!(a.pending_len(), pending);
 
-    // Archived: the Bot and its chat both stay.
     let archive = zeron_proto::BotPatch { archived: Some(true), ..Default::default() };
     assert!(a.update_bot("b1", &archive, ts(6_000)).unwrap());
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
@@ -4194,7 +4191,6 @@ fn a_bot_is_created_edited_archived_and_deleted_with_its_chat_across_devices() {
     let restarted = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "a").unwrap();
     assert_eq!(restarted.bot("b1"), a.bot("b1"));
 
-    // Deleted: the Bot goes, its chat with it, and a retried create revives neither.
     assert_eq!(a.delete_bot("b1", ts(10_000)).unwrap().as_deref(), Some("bot-chat"));
     assert!(a.bot("b1").is_none());
     assert!(a.read_bots().unwrap().is_empty());
@@ -4221,13 +4217,11 @@ fn pinned_bots_come_first_in_the_order_they_were_pinned_and_the_rest_newest_firs
     doc.update_bot("b1", &pin, ts(3_002)).unwrap();
     assert_eq!(bot_ids(&doc), ["b2", "b4", "b1", "b3"], "pinned: in the order they were pinned");
 
-    // Moved: b1 between b2 and b4, by an order key between theirs.
     let key = |doc: &RegistryDoc, id: &str| doc.bot(id).unwrap().order_key;
     let between = zeron_proto::pin_order_key_between(Some(&key(&doc, "b2")), Some(&key(&doc, "b4")), &hlc(4_000)).unwrap();
     doc.update_bot("b1", &zeron_proto::BotPatch { order_key: Some(between), ..Default::default() }, ts(4_000)).unwrap();
     assert_eq!(bot_ids(&doc), ["b2", "b1", "b4", "b3"]);
 
-    // Unpinned: back among the rest by its age; pinned again: last of the pinned.
     let unpin = zeron_proto::BotPatch { pinned: Some(false), ..Default::default() };
     doc.update_bot("b2", &unpin, ts(5_000)).unwrap();
     assert_eq!(bot_ids(&doc), ["b1", "b4", "b3", "b2"]);
@@ -4236,7 +4230,6 @@ fn pinned_bots_come_first_in_the_order_they_were_pinned_and_the_rest_newest_firs
     let bad = zeron_proto::BotPatch { order_key: Some("not a key".into()), ..Default::default() };
     assert!(doc.update_bot("b2", &bad, ts(5_002)).is_err());
 
-    // A Bot made pinned takes the last pinned place too.
     let mut born = bot("b5", "b5", "chat-b5", 6_000);
     born.pinned = true;
     doc.create_bot(&born).unwrap();
@@ -4252,7 +4245,6 @@ fn a_bots_image_travels_in_a_row_of_its_own_and_what_cannot_sync_is_refused() {
     let image = format!("data:image/png;base64,{}", "A".repeat(9_000));
     let mut pictured = bot("b1", "Pictured", "chat-1", 2_000);
     pictured.avatar.image = Some(image.clone());
-    // Instructions near the row's budget and an image near its own both fit: two rows.
     pictured.profile.instructions = "x".repeat(12_000);
     assert!(a.create_bot(&pictured).unwrap());
     server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
@@ -4262,7 +4254,6 @@ fn a_bots_image_travels_in_a_row_of_its_own_and_what_cannot_sync_is_refused() {
         assert!(fits_op_budget(&row_to_seed_op(&row)), "{} would not re-seed", row.kind);
     }
 
-    // Back to a glyph: the image goes on every device.
     let glyph = zeron_proto::BotAvatar { glyph: "shield".into(), frame: "circle".into(), color: "amber".into(), image: None };
     b.update_bot("b1", &zeron_proto::BotPatch { avatar: Some(glyph.clone()), ..Default::default() }, ts(3_000)).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);

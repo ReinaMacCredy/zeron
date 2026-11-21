@@ -294,7 +294,6 @@ pub mod methods {
     pub const WATCH_SPACES: &str = "WatchSpaces";
     pub const WATCH_TASKS: &str = "WatchTasks";
     pub const WATCH_TASK_STEPS: &str = "WatchTaskSteps";
-    /// The Bots there are (a named agent and its chat), pinned ones first.
     pub const WATCH_BOTS: &str = "WatchBots";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
     /// Params are tagged `{op: createChat|createSpace|renameSpace|setSpaceIcon|

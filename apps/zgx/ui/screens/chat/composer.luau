@@ -18,6 +18,7 @@
 
 local ds = require("@ds")
 local FolderChip = require("@app/screens/chat/folder_chip")
+local Card = require("@app/screens/chat/card")
 local Bots = require("@app/screens/bots/store")
 local Draft = require("@ds/draft_text")
 local Dictation = require("@app/screens/chat/dictation")
@@ -1431,7 +1432,6 @@ local function Composer(): Node
 			end)
 		return false
 	end
-	-- Words said from outside (shared's `say`): sent as typed ones are, a draft under way kept.
 	local said_n = shared.said:peek().n
 	ui.effect(function()
 		local said = shared.said:get()
@@ -1521,8 +1521,6 @@ local function Composer(): Node
 			add.open()
 		end
 	end
-	-- The folder it works in: the open chat's project (else its own
-	-- folder), a new chat's chosen one.
 	local function folder(): FolderChip.Folder
 		local s: any = open()
 		local now = sessions.now:get()
@@ -2550,7 +2548,7 @@ local function Composer(): Node
 			absolute = true,
 			pointer_events = "none",
 			left = 0,
-			right = 0,
+			right = Card.shift,
 			-- On a new chat by its top, from the page's middle: it moves with
 			-- the page as the page lays out, and what's written grows it down.
 			-- Docked, by its foot.

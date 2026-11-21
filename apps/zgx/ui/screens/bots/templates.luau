@@ -1,5 +1,3 @@
--- What a new Bot can start from: a blank one, or a template with its look,
--- its greeting and what it offers to do first.
 local M = {}
 
 export type Pick = { icon: string, title: string, line: string }
@@ -33,8 +31,6 @@ local function t(id: string, glyph: string, color: string, picks: { string }): T
 	}
 end
 
--- (Names, tags and lines are message keys: the list reads in the app's
--- language.)
 M.LIST = {
 	t("scratch", "bot", "violet", { "target", "list", "pen" }),
 	t("releases", "target", "cyan", { "list", "git-merge", "document" }),

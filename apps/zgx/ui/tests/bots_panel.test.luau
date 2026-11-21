@@ -1,5 +1,3 @@
--- The Bots panel on ui/bots_fixture.luau: what it lists, where its rows lead, what its menu asks the host.
-
 local function open(): any
 	local app = mount("bots_fixture.luau")
 	app:resize(1200, 800)

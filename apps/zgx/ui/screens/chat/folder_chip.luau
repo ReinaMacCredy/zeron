@@ -1,9 +1,3 @@
--- Where a chat works, as one chip under the composer: a folder and its
--- name, opening "Working directory" (the folder with its path, and Add
--- folder…). ds/composer's `place`:
---
---   place = FolderChip.place { folder = function() return { name = …, path = … } end, on_add = add }
-
 local ds = require("@ds")
 local Icon = require("@ds/icon")
 local FadeText = require("@ds/fade_text")
@@ -13,7 +7,6 @@ local M = {}
 
 export type Folder = { name: string?, path: string? }
 
--- The path as the person reads it: their home as "~".
 function M.short(path: string?, home: string?): string
 	if not path then
 		return ""

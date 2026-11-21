@@ -227,12 +227,9 @@ type PopupProps = {
 	items: () -> { Entry },
 }
 
--- The menu stays up CLOSE_MS after it is told to close, fading out, as the
--- mockup's does; it takes no pointer while it leaves.
 M.Popup = ui.component(function(props: PopupProps): Node
 	local open = props.open
 	local held = ui.use_state(false)
-	-- (Fading out: told to close, the overlay still up.)
 	local leaving = false
 	Menu.hold_while(open)
 	ui.effect(function()

@@ -1,6 +1,3 @@
-//! Bots: a named agent and its one long-lived chat (`zeron_doc`'s `bots` rows).
-//! The person makes and changes them; an agent can't (its gate refuses the ops).
-
 use zeron_proto::{AgentProfile, AgentProfileDraft, Bot, BotAvatar, BotPatch, ChatConfig};
 use zeron_rpc::RpcError;
 
@@ -8,7 +5,6 @@ use super::EngineRpc;
 use super::tasks::failed;
 use crate::agent_profiles::normalize_draft;
 
-/// How a Bot works, as a profile draft: what its chat's config says.
 fn draft_of(name: String, config: &ChatConfig) -> AgentProfileDraft {
     AgentProfileDraft {
         name,
@@ -24,7 +20,6 @@ fn draft_of(name: String, config: &ChatConfig) -> AgentProfileDraft {
 }
 
 impl EngineRpc {
-    /// The Bot and its chat, made together: the chat runs as the Bot's profile.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn create_bot(
         &self,
@@ -95,7 +90,6 @@ impl EngineRpc {
         }
     }
 
-    /// The change, and for one to how it works, its chat's config after it.
     pub(super) fn update_bot(&self, bot_id: &str, mut patch: BotPatch) -> Result<(), RpcError> {
         if let Some(draft) = patch.profile.take() {
             patch.profile = Some(normalize_draft(draft).map_err(failed)?);
@@ -140,7 +134,6 @@ impl EngineRpc {
         Ok(())
     }
 
-    /// The Bot, and its chat with it (its runs and pages torn down as a deleted chat's are).
     pub(super) fn delete_bot(&self, bot_id: &str) -> Result<(), RpcError> {
         let Some(bot) = self.workspace.bot(bot_id) else {
             return Ok(());
@@ -212,19 +205,16 @@ mod tests {
             ("rocket", Some("qa"))
         );
         assert!(!made.pinned && !made.archived && !made.unread);
-        // Its chat came with it, running as the Bot does.
         let chat = core.workspace.chat("c1").unwrap().expect("the Bot's chat");
         let config = chat.config.unwrap();
         assert_eq!(config.instructions, "Keep the build green.");
         assert_eq!(config.access, zeron_proto::AccessMode::Supervised);
-        // (Made again, as a retry is: one Bot, one chat.)
         rpc.handle(methods::MUTATE, create(&core, "b1", "c1-again", "Retried"))
             .await
             .unwrap();
         assert_eq!(ids(&core.workspace.read_bots().unwrap()), ["b1"]);
         assert!(core.workspace.chat("c1-again").unwrap().is_none());
 
-        // An edit to how it works reaches its chat's config; marks and pins are the Bot's alone.
         rpc.handle(
             methods::MUTATE,
             json!({"op":"updateBot", "botId":"b1", "patch":{"pinned":true, "unread":true,
@@ -239,7 +229,6 @@ mod tests {
         assert_eq!(config.instructions, "Ship on Fridays.");
         assert_eq!(config.access, zeron_proto::AccessMode::FullAccess);
 
-        // Pinned ones lead in the order they were pinned; the rest are newest first.
         for (bot, chat) in [("b2", "c2"), ("b3", "c3"), ("b4", "c4")] {
             // (A millisecond apart, so "newest first" has an order to keep.)
             tokio::time::sleep(std::time::Duration::from_millis(3)).await;
@@ -268,7 +257,6 @@ mod tests {
             ["b3", "b4", "b2", "b1"]
         );
 
-        // Archived: the Bot and its chat stay.
         rpc.handle(
             methods::MUTATE,
             json!({"op":"updateBot", "botId":"b1", "patch":{"archived":true}}),
@@ -278,7 +266,6 @@ mod tests {
         assert!(core.workspace.bot("b1").unwrap().archived);
         assert!(core.workspace.chat("c1").unwrap().is_some());
 
-        // Deleted: the Bot goes and its chat with it; the others keep theirs.
         rpc.handle(methods::MUTATE, json!({"op":"deleteBot", "botId":"b1"}))
             .await
             .unwrap();
@@ -330,7 +317,6 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
-    /// Bots are the person's: an agent's own tools can't make, change or delete one.
     #[tokio::test]
     async fn an_agent_cannot_make_change_or_delete_a_bot() {
         let (_temp, core) = core().await;
