@@ -1,0 +1,86 @@
+-- A Bot's chat on ui/bots_chat_fixture.luau: what stands over and opens its conversation, and the folder chip every chat's composer has.
+
+local function settle(app: any)
+	app:frames(40)
+end
+local function open(command: string): any
+	local app = mount("bots_chat_fixture.luau")
+	app:resize(1000, 760)
+	app:command(command)
+	settle(app)
+	return app
+end
+
+test("a new Bot's chat opens with its greeting and offers; one picked goes as the person's message and the card folds to a line", function()
+	local app = open("go_empty")
+	expect(app:tree("#bot-chat-head")).to_contain('#bot-chat-pill button "Flake hunter"')
+	local lead = app:tree("#bot-chat-lead")
+	expect(lead).to_contain("Hi, I'm Flake hunter.")
+	expect(lead).to_contain('heading "Put your Flake hunter to work"')
+	expect(lead).to_contain('#bot-chat-pick-3 button "Speed up the slowest tests"')
+	-- No Mission in a Bot's chat, though its agent offers one.
+	expect(app:has("#composer-mission")).to_be(false)
+	app:click("#bot-chat-pick-1")
+	settle(app)
+	local _, sent = string.gsub(app:state("calls") :: string, "send:e1:Find flaky tests", "")
+	expect(sent).to_be(1)
+	expect(app:has("#bot-chat-card")).to_be(false)
+	expect(app:tree("#bot-chat-answered")).to_contain("Answered in the chat")
+	expect(app:error()).to_be(nil)
+end)
+
+test("typed words fold the card as a pick does", function()
+	local app = open("go_empty")
+	app:type('role:textbox "Message"', "Look at the upload test")
+	app:key("Enter")
+	settle(app)
+	expect(app:state("calls")).to_contain("send:e1:Look at the upload test")
+	expect(app:has("#bot-chat-card")).to_be(false)
+	expect(app:has("#bot-chat-answered")).to_be(true)
+end)
+
+test("a pick goes alone, and a draft under way outlasts it", function()
+	local other = open("go_empty")
+	other:type('role:textbox "Message"', "half a thought")
+	other:click("#bot-chat-pick-2")
+	settle(other)
+	expect(other:state("calls")).to_contain("send:e1:Cover an untested module")
+	expect(other:state("calls")).never.to_contain("half a thought")
+	expect(other:tree('role:textbox "Message"')).to_contain("half a thought")
+end)
+
+test("the Bot's name opens its menu and says how many of its chats wait on the person", function()
+	local app = open("go_s2")
+	-- A conversation under way: the line, not the card.
+	expect(app:has("#bot-chat-answered")).to_be(true)
+	expect(app:has("#bot-chat-needs")).to_be(false)
+	app:command("bot_asks")
+	settle(app)
+	expect(app:tree("#bot-chat-needs")).to_contain("1 needs you")
+	app:click("#bot-chat-pill")
+	settle(app)
+	expect(app:has('role:menuitem "Pin to top"')).to_be(true)
+	expect(app:has('role:menuitem "Delete"')).to_be(true)
+	-- An archived Bot's way back.
+	expect(app:has('role:menuitem "Unarchive"')).to_be(true)
+	expect(app:has('role:menuitem "Archive"')).to_be(false)
+end)
+
+test("any chat's footer is one folder chip, opening Working directory: the folder, its path, and Add folder", function()
+	local app = open("go_s1")
+	-- An ordinary chat: no Bot over it, Mission where it is offered.
+	expect(app:has("#bot-chat-head")).to_be(false)
+	app:command("offer_missions")
+	settle(app)
+	expect(app:has("#composer-mission")).to_be(true)
+	expect(app:text("#composer-folder[1]")).to_be("Atlas")
+	app:click("#composer-folder-glyph")
+	settle(app)
+	local panel = app:tree("#composer-folder-menu")
+	expect(panel).to_contain("Working directory")
+	expect(panel).to_contain('#composer-folder-current menuitem "Atlas"')
+	expect(panel).to_contain('#composer-folder-path "/tmp/atlas"')
+	expect(panel).to_contain('#composer-folder-add button "Add folder…"')
+	-- A chat can't move: nothing else to choose there.
+	expect(panel).never.to_contain("Work in")
+end)

@@ -232,6 +232,8 @@ type PopupProps = {
 M.Popup = ui.component(function(props: PopupProps): Node
 	local open = props.open
 	local held = ui.use_state(false)
+	-- (Fading out: told to close, the overlay still up.)
+	local leaving = false
 	Menu.hold_while(open)
 	ui.effect(function()
 		if open:get() then
@@ -243,7 +245,9 @@ M.Popup = ui.component(function(props: PopupProps): Node
 			held:set(false)
 			return
 		end
+		leaving = held:peek()
 		ui.after(ms, function()
+			leaving = false
 			if not open:peek() then
 				held:set(false)
 			end
@@ -253,6 +257,9 @@ M.Popup = ui.component(function(props: PopupProps): Node
 	ui.effect(function()
 		if not held:get() and open:peek() then
 			open:set(false)
+		elseif held:get() and not open:peek() and not leaving then
+			-- (Opened by the overlay itself: a press on its anchor after Escape closed it.)
+			open:set(true)
 		end
 	end)
 	return ui.menu(panel {
