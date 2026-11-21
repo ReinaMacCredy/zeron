@@ -78,6 +78,7 @@ mod relaunch;
 mod session_home;
 mod sessions;
 mod tasks;
+mod bots;
 mod threads;
 mod settings;
 mod playbooks;
@@ -910,6 +911,7 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         agent_profiles::install(cx, &host);
         // Tasks, the Inbox page and quick capture (src/tasks.rs).
         tasks::install(cx, &host);
+        bots::install(cx, &host);
         threads::install(cx, &host);
         // Holding to dictate, and Settings → Voice (src/dictation.rs).
         dictation::install(cx, &host);

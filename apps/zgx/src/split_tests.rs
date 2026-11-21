@@ -142,12 +142,11 @@ fn a_chat_dragged_to_a_chat_s_edge_sits_beside_it_and_is_focused() {
     split_right(&mut app, "Tidy the tests");
     assert_eq!(panes(&mut app), 2, "{}", app.tree());
     // The page's card stands over the focused chat, the one dropped: the
-    // right half of what the chat had alone with its Live state column, which
-    // a split has none of, the window's gap between.
+    // right half of what the chat had alone, the window's gap between.
     let page = app.bounds("shell-page");
-    let (gap, column) = (4., 260.);
-    assert!(near(page.width, (alone.width + column - gap) / 2.), "{page:?} in {alone:?}");
-    assert!(near(page.x + page.width, alone.x + alone.width + column), "{page:?} in {alone:?}");
+    let gap = 4.;
+    assert!(near(page.width, (alone.width - gap) / 2.), "{page:?} in {alone:?}");
+    assert!(near(page.x + page.width, alone.x + alone.width), "{page:?} in {alone:?}");
     assert!(near(page.height, alone.height));
 }
 

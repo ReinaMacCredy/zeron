@@ -177,6 +177,7 @@ export type Props = {
 	measure: (number | () -> number)?,
 	-- Its rows' inset each side, in points; by default the theme's.
 	side: number?,
+	lead: (() -> Node)?,
 	-- How far over what floats at its foot its fade starts. (A fade's first fifth
 	-- hardly shows: this has it show from where it should start.)
 	fade_lead: number?,
@@ -3439,7 +3440,8 @@ local function Transcript(props: Props): Node
 			items = "start",
 			px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
 			pt = function(): number
-				return ui.raw(pt() * collapsed() * opened(), "Zeron's gaps over a message (transcript.rs top_gap_for)")
+				local o = if props.lead and index:get() == 1 then 1 else opened()
+				return ui.raw(pt() * collapsed() * o, "Zeron's gaps over a message (transcript.rs top_gap_for)")
 			end,
 			-- The air at the conversation's end, on its last row: on the list
 			-- itself it would clip every row short of the list's foot.
@@ -3513,6 +3515,11 @@ local function Transcript(props: Props): Node
 							end
 						end)
 					end,
+				if props.lead
+					then ui.show(function(): boolean
+						return index:get() == 1
+					end, props.lead())
+					else nil,
 				fold_or(if m.role == "switch" then seam(m)
 					elseif m.role == "system" and m.line == "compaction" then Compaction.Divider {
 						id = m.id,
@@ -3906,6 +3913,23 @@ local function Transcript(props: Props): Node
 					else List(),
 			},
 		},
+		if props.lead
+			then ui.show(
+				function(): boolean
+					return count:get() == 0
+				end,
+				ui.row {
+					absolute = true,
+					left = 0,
+					right = 0,
+					top = 0,
+					justify = "center",
+					px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
+					pt = ui.raw(TURN_GAP, "Zeron's gaps over a message (transcript.rs top_gap_for)"),
+					ui.column { w_full = true, max_w = measure, min_w = 0, props.lead() },
+				}
+			)
+			else nil,
 		-- The scrollbar, over the list and never faded, running its whole
 		-- height: at the window's edge, beside the composer rather than
 		-- under it, so scrolled to the end it reaches the page's end.

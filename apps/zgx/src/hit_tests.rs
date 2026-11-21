@@ -58,7 +58,7 @@ fn the_pointer_reaches_the_page_the_title_bar_and_the_composer() {
     let head = [
         "#titlebar >> role:button \"Toggle sidebar\"",
         "#shell-sidebar >> role:button \"Sidebar view options\"",
-        "#app-rail >> role:button \"New chat\"",
+        "#app-rail >> role:button \"Home\"",
         "#shell-sidebar >> role:button \"Search\"",
     ];
     check(&mut app, "a new chat", &head, &mut wrong);

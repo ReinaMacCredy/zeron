@@ -483,8 +483,8 @@ licensed under `LICENSE`, like the rest of the repository.
 
 **Solar icons.** Most interface glyphs, in `apps/zgx/ui/assets/icons/ui/`
 (also carried as code in `apps/zgx/ui/ds/icon_svgs.luau`) and in
-`crates/ui/src/icons.rs`, are from the Solar Icons set (Linear weight) by
-480 Design, https://github.com/480-Design/Solar-Icon-Set, licensed under the
+`crates/ui/src/icons.rs`, are from the Solar Icons set (Linear weight; `question-circle-bold` from its
+Bold weight) by 480 Design, https://github.com/480-Design/Solar-Icon-Set, licensed under the
 Creative Commons Attribution 4.0 International License
 (https://creativecommons.org/licenses/by/4.0/). Some are adapted (resized,
 mirrored or recoloured), and a few are drawn by Zeron in the same style.

@@ -60,15 +60,11 @@ local function chosen(app: any, row: string): string
 	return table.concat(words, " ")
 end
 
--- What the chip names, once it has rolled to it: the branch, in a
--- project ([tile] project › branch); else what stands in its place, "No
--- project".
+-- What the chip names, once it has rolled to it: the folder it works in
+-- (its project), else "No project". (The branch is the panel's to say.)
 local function chip(app: any): string
 	rested(app)
-	if app:has('role:button "Branch" >> #composer-place-branch') then
-		return app:text('role:button "Branch" >> #composer-place-branch[1]')
-	end
-	return app:text('role:button "Branch" >> #composer-place-project[1]')
+	return app:text("#composer-folder[1]")
 end
 
 local function send(app: any, words: string)
@@ -84,16 +80,16 @@ test("a new chat names the project's current branch, read from git where it is",
 	local app = mount("chat_fixture.luau")
 	home(app)
 	expect(app:state("calls")).to_contain("refs:/tmp/atlas:here")
-	expect(chip(app)).to_be("main")
+	expect(chip(app)).to_be("Atlas")
 	panel(app)
 	-- Its branches, the current first, tagged.
 	expect(app:has('role:option "main Current"')).to_be(true)
 	expect(app:has('role:option "fix/render-loop Worktree"')).to_be(true)
 	expect(app:has('role:option "release/2.4"')).to_be(true)
-	-- A branch picked: the chip names it.
+	-- A branch picked: the chip names the folder still.
 	app:click('role:option "release/2.4"')
 	settle(app)
-	expect(chip(app)).to_be("release/2.4")
+	expect(chip(app)).to_be("Atlas")
 end)
 
 test("another device brings its projects and their branches", function()
@@ -104,7 +100,7 @@ test("another device brings its projects and their branches", function()
 	expect(chosen(app, "Project")).to_contain("Borealis")
 	-- The box's project's branches, asked of the box.
 	expect(app:state("calls")).to_contain("refs:/srv/borealis:box")
-	expect(chip(app)).to_be("trunk")
+	expect(chip(app)).to_be("Borealis")
 	-- Its projects are the box's alone.
 	panel(app)
 	app:click('role:menuitem "Project"')
@@ -116,7 +112,7 @@ test("another device brings its projects and their branches", function()
 	settle(app)
 	pick_in(app, "Device", "MacBook Pro")
 	expect(chosen(app, "Project")).to_contain("Atlas")
-	expect(chip(app)).to_be("main")
+	expect(chip(app)).to_be("Atlas")
 end)
 
 test("a device out of reach shows why, and can't be picked", function()
@@ -163,8 +159,7 @@ test("a folder with no git runs in place, though a worktree was picked", functio
 	pick_in(app, "Checkout", "Worktree An isolated")
 	pick_in(app, "Project", "Notes")
 	expect(showing(app, 'role:menuitem "Checkout"')).to_be(false)
-	expect(app:has("#composer-place-lead >> .place-lead-folder")).to_be(true)
-	expect(app:has("#composer-place-lead >> .place-lead-worktree")).to_be(false)
+	expect(chip(app)).to_be("Notes")
 	send(app, "Tidy the notes")
 	local calls = app:state("calls")
 	expect(calls).to_contain("made:notes|-|-|/tmp/notes")
@@ -179,7 +174,6 @@ test("a worktree picked waits out a folder with no git for the next repository",
 	pick_in(app, "Project", "Atlas")
 	panel(app)
 	expect(showing(app, 'role:menuitem "Checkout"')).to_be(true)
-	expect(app:has("#composer-place-lead >> .place-lead-worktree")).to_be(true)
 	send(app, "Cut the release")
 	local calls = app:state("calls")
 	expect(calls).to_contain("run:/tmp/atlas|worktree|main")
@@ -238,10 +232,9 @@ test("picking a device leaves the panel open, on to its project", function()
 	expect(showing(app, 'role:menuitem "Project"')).to_be(true)
 end)
 
-test("the device comes first: on top of the panel, and first on the chip", function()
+test("the device comes first, on top of the panel", function()
 	local app = mount("chat_fixture.luau")
 	home(app)
-	expect(app:text("#composer-place-device[1]")).to_contain("MacBook Pro")
 	panel(app)
 	local function top(sel: string): number
 		local first = string.match(app:tree(sel), "[^\n]+") or ""
@@ -249,7 +242,5 @@ test("the device comes first: on top of the panel, and first on the chip", funct
 	end
 	expect(top('role:menuitem "Device"') < top('role:menuitem "Project"')).to_be(true)
 	pick_in(app, "Device", "Build box")
-	-- (Its name rolls in, a letter at a time: wait for it.)
-	app:wait('#composer-place-device >> ~"Build"', { timeout_ms = 2000 })
-	expect(string.find(app:tree("#composer-place-device[1]"), "Build", 1, true) ~= nil).to_be(true)
+	expect(chosen(app, "Device")).to_contain("Build box")
 end)

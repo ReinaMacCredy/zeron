@@ -709,8 +709,7 @@ test("collapsed, the sidebar folds away entirely: no rail, the page the window's
 		local _, _, pw = rect(app, "#shell-page")
 		expect(`{when}: page {pw}`).to_be(`{when}: page {page_w}`)
 	end
-	-- (A chat has the Live state column beside it, 260 wide.)
-	alone("a session", 1200 - RAIL - GAP - EDGE - 260)
+	alone("a session", 1200 - RAIL - GAP - EDGE)
 	-- A new chat, and back: still nothing in the sidebar's place.
 	app:command("shell.new_chat")
 	app:frames(40)

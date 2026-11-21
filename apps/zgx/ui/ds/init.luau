@@ -29,6 +29,7 @@ export type Model = model_picker.Model
 export type ComposerDevice = composer.Device
 export type ComposerUsage = composer.Usage
 export type ComposerFixed = composer.Fixed
+export type ComposerPlace = composer.Place
 export type CardLayer = member_card.Layer
 export type CardBadge = member_card.Badge
 local card_wall = require("@self/card_wall")

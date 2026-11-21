@@ -294,6 +294,7 @@ pub mod methods {
     pub const WATCH_SPACES: &str = "WatchSpaces";
     pub const WATCH_TASKS: &str = "WatchTasks";
     pub const WATCH_TASK_STEPS: &str = "WatchTaskSteps";
+    pub const WATCH_BOTS: &str = "WatchBots";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
     /// Params are tagged `{op: createChat|createSpace|renameSpace|setSpaceIcon|
     /// deleteSpace|renameChat|setChatArchived|deleteChat|renameDevice|removeDevice|

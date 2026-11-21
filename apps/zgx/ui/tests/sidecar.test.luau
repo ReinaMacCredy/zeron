@@ -13,6 +13,7 @@ end
 
 local function open(): any
 	local app = mount("shell_fixture.luau")
+	app:set_state("live_column", true)
 	app:resize(1200, 800)
 	app:frames(30)
 	expect(app:error()).to_be_nil()

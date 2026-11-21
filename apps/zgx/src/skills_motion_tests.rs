@@ -25,6 +25,8 @@ fn an_agent_switch_fades_the_skills_grid_in() {
     let mut app = TestApp::new(|runtime| ScriptHost::new(runtime, ui.join("skills_fixture.luau")));
     app.ui.scene.borrow_mut().resize(1200., 900.);
     app.frames(20);
+    app.click("#rail-more");
+    app.frames(12);
     app.click("#rail-skills");
     app.frames(20);
     std::thread::sleep(Duration::from_millis(300));

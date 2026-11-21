@@ -1,6 +1,5 @@
 -- The app rail on the shell in ui/shell_fixture.luau: there whatever the
--- sidebar and Settings do, its entries where they lead, its ring from the
--- accounts the host says.
+-- sidebar and Settings do, its entries where they lead.
 
 local function open(): any
 	local app = mount("shell_fixture.luau")
@@ -15,10 +14,6 @@ local function rail_w(app: any): number?
 end
 
 local PULLS = { { plugin = "github", id = "pulls", title = "Pull requests", icon = "pull-request" }, { plugin = "other", id = "page", title = "Other page" } }
-
-local function accounts(windows: { any }): any
-	return { [""] = { codex = { { id = "a", email = "a@b.c", plan = "Pro", active = true, windows = windows } } } }
-end
 
 test("the rail stays 46 wide with the sidebar collapsed and over Settings, and the fit counts it", function()
 	local app = open()
@@ -51,12 +46,17 @@ test("with motion reduced (as a carried-over setting can be), a rail entry made 
 	app:frames(5)
 	app:set_state("plugins.pages", PULLS)
 	app:frames(10)
+	app:click("#rail-more")
+	app:frames(10)
 	expect(app:has("#open-pull-requests")).to_be(true)
 	expect(app:tree("#app-rail")).to_contain('#settings-trigger button "Settings"')
 end)
 
-test("New chat leads home; Pull requests shows while its plugin's page does, and only the rail lists it", function()
+test("Home leads home; More lists Pull requests while its plugin's page does, and only the rail lists it", function()
 	local app = open()
+	app:click("#rail-more")
+	app:frames(10)
+	expect(app:has("#rail-inbox")).to_be(true)
 	expect(app:has("#open-pull-requests")).to_be(false)
 	app:set_state("plugins.pages", PULLS)
 	app:frames(10)
@@ -69,27 +69,22 @@ test("New chat leads home; Pull requests shows while its plugin's page does, and
 	app:click("#rail-new-chat")
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/")
-	app:set_state("plugins.pages", {})
-	app:frames(10)
-	expect(app:has("#open-pull-requests")).to_be(false)
 end)
 
-test("the ring says the tightest window, the limit with a badge, and opens the Usage page", function()
+test("the rail is Home, Bots, Search and More, then Help and Settings: no Usage ring; Search opens the palette", function()
 	local app = open()
-	app:set_state("agents.on_device", { [""] = {} })
-	app:frames(5)
-	expect(app:tree("#app-rail")).to_contain('"No plan usage reported"')
-	app:set_state("agents.on_device", accounts({ { label = "Session", used = 0.4 }, { label = "Week", used = 0.1 } }))
-	app:frames(5)
-	expect(app:tree("#app-rail")).to_contain('"Usage: Codex · 5h 40%, Weekly 10%"')
-	expect(app:has("#rail-usage-limit")).to_be(false)
-	app:set_state("agents.on_device", accounts({ { label = "Session", used = 1 } }))
-	app:frames(5)
-	expect(app:tree("#app-rail")).to_contain('"Usage: limit reached"')
-	expect(app:has("#rail-usage-limit")).to_be(true)
-	app:click("#rail-usage")
+	local tree = app:tree("#app-rail")
+	for _, id in { "#rail-new-chat", "#rail-bots", "#rail-search", "#rail-more", "#rail-help", "#settings-trigger" } do
+		expect(app:has(id)).to_be(true)
+	end
+	expect(app:has("#rail-usage")).to_be(false)
+	expect(tree).to_contain('#rail-new-chat button "Home"')
+	app:click("#rail-bots")
 	app:frames(20)
-	expect(app:state("shell_route_path")).to_be("/settings/usage")
+	expect(app:state("shell_route_path")).to_be("/plugin/zeron/bots")
+	app:click("#rail-search")
+	app:frames(10)
+	expect(app:state("shell_palette_open")).to_be(true)
 end)
 
 test("Help's menu holds what opens something: Keyboard shortcuts and Star Zeron on GitHub", function()
@@ -122,13 +117,14 @@ local function box(app: any, target: string): (number, number, number, number)
 	return tonumber(x) :: number, tonumber(y) :: number, tonumber(w) :: number, tonumber(h) :: number
 end
 
-test("you are on the rail, right above Settings, and open your profile; the sidebar's foot no longer shows you", function()
+test("you are on the rail, right under Settings, and open your profile; the sidebar's foot no longer shows you", function()
 	local app = open()
 	expect(app:tree("#app-rail")).to_contain('#rail-account button "Local"')
 	expect(app:has('#shell-sidebar >> "Local"')).to_be(false)
 	local _, ay, _, ah = box(app, "#rail-account")
 	local _, sy = box(app, "#settings-trigger")
-	expect(sy - (ay + ah)).to_be(6)
+	local _, _, _, sh = box(app, "#settings-trigger")
+	expect(ay - (sy + sh)).to_be(6)
 	app:click("#rail-account")
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/settings/profile")

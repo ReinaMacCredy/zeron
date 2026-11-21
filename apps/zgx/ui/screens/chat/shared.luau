@@ -1419,6 +1419,10 @@ M.open_model = ui.shared("chat.composer.open_model", 0)
 -- A new chat's agent asked for from elsewhere (the Skills page's Try now): an agent's id; the composer takes its first model unless it runs that agent already, then clears it.
 M.want_agent = ui.shared("chat.composer.want_agent", nil :: string?)
 M.composer_shown = ui.shared("chat.composer.shown", 0)
+M.said = ui.shared("chat.composer.said", { n = 0, text = "" })
+function M.say(text: string)
+	M.said:set { n = M.said:peek().n + 1, text = text }
+end
 local function composers(): number
 	local n: any = M.composer_shown:peek()
 	return if type(n) == "number" then n elseif n then 1 else 0

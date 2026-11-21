@@ -2016,6 +2016,16 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "go_empty",
+	title = "A chat with nothing said yet",
+	run = function()
+		META.e1 = { title = "New chat", project = "atlas", model = "opus", effort = "high", access = "full", plan = false, mission_offered = true }
+		TRANSCRIPTS.e1 = {}
+		seed()
+		route.open_session("e1")
+	end,
+}
+ui.command {
 	id = "transcript_coming",
 	title = "The open session's transcript not come yet",
 	run = function()

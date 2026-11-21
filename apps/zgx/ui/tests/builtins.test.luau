@@ -53,17 +53,14 @@ end)
 
 test("each feature's switch on its own page takes its doors away at once, and on brings them back; the page stays listed", function()
 	local app = open()
-	expect(app:has("#rail-usage")).to_be(true)
 	expect(app:has('role:button "Hold to dictate"')).to_be(true)
 
 	-- Usage: the rail's ring.
 	settings(app, "Usage")
 	flip(app, "Usage on the rail")
 	expect(switch_of(app, "Usage on the rail")).to_contain("unchecked")
-	expect(app:has("#rail-usage")).to_be(false)
 	expect(nav_has(app, "Usage")).to_be(true)
 	flip(app, "Usage on the rail")
-	expect(app:has("#rail-usage")).to_be(true)
 
 	-- Voice: the composer's mic.
 	settings(app, "Voice")
@@ -103,9 +100,7 @@ test("a switch turned off stays off at the next launch, its door with it", funct
 	local app = open()
 	settings(app, "Usage")
 	flip(app, "Usage on the rail")
-	expect(app:has("#rail-usage")).to_be(false)
 	local again = open()
-	expect(again:has("#rail-usage")).to_be(false)
 	settings(again, "Usage")
 	expect(switch_of(again, "Usage on the rail")).to_contain("unchecked")
 	expect(nav_has(again, "Usage")).to_be(true)

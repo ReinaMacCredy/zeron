@@ -51,6 +51,8 @@ export type Id = string | () -> string? | State<string?> | nil
 -- The docked composer's geometry and the room the transcript keeps under
 -- it (screens/chat/dock: a side chat's tab docks its composer the same).
 local Dock = require("@app/screens/chat/dock")
+local BotChat = require("@app/screens/bots/chat")
+local Card = require("@app/screens/chat/card")
 
 local function resolve(id: Id): () -> string?
 	if type(id) == "string" then
@@ -249,6 +251,12 @@ local function Session(id: Id?): Node
 		w_full = true,
 		h_full = true,
 		min_h = 0,
+		relative = true,
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(Card.room:peek() - size.w) >= 1 then
+				Card.room:set(size.w)
+			end
+		end,
 		-- A bare Escape that reached the page (nothing inside took it): the
 		-- setting's "Escape stops the agent".
 		on_key = function(e): boolean
@@ -257,6 +265,7 @@ local function Session(id: Id?): Node
 			end
 			return false
 		end,
+		Card.Corner { session = which },
 		ui.presence(kind, function(k: string): Node
 			if k == "waiting" then
 				return ui.div { w_full = true, h_full = true }
@@ -297,6 +306,14 @@ local function Session(id: Id?): Node
 				min_h = 0,
 				-- Under the composer, to its footer's line.
 				pb = Dock.page_pad(),
+				pr = Card.shift,
+				ui.show(function(): boolean
+					return BotChat.of(which()) ~= nil
+				end, BotChat.Header {
+					bot = function(): any
+						return BotChat.of(which())
+					end,
+				}),
 				ui.column {
 					w_full = true,
 					grow = 1,
@@ -318,6 +335,19 @@ local function Session(id: Id?): Node
 							end,
 							side = 20,
 							fade_lead = 12,
+							lead = if BotChat.of(id)
+								then function(): Node
+									return BotChat.Lead {
+										bot = function(): any
+											return BotChat.of(id)
+										end,
+										answered = function(): boolean
+											return store.messages:len() > 0
+										end,
+										on_pick = shared.say,
+									}
+								end
+								else nil,
 							messages = store.messages,
 							offset = offset,
 							-- Made again (a reload, a template saved), it comes
