@@ -3039,6 +3039,101 @@ pub struct AgentProfilesSnapshot {
     pub profiles: Vec<AgentProfile>,
 }
 
+/// A Bot's picture: a glyph in a framed tile of one colour, or the person's own
+/// image. Written whole, as one field, so a switch from one kind to the other
+/// never mixes them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotAvatar {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub glyph: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub frame: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color: String,
+    /// The person's own image, as a `data:image/…;base64,` URL small enough to
+    /// travel in a registry row of its own ([`BotAvatar::MAX_IMAGE_BYTES`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+}
+
+impl BotAvatar {
+    pub const MAX_PART_BYTES: usize = 32;
+    /// A registry op holds 16 KB; the image's row keeps under it with its clocks.
+    pub const MAX_IMAGE_BYTES: usize = 14 * 1024;
+
+    /// Trimmed, each part checked: a glyph, frame and colour are short lowercase
+    /// names, an image a base64 data URL of an image type. `Err` names the bad part.
+    pub fn normalized(self) -> Result<BotAvatar, &'static str> {
+        let name = |v: String, part: &'static str| {
+            let v = v.trim().to_owned();
+            let ok = v.len() <= Self::MAX_PART_BYTES
+                && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            ok.then_some(v).ok_or(part)
+        };
+        let image = self.image.map(|i| i.trim().to_owned()).filter(|i| !i.is_empty());
+        if let Some(i) = &image {
+            let typed = ["png", "jpeg", "webp", "gif"]
+                .iter()
+                .any(|t| i.strip_prefix("data:image/").and_then(|r| r.strip_prefix(t)).is_some_and(|r| r.starts_with(";base64,")));
+            if !typed || i.len() > Self::MAX_IMAGE_BYTES || i.chars().any(|c| c.is_control() || c.is_whitespace()) {
+                return Err("image");
+            }
+        }
+        Ok(BotAvatar {
+            glyph: name(self.glyph, "glyph")?,
+            frame: name(self.frame, "frame")?,
+            color: name(self.color, "color")?,
+            image,
+        })
+    }
+}
+
+/// A named, persistent agent with one long-lived chat: an agent profile (its
+/// `id` is the Bot's) plus what a profile has no place for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bot {
+    #[serde(flatten)]
+    pub profile: AgentProfile,
+    #[serde(default)]
+    pub avatar: BotAvatar,
+    pub chat_id: String,
+    #[serde(default)]
+    pub pinned: bool,
+    /// Its place among the pinned ones (`pin_order_key_between`); kept when unpinned.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub order_key: String,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub unread: bool,
+    /// The template it was made from: where its greeting and suggestions come from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotPatch {
+    /// Who it is and how it works, whole; only what differs is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<AgentProfileDraft>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<BotAvatar>,
+    /// Pinning puts it last among the pinned unless `order_key` says where.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<bool>,
+}
+
 /// "Claude Code · Opus 5.5 · Auto-accept edits · High · 2 tools off" under a profile's name.
 pub fn profile_line(
     harness_name: &str,

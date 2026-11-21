@@ -63,6 +63,7 @@
 mod agent_gate;
 mod caller;
 mod plan;
+mod bots;
 mod tasks;
 mod device_stats;
 mod remote_plugins;
@@ -1312,6 +1313,32 @@ enum MutateParams {
         #[serde(default)]
         from_chat_id: Option<String>,
     },
+    /// A Bot and its chat, made together (`rpc/bots.rs`); the person's alone.
+    #[serde(rename_all = "camelCase")]
+    CreateBot {
+        bot_id: String,
+        chat_id: String,
+        name: String,
+        config: ChatConfig,
+        #[serde(default)]
+        avatar: zeron_proto::BotAvatar,
+        #[serde(default)]
+        template: Option<String>,
+        #[serde(default)]
+        space_id: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+        #[serde(default)]
+        pinned: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    UpdateBot {
+        bot_id: String,
+        patch: zeron_proto::BotPatch,
+    },
+    /// The Bot goes, and its chat with it.
+    #[serde(rename_all = "camelCase")]
+    DeleteBot { bot_id: String },
     #[serde(rename_all = "camelCase")]
     StartTask {
         task_id: String,
@@ -3804,6 +3831,19 @@ impl EngineRpc {
                     .map_err(failed)
                     .map(drop)
             }
+            MutateParams::CreateBot {
+                bot_id,
+                chat_id,
+                name,
+                config,
+                avatar,
+                template,
+                space_id,
+                device_id,
+                pinned,
+            } => self.create_bot(bot_id, chat_id, name, config, avatar, template, space_id, device_id, pinned),
+            MutateParams::UpdateBot { bot_id, patch } => self.update_bot(&bot_id, patch),
+            MutateParams::DeleteBot { bot_id } => self.delete_bot(&bot_id),
             MutateParams::CreateTask {
                 task_id,
                 title,
@@ -6728,6 +6768,7 @@ impl RpcService for EngineRpc {
             methods::WATCH_TASK_STEPS => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_task_steps(),
             ))),
+            methods::WATCH_BOTS => Ok(RpcReply::Stream(watch_stream(self.workspace.watch_bots()))),
             methods::WATCH_SESSIONS => {
                 // Local live statuses merged with remote devices' workspace rows.
                 let merged = self

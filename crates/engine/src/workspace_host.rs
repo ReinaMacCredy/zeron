@@ -228,6 +228,7 @@ struct WorkspaceHostInner {
     spaces_tx: watch::Sender<Vec<Space>>,
     tasks_tx: watch::Sender<Vec<Task>>,
     task_steps_tx: watch::Sender<Vec<TaskStep>>,
+    bots_tx: watch::Sender<Vec<zeron_proto::Bot>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// [`WorkspaceHost::registry_synced`], published when it changes so
@@ -298,6 +299,7 @@ struct PublishedVersions {
     spaces: u64,
     tasks: u64,
     task_steps: u64,
+    bots: u64,
 }
 
 /// The registry replica a store holds: its whole snapshot plus the row
@@ -456,6 +458,7 @@ impl WorkspaceHost {
         let (spaces_tx, _) = watch::channel(state.spaces);
         let (tasks_tx, _) = watch::channel(state.tasks);
         let (task_steps_tx, _) = watch::channel(doc.read_task_steps()?);
+        let (bots_tx, _) = watch::channel(doc.read_bots()?);
         let preferences = doc.sidebar_preferences();
         let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
             revision: 0,
@@ -483,6 +486,7 @@ impl WorkspaceHost {
                 spaces_tx,
                 tasks_tx,
                 task_steps_tx,
+                bots_tx,
                 sidebar_preferences_tx,
                 room: Mutex::new(None),
                 registry_synced_tx: watch::Sender::new(edge_less),
@@ -1751,6 +1755,32 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.delete_task(task_id, Utc::now()))?)
     }
 
+    pub fn watch_bots(&self) -> watch::Receiver<Vec<zeron_proto::Bot>> {
+        self.inner.bots_tx.subscribe()
+    }
+
+    pub fn bot(&self, bot_id: &str) -> Option<zeron_proto::Bot> {
+        self.read(|doc| doc.bot(bot_id))
+    }
+
+    pub fn read_bots(&self) -> Result<Vec<zeron_proto::Bot>, EngineError> {
+        Ok(self.read(|doc| doc.read_bots())?)
+    }
+
+    pub fn create_bot(&self, bot: &zeron_proto::Bot) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.create_bot(bot))?)
+    }
+
+    pub fn update_bot(&self, bot_id: &str, patch: &zeron_proto::BotPatch) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.update_bot(bot_id, patch, Utc::now()))?)
+    }
+
+    /// The Bot's row flagged deleted and its chat's row tombstoned, in one
+    /// write; its chat's id, for the caller to tear its run down.
+    pub fn delete_bot(&self, bot_id: &str) -> Result<Option<String>, EngineError> {
+        Ok(self.mutate(|doc| doc.delete_bot(bot_id, Utc::now()))?)
+    }
+
     pub fn watch_task_steps(&self) -> watch::Receiver<Vec<TaskStep>> {
         self.inner.task_steps_tx.subscribe()
     }
@@ -2180,6 +2210,8 @@ impl WorkspaceHostInner {
                 .wrapping_add(doc.kind_version(zeron_doc::KIND_REPOSITORY_LOOKS)),
             tasks: doc.kind_version(zeron_doc::KIND_TASKS),
             task_steps: doc.kind_version(zeron_doc::KIND_TASK_STEPS),
+            bots: doc.kind_version(zeron_doc::KIND_BOTS)
+                .wrapping_add(doc.kind_version(zeron_doc::KIND_BOT_AVATARS)),
         };
         let last = *published;
         let changed = |pick: fn(&PublishedVersions) -> u64| last.is_none_or(|last| pick(&last) != pick(&now));
@@ -2189,6 +2221,7 @@ impl WorkspaceHostInner {
         let spaces = changed(|v| v.spaces).then(|| doc.read_spaces());
         let tasks = changed(|v| v.tasks).then(|| doc.read_tasks());
         let task_steps = changed(|v| v.task_steps).then(|| doc.read_task_steps());
+        let bots = changed(|v| v.bots).then(|| doc.read_bots());
         // Pins reconcile against the chats as they read now: just read, or
         // (unchanged) as last published.
         let reconciled = match &chats {
@@ -2273,6 +2306,14 @@ impl WorkspaceHostInner {
         }
         match task_steps {
             Some(Ok(task_steps)) => publish_if_changed(&self.task_steps_tx, task_steps),
+            Some(Err(err)) => {
+                failed = true;
+                tracing::warn!(error = %err, "registry read failed");
+            }
+            None => {}
+        }
+        match bots {
+            Some(Ok(bots)) => publish_if_changed(&self.bots_tx, bots),
             Some(Err(err)) => {
                 failed = true;
                 tracing::warn!(error = %err, "registry read failed");
