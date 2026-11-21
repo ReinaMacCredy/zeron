@@ -4049,7 +4049,8 @@
         "quick_capture": "快速记录",
         "skills": "技能",
         "update_prompt": "更新对话框",
-        "whats_new": "新功能"
+        "whats_new": "新功能",
+        "bots": "Bots"
       }
     },
     "title_bar": {
@@ -4317,7 +4318,10 @@
           "week": "每周",
           "day": "每天"
         }
-      }
+      },
+      "home": "主页",
+      "search": "搜索",
+      "more": "更多"
     },
     "tabs": {
       "close": "关闭标签页",
@@ -6338,6 +6342,12 @@
       "label": "浮动设备预览",
       "open": "在右侧面板中打开",
       "close": "关闭浮动预览"
+    }
+  },
+  "bots": {
+    "title": "Bots",
+    "gallery": {
+      "blurb": "选择一个 Bot 发消息，或新建一个。"
     }
   }
 }

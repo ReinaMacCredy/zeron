@@ -4,6 +4,8 @@ local function open(): any
 	local app = mount("tasks_fixture.luau")
 	app:resize(1300, 900)
 	app:frames(30)
+	app:click("#rail-more")
+	app:frames(12)
 	app:click("#rail-inbox")
 	app:frames(30)
 	return app

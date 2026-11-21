@@ -1968,6 +1968,8 @@ fn a_plugin_s_page_survives_a_reload_and_takes_its_place_in_the_history() {
     // gone back to from it.
     app.click("#shell-sidebar >> role:button \"Fix the build\"");
     app.frames(20);
+    app.click("#rail-more");
+    app.frames(12);
     app.click("#open-pull-requests");
     app.frames(20);
     let on_board = |app: &mut TestApp| app.target(".github-board").is_ok();

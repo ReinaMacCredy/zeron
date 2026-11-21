@@ -75,7 +75,7 @@ fn the_composer_travels_between_a_new_chat_and_a_session_and_is_at_once_between_
     }
 
     // To a new chat: up to mid-page.
-    app.click("#app-rail >> role:button \"New chat\"");
+    app.click("#app-rail >> role:button \"Home\"");
     let seen = watch(&mut app, 80);
     assert!((painted(&mut app).y - hero).abs() <= 1., "mid-page again");
     travels(&seen, docked, hero, "to a new chat");
