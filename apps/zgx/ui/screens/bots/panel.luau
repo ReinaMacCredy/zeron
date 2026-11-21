@@ -91,11 +91,13 @@ function M.menu(bot: store.Bot): { Menu.Entry }
 		},
 		{ separator = true },
 		{
-			label = ui.t("bots.menu.archive"),
+			label = ui.t(if bot.archived then "bots.menu.unarchive" else "bots.menu.archive"),
 			icon = "archive-minimalistic",
 			on_select = function()
-				leave()
-				store.archive(bot.id, true)
+				if not bot.archived then
+					leave()
+				end
+				store.archive(bot.id, not bot.archived)
 			end,
 		},
 		{
@@ -341,6 +343,23 @@ local function status_of(k: Kid): string
 		return "input"
 	end
 	return k.status or "done"
+end
+
+-- How many of the Bot's chat and sessions wait on the person.
+function M.needs(bot: store.Bot): number
+	local n = 0
+	local asked = asks:get()
+	local home = chat_of(bot)
+	if home and (asked[home.id] or home.status == "approval" or home.status == "input") then
+		n += 1
+	end
+	for _, k in kids_of(bot) do
+		local s = status_of(k)
+		if s == "approval" or s == "input" then
+			n += 1
+		end
+	end
+	return n
 end
 
 local RANK: { [string]: number } = { approval = 1, input = 2, working = 3, waiting = 4, done = 5 }

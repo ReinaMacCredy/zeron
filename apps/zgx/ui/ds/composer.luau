@@ -202,6 +202,12 @@ export type Props = {
 	-- `on_reach` changes. Nil (a new chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
 	on_reach: ((reach: string) -> ())?,
+	-- The chip's line, a caller's own in the default's place (given what
+	-- the default reads), and its panel: `head(rest, fixed)` its head in
+	-- "Work in"'s place, given that head (`rest`, nil with nothing to work
+	-- in) to keep under its own or leave out, and `width`. Its panel opens
+	-- on the menus' side (over a docked composer), not under the chip.
+	place: { line: (place: Place) -> { Child }, head: ((rest: Node?, fixed: boolean) -> Node?)?, width: number? }?,
 	-- On Cloud, what a new chat's machine reaches ("devices" | "isolated";
 	-- nil: `reach_default`, the account's). No default (an edge that can't
 	-- keep one), no choice.
@@ -976,7 +982,7 @@ end
 -- way first as room runs short, to a sliver, then the name, to
 -- PROJECT_MIN; folded, the glyph alone. Its ink is the chip's own (the
 -- chevron a step quieter), so the chip's hover lifts all of it.
-type Place = {
+export type Place = {
 	-- The device it runs on, by name (nil: none to say).
 	device: (() -> string?)?,
 	-- The project (nil: none named), and whether it works in one at all.
@@ -3604,7 +3610,7 @@ return ui.component(function(props: Props): Node
 					hover = { bg = "$hover", color = "$text.secondary" },
 					active = { bg = "$pressed", color = "$text.secondary" },
 					on_click = menu.toggle,
-					table.unpack(place_line(place)),
+					table.unpack((if props.place then props.place.line else place_line)(place)),
 				}
 			end
 			local picker = Dropdown {
@@ -3615,8 +3621,9 @@ return ui.component(function(props: Props): Node
 				items = (props.branches or {}) :: any,
 				empty = props.branches_empty,
 				list_when = in_project,
-				width = 280,
-				head = head_node(),
+				width = if props.place and props.place.width then props.place.width else 280,
+				placement = if props.place then { side = side(), align = "start", offset = 8 } else nil,
+				head = if props.place and props.place.head then props.place.head(head_node(), false) else head_node(),
 				trigger = function(menu: Dropdown.Menu): Node
 					return chip(menu, locale.t("ds.composer.branch.label"), {
 						device = chosen_device,
@@ -3642,8 +3649,11 @@ return ui.component(function(props: Props): Node
 					list_when = function(): boolean
 						return false
 					end,
-					width = 280,
-					head = fixed_work_in(fixed, props.on_reach),
+					width = if props.place and props.place.width then props.place.width else 280,
+					placement = if props.place then { side = side(), align = "start", offset = 8 } else nil,
+					head = if props.place and props.place.head
+						then props.place.head(fixed_work_in(fixed, props.on_reach), true)
+						else fixed_work_in(fixed, props.on_reach),
 					trigger = function(menu: Dropdown.Menu): Node
 						return chip(menu, function(): string
 							local f = fixed()
