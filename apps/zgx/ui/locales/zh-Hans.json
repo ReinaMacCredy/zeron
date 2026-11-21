@@ -6347,7 +6347,59 @@
   "bots": {
     "title": "Bots",
     "gallery": {
-      "blurb": "选择一个 Bot 发消息，或新建一个。"
-    }
+      "blurb": "选择一个 Bot 发消息，或新建一个。",
+      "open": "所有 Bot"
+    },
+    "menu": {
+      "label": "Bot 操作",
+      "pin": "置顶",
+      "unpin": "取消置顶",
+      "edit": "编辑",
+      "mark_unread": "标为未读",
+      "mark_read": "标为已读",
+      "archive": "归档",
+      "delete": "删除",
+      "delete_confirm": "删除此 Bot 及其对话？"
+    },
+    "status": {
+      "working": "进行中",
+      "waiting": "等待中",
+      "approval": "需要批准",
+      "input": "需要你的回答",
+      "done": "已完成"
+    },
+    "needs": {
+      "title": "需要你",
+      "decisions": "决定"
+    },
+    "sessions": {
+      "title": "会话",
+      "empty": "目前没有进行中的会话",
+      "done": "已完成",
+      "no_folder": "无文件夹"
+    },
+    "properties": {
+      "title": "属性",
+      "sort": "排序",
+      "status": "状态",
+      "updated": "最近更新",
+      "group": "分组",
+      "folders": "文件夹",
+      "compact": "紧凑视图",
+      "group_by": "分组方式 · 文件夹",
+      "no_folders": "还没有文件夹"
+    },
+    "edit": {
+      "title": "编辑 Bot",
+      "name": "名称"
+    },
+    "add": {
+      "label": "新建",
+      "create": "创建 Bot"
+    },
+    "panel": {
+      "empty": "还没有 Bot。创建一个开始吧。"
+    },
+    "open_n": "打开 Bot {i}"
   }
 }

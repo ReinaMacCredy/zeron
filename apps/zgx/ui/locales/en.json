@@ -6347,7 +6347,59 @@
   "bots": {
     "title": "Bots",
     "gallery": {
-      "blurb": "Pick a Bot to message, or create a new one."
-    }
+      "blurb": "Pick a Bot to message, or create a new one.",
+      "open": "All Bots"
+    },
+    "menu": {
+      "label": "Bot actions",
+      "pin": "Pin to top",
+      "unpin": "Unpin from top",
+      "edit": "Edit",
+      "mark_unread": "Mark unread",
+      "mark_read": "Mark read",
+      "archive": "Archive",
+      "delete": "Delete",
+      "delete_confirm": "Delete this Bot and its chat?"
+    },
+    "status": {
+      "working": "Working",
+      "waiting": "Waiting",
+      "approval": "Needs approval",
+      "input": "Needs your answer",
+      "done": "Done"
+    },
+    "needs": {
+      "title": "Needs you",
+      "decisions": "Decisions"
+    },
+    "sessions": {
+      "title": "Sessions",
+      "empty": "Nothing in progress right now",
+      "done": "Done",
+      "no_folder": "No folder"
+    },
+    "properties": {
+      "title": "Properties",
+      "sort": "Sort",
+      "status": "Status",
+      "updated": "Last updated",
+      "group": "Group",
+      "folders": "Folders",
+      "compact": "Compact view",
+      "group_by": "Group by · Folders",
+      "no_folders": "No folders yet"
+    },
+    "edit": {
+      "title": "Edit Bot",
+      "name": "Name"
+    },
+    "add": {
+      "label": "New",
+      "create": "Create Bot"
+    },
+    "panel": {
+      "empty": "No Bots yet. Create one to get started."
+    },
+    "open_n": "Open Bot {i}"
   }
 }

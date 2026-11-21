@@ -14,6 +14,7 @@ local route = require("@app/screens/shell/route")
 local view = require("@app/screens/shell/view")
 local art = require("@app/screens/shell/art")
 local tasks_store = require("@app/screens/tasks/store")
+local bots_store = require("@app/screens/bots/store")
 local updates = require("@app/screens/shell/updates")
 
 local M = {}
@@ -183,10 +184,6 @@ local function more_owns(c: any): boolean
 	return c.plugin == "zeron" and (c.page == "inbox" or c.page == "tasks" or c.page == "skills")
 end
 
-local function on_bots(c: any): boolean
-	return c.name == "plugin" and c.plugin == "zeron" and c.page == "bots"
-end
-
 local function home(): Node
 	return RailButton {
 		key = "rail-new-chat",
@@ -198,7 +195,7 @@ local function home(): Node
 		end,
 		lit = function(): boolean
 			local name = route.current:get().name
-			return name == "home" or name == "session"
+			return (name == "home" or name == "session") and not bots_store.mode:get()
 		end,
 		on_click = function()
 			route.new_chat()
@@ -218,7 +215,7 @@ local function bots(): Node
 			return locale.s("bots.title")
 		end,
 		lit = function(): boolean
-			return on_bots(route.current:get())
+			return bots_store.mode:get()
 		end,
 		on_click = function()
 			route.plugin_page("zeron", "bots")

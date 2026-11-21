@@ -17,10 +17,11 @@ export type Bot = {
 	created: number?,
 }
 
+local sessions = require("@account/sessions")
+local route = require("@app/screens/shell/route")
+
 local M = {}
 
--- Every Bot, as the engine orders them: the pinned ones first, in the order
--- they were pinned, then the rest, newest first.
 M.list = ui.shared("bots.list", { state = "idle", bots = {} } :: { state: string, bots: { Bot } })
 
 -- (The host's call, which a test swaps for an old host's.)
@@ -46,7 +47,6 @@ local function all(): { Bot }
 	return (M.list:get().bots or {}) :: { Bot }
 end
 
--- The Bots in use (not archived): those pinned, and the rest.
 function M.pinned(): { Bot }
 	local out: { Bot } = {}
 	for _, b in all() do
@@ -96,7 +96,6 @@ function M.find(id: string?): Bot?
 	return nil
 end
 
--- The Bot whose chat this is, if it is one's.
 function M.of_chat(chat: string?): Bot?
 	if not chat then
 		return nil
@@ -109,7 +108,52 @@ function M.of_chat(chat: string?): Bot?
 	return nil
 end
 
--- A promise of `{ id, chat }`, or nil where the host can't.
+local function root_of(chat: string): string
+	local up: { [string]: string } = {}
+	for parent, kids in sessions.now:get().children or {} do
+		for _, k in kids do
+			up[k.id] = parent
+		end
+	end
+	local at = chat
+	for _ = 1, 16 do
+		local parent = up[at]
+		if not parent then
+			break
+		end
+		at = parent
+	end
+	return at
+end
+
+M.open = ui.computed(function(): Bot?
+	local c = route.current:get()
+	return if c.name == "session" then M.of_chat(root_of(c.session)) else nil
+end)
+
+M.on_page = ui.computed(function(): boolean
+	local c = route.current:get() :: any
+	return c.name == "plugin" and c.plugin == "zeron" and c.page == "bots"
+end)
+
+M.mode = ui.computed(function(): boolean
+	return M.on_page:get() or M.open:get() ~= nil
+end)
+
+function M.go(bot: Bot)
+	if bot.unread then
+		M.host.update { id = bot.id, unread = false }
+	end
+	route.open_session(bot.chat)
+end
+
+function M.gallery()
+	route.plugin_page("zeron", "bots")
+end
+
+M.sort = ui.persist("bots_sessions_sort", "status")
+M.compact = ui.persist("bots_sessions_compact", false)
+
 function M.create(args: { name: string, avatar: Avatar?, template: string?, instructions: string?, picks: any?, project: string?, device: string? }): any
 	return M.host.create(args)
 end
@@ -134,7 +178,6 @@ function M.archive(id: string, archived: boolean): any
 	return M.host.update { id = id, archived = archived }
 end
 
--- The Bot and its chat with it; whoever calls asks first.
 function M.delete(id: string): any
 	return M.host.delete { id = id }
 end
