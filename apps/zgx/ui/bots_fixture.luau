@@ -103,6 +103,33 @@ store.host.delete = function(args: any): any
 	return done(nil)
 end
 
+local made = 0
+store.host.create = function(args: any): any
+	made += 1
+	local id, chat = `n{made}`, `c{made}`
+	local a = args.avatar or {}
+	note(`create:{args.name}:{tostring(args.template)}:{tostring(a.glyph)}/{tostring(a.frame)}/{tostring(a.color)}/{if a.image then "image" else "none"}`)
+	-- (Newest first among the ones not pinned, as the engine lists them.)
+	table.insert(bots, 1, bot(id, args.name, chat, { avatar = a }))
+	publish()
+	return done({ id = id, chat = chat })
+end
+store.host.image = function(args: any): any
+	local name = string.match(args.path, "[^/\\]+$") or args.path
+	note(`image:{name}`)
+	if string.find(name, "big", 1, true) then
+		return {
+			after = function(_self: any, _ok: ((any) -> ())?, no: ((any) -> ())?)
+				if no then
+					no("too_large")
+				end
+			end,
+		}
+	end
+	-- (An 8 by 8 red JPEG.)
+	return done("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABQODxIPDRQSEBIXFRQYHjIhHhwcHj0sLiQySUBMS0dARkVQWnNiUFVtVkVGZIhlbXd7gYKBTmCNl4x9lnN+gXz/2wBDARUXFx4aHjshITt8U0ZTfHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHz/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwCrRRRXMe2f/9k=")
+end
+
 ui.command { id = "fixture.bots_none", title = "Fixture: no Bots", menu = "Fixture", run = function()
 	bots = {}
 	publish()

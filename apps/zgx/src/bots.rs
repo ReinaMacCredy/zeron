@@ -126,6 +126,64 @@ fn marks_of(args: &Value) -> Json {
     patch
 }
 
+/// The largest image file an avatar is made from.
+const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
+/// The avatar's screen, which shows through an image's clear parts.
+const SCREEN: [u8; 3] = [0x11, 0x11, 0x11];
+
+/// The image at `path` as a Bot's avatar: its middle square, made the largest
+/// and sharpest JPEG data URL that syncs (`BotAvatar::MAX_IMAGE_BYTES`).
+fn avatar_image(path: &str) -> Result<String, String> {
+    use base64::Engine as _;
+    if !std::path::Path::new(path).is_absolute() {
+        return Err("invalid".into());
+    }
+    let meta = std::fs::metadata(path).map_err(|_| "not_found".to_string())?;
+    if meta.len() > IMAGE_MAX_BYTES {
+        return Err("too_large".into());
+    }
+    let bytes = std::fs::read(path).map_err(|_| "failed".to_string())?;
+    let decoded = zgx_gpu::assets::decode_image(&bytes).map_err(|_| "invalid".to_string())?;
+    let (w, h) = (decoded.width(), decoded.height());
+    let rgba = image::RgbaImage::from_raw(w, h, decoded.pixels().to_vec()).ok_or("invalid")?;
+    let side = w.min(h).max(1);
+    let square =
+        image::imageops::crop_imm(&rgba, (w - side) / 2, (h - side) / 2, side, side).to_image();
+    for target in [128u32, 96, 64, 48] {
+        let sized = if side > target {
+            image::imageops::resize(
+                &square,
+                target,
+                target,
+                image::imageops::FilterType::Lanczos3,
+            )
+        } else {
+            square.clone()
+        };
+        let mut rgb = image::RgbImage::new(sized.width(), sized.height());
+        for (to, from) in rgb.pixels_mut().zip(sized.pixels()) {
+            let a = u32::from(from[3]);
+            for c in 0..3 {
+                to[c] = ((u32::from(from[c]) * a + u32::from(SCREEN[c]) * (255 - a)) / 255) as u8;
+            }
+        }
+        for quality in [85u8, 70, 55] {
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
+                .encode_image(&rgb)
+                .map_err(|_| "failed".to_string())?;
+            let url = format!(
+                "data:image/jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&jpeg)
+            );
+            if url.len() <= zeron_proto::BotAvatar::MAX_IMAGE_BYTES {
+                return Ok(url);
+            }
+        }
+    }
+    Err("too_large".into())
+}
+
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let t = BOTS.with(Rc::clone);
     let window = t.next_window.get();
@@ -151,6 +209,19 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             }));
         });
     }
+    // An image the person chose as an avatar (`path`): a data URL small
+    // enough to sync, or why not (`too_large`, `invalid`, `not_found`).
+    host.async_action("bots.image", |args| async move {
+        let path = args.field("path").map(text).unwrap_or_default();
+        let (tx, mut rx) = zgx::task::latest();
+        std::thread::spawn(move || {
+            tx.send(avatar_image(&path));
+        });
+        rx.recv()
+            .await
+            .ok_or("failed")?
+            .map(|url| Value::from(url.as_str()))
+    });
     // A Bot and its chat: `name`, `avatar`, `template`, `instructions`, the
     // composer's `picks` (its agent, model, effort and access) and where its
     // chat works (`project`, `device`). Answers `{ id, chat }`.
@@ -219,4 +290,65 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let id = args.field("id").map(text).unwrap_or_default();
         mutate(json!({ "op": "deleteBot", "botId": id })).await
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A photo as noisy as film, so no JPEG of it is small.
+    fn photo(dir: &std::path::Path, w: u32, h: u32) -> String {
+        let mut seed = 0x2545_f491u32;
+        let rgb = image::RgbImage::from_fn(w, h, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            image::Rgb([seed as u8, (seed >> 8) as u8, (seed >> 16) as u8])
+        });
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+            .encode_image(&rgb)
+            .unwrap();
+        let path = dir.join("photo.jpg");
+        std::fs::write(&path, jpeg).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn an_uploaded_image_becomes_a_square_jpeg_small_enough_to_sync() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let url = avatar_image(&photo(dir.path(), 900, 600)).unwrap();
+        assert!(
+            url.len() <= zeron_proto::BotAvatar::MAX_IMAGE_BYTES,
+            "{} bytes",
+            url.len()
+        );
+        let data = url.strip_prefix("data:image/jpeg;base64,").unwrap();
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap();
+        let back = zgx_gpu::assets::decode_image(&jpeg).unwrap();
+        assert_eq!(back.width(), back.height());
+        assert!(back.width() <= 128);
+    }
+
+    #[test]
+    fn a_file_that_is_no_image_too_big_or_not_there_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("notes.png");
+        std::fs::write(&text, b"not an image").unwrap();
+        assert_eq!(avatar_image(&text.to_string_lossy()), Err("invalid".into()));
+        let big = dir.path().join("big.png");
+        std::fs::write(&big, vec![0u8; IMAGE_MAX_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            avatar_image(&big.to_string_lossy()),
+            Err("too_large".into())
+        );
+        assert_eq!(
+            avatar_image(&dir.path().join("gone.png").to_string_lossy()),
+            Err("not_found".into())
+        );
+        assert_eq!(avatar_image("photo.png"), Err("invalid".into()));
+    }
 }

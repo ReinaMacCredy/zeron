@@ -35,11 +35,49 @@ M.GLYPHS = {
 	"user-rounded", "tag", "archive-minimalistic", "document", "gallery", "settings", "pull-request", "home", "terminal", "check-circle",
 }
 
+function M.corners(frame: string?, size: number): { number }
+	local c = CORNERS[frame or ""] or CORNERS.squircle
+	local out = {}
+	for i = 1, 4 do
+		out[i] = math.floor(c[i] * size + 0.5)
+	end
+	return out
+end
+
 function M.hex(color: string?): string
 	return HEX[color or ""] or HEX.violet
 end
 
 export type Look = { glyph: string?, frame: string?, color: string?, image: string? }
+
+-- Decoded here: an image avatar arrives as a `data:` URL, which `ui.image` would read as a file's path.
+local decoded: { [string]: any } = {}
+local waiting: { [string]: { (any) -> () } } = {}
+local function bitmap(url: string, got: (any) -> ())
+	if decoded[url] then
+		got(decoded[url])
+		return
+	end
+	if waiting[url] then
+		table.insert(waiting[url], got)
+		return
+	end
+	local base64 = string.match(url, "^data:image/[%w.+-]+;base64,(.+)$")
+	if not base64 then
+		return
+	end
+	waiting[url] = { got }
+	ui.decode_image(base64):after(function(b: any)
+		decoded[url] = b
+		local all = waiting[url] or {}
+		waiting[url] = nil
+		for _, f in all do
+			f(b)
+		end
+	end, function()
+		waiting[url] = nil
+	end)
+end
 
 local function rgb(hex: string): (number, number, number)
 	return tonumber(string.sub(hex, 2, 3), 16) or 0, tonumber(string.sub(hex, 4, 5), 16) or 0, tonumber(string.sub(hex, 6, 7), 16) or 0
@@ -71,6 +109,19 @@ M.Avatar = ui.component(function(props: { look: Look | (() -> Look), size: numbe
 			return ui.raw(math.floor(c[at] * size + 0.5), "the frame's corner, a share of its size")
 		end
 	end
+	local shown = ui.use_state(nil :: any)
+	ui.effect(function()
+		local image = look().image
+		if not image or image == "" then
+			shown:set(nil)
+			return
+		end
+		bitmap(image, function(b: any)
+			if look().image == image then
+				shown:set(b)
+			end
+		end)
+	end)
 	return ui.div {
 		id = props.id,
 		w = size,
@@ -90,19 +141,10 @@ M.Avatar = ui.component(function(props: { look: Look | (() -> Look), size: numbe
 		end,
 		aria_hidden = true,
 		ui.presence(function(): string
-			local image = look().image
-			return if image and image ~= "" then "image" else "glyph"
-		end, function(kind: string): Node
-			if kind == "image" then
-				return ui.image {
-					src = function(): string
-						return look().image or ""
-					end,
-					w = size,
-					h = size,
-					fit = "cover",
-					aria_hidden = true,
-				}
+			return if shown:get() then look().image or "" else ""
+		end, function(image: string): Node
+			if image ~= "" then
+				return ui.image { src = shown:peek(), w = size, h = size, fit = "cover", aria_hidden = true }
 			end
 			return ui.div {
 				w = size,

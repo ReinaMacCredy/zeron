@@ -72,7 +72,8 @@ zgx-run = { git = "https://github.com/ReinaMacCredy/zgx", rev = "1a387460077a5ac
 # allow, so turning WebP on here is all it takes (the member cards' art).
 # `ico`: sites' favicons (the browser tab's: src/favicons.rs), most of
 # which are .ico files (Facebook's; any site with only /favicon.ico).
-image = { version = "0.25.10", default-features = false, features = ["webp", "ico"] }
+# `jpeg`: a Bot's uploaded avatar, made small enough to sync (src/bots.rs).
+image = { version = "0.25.10", default-features = false, features = ["webp", "ico", "jpeg"] }
 # The account (src/auth.rs): the edge over HTTPS from worker threads, its
 # JSON, and the browser.
 ureq = { version = "2", features = ["json"] }
