@@ -12,6 +12,8 @@
 local ds = require("@ds")
 local ContextMenu = require("@ds/context_menu")
 local sessions = require("@account/sessions")
+local bots = require("@app/screens/bots/store")
+local bots_panel = require("@app/screens/bots/panel")
 local project_calls = require("@account/projects")
 -- The project editor (screens/shell/project_editor, its emoji picker and
 -- the emoji's data): loaded as it's first opened, not with the window, and
@@ -599,6 +601,9 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		end
 	end
 	for _, c in now.chats do
+		if bots.of_chat(c.id) then
+			continue
+		end
 		if just and not (just_group and c.project and by[c.project] == just_group) then
 			continue
 		end
@@ -1924,7 +1929,32 @@ M.Sidebar = ui.component(function(props: Props): Node
 		}),
 		-- (That gap's top moves the window, as the bar beside it does.)
 		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
-		bar,
+		-- (Kept under the Bots panel, unseen: the column's width and its fold are the list's.)
+		ui.div {
+			h_full = true,
+			opacity = function(): number
+				return if bots.mode:get() then 0 else 1
+			end,
+			pointer_events = function(): string
+				return if bots.mode:get() then "none" else "auto"
+			end,
+			bar,
+		},
+		ui.show(function(): boolean
+			return bots.mode:get() and not M.peek_mounted:get()
+		end, ui.div {
+			id = "shell-bots-panel",
+			absolute = true,
+			left = function(): number
+				return math.min(5, view.sidebar_shown:get())
+			end,
+			right = 0,
+			top = props.top or 0,
+			bottom = 5,
+			overflow = "hidden",
+			rounded = "$zeron.inset.radius",
+			bots_panel.Panel {},
+		}),
 		rename_dialog(),
 		delete_dialog(),
 		sleep_dialog(),
