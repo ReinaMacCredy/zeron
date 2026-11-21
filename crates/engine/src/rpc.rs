@@ -1313,7 +1313,6 @@ enum MutateParams {
         #[serde(default)]
         from_chat_id: Option<String>,
     },
-    /// A Bot and its chat, made together (`rpc/bots.rs`); the person's alone.
     #[serde(rename_all = "camelCase")]
     CreateBot {
         bot_id: String,
@@ -1336,7 +1335,6 @@ enum MutateParams {
         bot_id: String,
         patch: zeron_proto::BotPatch,
     },
-    /// The Bot goes, and its chat with it.
     #[serde(rename_all = "camelCase")]
     DeleteBot { bot_id: String },
     #[serde(rename_all = "camelCase")]

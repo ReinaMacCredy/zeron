@@ -35,7 +35,6 @@ M.GLYPHS = {
 	"user-rounded", "tag", "archive-minimalistic", "document", "gallery", "settings", "pull-request", "home", "terminal", "check-circle",
 }
 
--- A frame's four corners (top left, top right, bottom right, bottom left) at `size`.
 function M.corners(frame: string?, size: number): { number }
 	local c = CORNERS[frame or ""] or CORNERS.squircle
 	local out = {}
@@ -51,8 +50,7 @@ end
 
 export type Look = { glyph: string?, frame: string?, color: string?, image: string? }
 
--- An image avatar's pixels, decoded once for every place that shows it: it
--- arrives as a `data:` URL, which `ui.image` would read as a file's path.
+-- Decoded here: an image avatar arrives as a `data:` URL, which `ui.image` would read as a file's path.
 local decoded: { [string]: any } = {}
 local waiting: { [string]: { (any) -> () } } = {}
 local function bitmap(url: string, got: (any) -> ())
@@ -95,7 +93,6 @@ M.Avatar = ui.component(function(props: { look: Look | (() -> Look), size: numbe
 	end
 	local inset = math.floor(size * 0.17 + 0.5)
 	local screen = size - inset * 2
-	-- The person's own image once decoded, the glyph until then.
 	local shown = ui.use_state(nil :: any)
 	ui.effect(function()
 		local image = look().image

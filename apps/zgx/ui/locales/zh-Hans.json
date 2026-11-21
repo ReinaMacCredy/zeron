@@ -4495,6 +4495,17 @@
       "title": "工作目录",
       "add": "添加文件夹…"
     },
+    "card": {
+      "toggles": "聊天视图",
+      "toggle_card": "工作区卡片",
+      "toggle_terminal": "终端",
+      "toggle_panel": "右侧面板",
+      "reveal": "在访达中显示",
+      "open_in": "在{app}中打开",
+      "finder": "访达",
+      "commit": "提交、推送并创建 PR",
+      "changes": "更改"
+    },
     "init": {
       "couldnt_show": "无法显示{what}",
       "home": "新建对话页面",

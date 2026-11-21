@@ -1,5 +1,3 @@
--- The Bots gallery and Create Bot on ui/bots_fixture.luau: what the page lists and filters, and what the dialog asks the host.
-
 local function open(): any
 	local app = mount("bots_fixture.luau")
 	app:resize(1200, 800)

@@ -202,11 +202,6 @@ export type Props = {
 	-- `on_reach` changes. Nil (a new chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
 	on_reach: ((reach: string) -> ())?,
-	-- The chip's line, a caller's own in the default's place (given what
-	-- the default reads), and its panel: `head(rest, fixed)` its head in
-	-- "Work in"'s place, given that head (`rest`, nil with nothing to work
-	-- in) to keep under its own or leave out, and `width`. Its panel opens
-	-- on the menus' side (over a docked composer), not under the chip.
 	place: { line: (place: Place) -> { Child }, head: ((rest: Node?, fixed: boolean) -> Node?)?, width: number? }?,
 	-- On Cloud, what a new chat's machine reaches ("devices" | "isolated";
 	-- nil: `reach_default`, the account's). No default (an edge that can't

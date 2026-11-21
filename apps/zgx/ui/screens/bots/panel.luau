@@ -21,8 +21,7 @@ local moved = ui.state("bots_panel_moved", nil :: string?)
 local editing = ui.state("bots_panel_editing", nil :: string?)
 local edit_open = ui.state("bots_panel_edit_open", false)
 local edit_name = ui.state("bots_panel_edit_name", "")
--- The height Compact view took from the session rows while Properties is open:
--- kept under them until the menu closes, so the menu's button stays put.
+-- The height Compact view took while Properties is open stays under the rows, so the menu's button stays put.
 local slack = ui.state("bots_panel_slack", 0)
 
 local function fill(bg: string, shown: any, radius: any): Node
@@ -345,7 +344,6 @@ local function status_of(k: Kid): string
 	return k.status or "done"
 end
 
--- How many of the Bot's chat and sessions wait on the person.
 function M.needs(bot: store.Bot): number
 	local n = 0
 	local asked = asks:get()

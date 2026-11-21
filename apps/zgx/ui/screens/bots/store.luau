@@ -1,4 +1,4 @@
--- Bots from src/bots.rs `bots.list`; each host action under `pcall`, as an old host has none.
+-- Each host action runs under `pcall`: an old host has none.
 
 export type Avatar = { glyph: string?, frame: string?, color: string?, image: string? }
 export type Bot = {
@@ -24,7 +24,6 @@ local M = {}
 
 M.list = ui.shared("bots.list", { state = "idle", bots = {} } :: { state: string, bots: { Bot } })
 
--- (The host's call, which a test swaps for an old host's.)
 M.raw_call = ui.call
 local function call(name: string, args: any): any
 	local ok, p = pcall(M.raw_call, name, args)
@@ -150,12 +149,10 @@ function M.go(bot: Bot)
 	route.open_session(bot.chat)
 end
 
--- A Bot just made, by its chat (its row may not have arrived yet).
 function M.go_chat(chat: string)
 	route.open_session(chat)
 end
 
--- The image at `path` as an avatar's: a promise of its data URL.
 function M.image(path: string): any
 	return M.host.image { path = path }
 end

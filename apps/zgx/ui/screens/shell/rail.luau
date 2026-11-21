@@ -24,7 +24,6 @@ M.over = ui.state("shell_rail_over", false)
 
 local BUTTON, GLYPH, GAP, TOP, PAD = 34, 18, 6, 44, 8
 local HOVER_MS, SWAP_MS = 150, 120
--- The Bots mockup's menu: its corner and a row's height.
 local MENU_RADIUS, MENU_ROW = ui.raw(12, "the Bots menus' corner"), ui.raw(31, "the Bots menus' row")
 local AVATAR = 24
 local HOVER_FADE = "cubicBezier(.4, 0, .2, 1)"
@@ -121,8 +120,7 @@ local RailButton = ui.component(function(props: ButtonProps): Node
 	end
 	local glyph: Child = props[1]
 	if props.icon then
-		-- Each variant is mounted only while it shows (an image left at opacity 0
-		-- holds the shell's first frame after a route change back).
+		-- Each variant is mounted only while it shows: an image left at opacity 0 holds the shell's first frame after a route change back.
 		local ms = math.max(motion.ms(SWAP_MS), 1)
 		local outline, bold = props.icon, props.bold or props.icon
 		glyph = ui.div {

@@ -1,5 +1,3 @@
--- A Bot's chat on ui/bots_chat_fixture.luau: what stands over and opens its conversation, and the folder chip every chat's composer has.
-
 local function settle(app: any)
 	app:frames(40)
 end
@@ -18,7 +16,6 @@ test("a new Bot's chat opens with its greeting and offers; one picked goes as th
 	expect(lead).to_contain("Hi, I'm Flake hunter.")
 	expect(lead).to_contain('heading "Put your Flake hunter to work"')
 	expect(lead).to_contain('#bot-chat-pick-3 button "Speed up the slowest tests"')
-	-- No Mission in a Bot's chat, though its agent offers one.
 	expect(app:has("#composer-mission")).to_be(false)
 	app:click("#bot-chat-pick-1")
 	settle(app)
@@ -51,7 +48,6 @@ end)
 
 test("the Bot's name opens its menu and says how many of its chats wait on the person", function()
 	local app = open("go_s2")
-	-- A conversation under way: the line, not the card.
 	expect(app:has("#bot-chat-answered")).to_be(true)
 	expect(app:has("#bot-chat-needs")).to_be(false)
 	app:command("bot_asks")
@@ -61,14 +57,12 @@ test("the Bot's name opens its menu and says how many of its chats wait on the p
 	settle(app)
 	expect(app:has('role:menuitem "Pin to top"')).to_be(true)
 	expect(app:has('role:menuitem "Delete"')).to_be(true)
-	-- An archived Bot's way back.
 	expect(app:has('role:menuitem "Unarchive"')).to_be(true)
 	expect(app:has('role:menuitem "Archive"')).to_be(false)
 end)
 
 test("any chat's footer is one folder chip, opening Working directory: the folder, its path, and Add folder", function()
 	local app = open("go_s1")
-	-- An ordinary chat: no Bot over it, Mission where it is offered.
 	expect(app:has("#bot-chat-head")).to_be(false)
 	app:command("offer_missions")
 	settle(app)
@@ -81,6 +75,28 @@ test("any chat's footer is one folder chip, opening Working directory: the folde
 	expect(panel).to_contain('#composer-folder-current menuitem "Atlas"')
 	expect(panel).to_contain('#composer-folder-path "/tmp/atlas"')
 	expect(panel).to_contain('#composer-folder-add button "Add folder…"')
-	-- A chat can't move: nothing else to choose there.
 	expect(panel).never.to_contain("Work in")
+end)
+
+test("any chat has the card's toggles at its top right; the card opens under them with where the chat runs and its git rows, and shuts again", function()
+	local app = open("go_s1")
+	app:resize(1200, 760)
+	settle(app)
+	local toggles = app:tree("#chat-toggles")
+	expect(toggles).to_contain('#chat-toggle-card button "Workspace card"')
+	expect(toggles).to_contain('#chat-toggle-terminal button "Terminal"')
+	expect(toggles).to_contain('#chat-toggle-panel button "Right panel"')
+	expect(app:has("#chat-card")).to_be(false)
+	expect(app:has("#sidecar")).to_be(false)
+	app:click("#chat-toggle-card")
+	settle(app)
+	local card = app:tree("#chat-card")
+	expect(card).to_contain("MacBook Pro")
+	expect(card).to_contain('#chat-card-actions button "Actions"')
+	expect(card).to_contain('#chat-card-commit button "Commit, push & PR"')
+	expect(card).to_contain('#chat-card-changes button "Changes"')
+	app:click("#chat-toggle-card")
+	settle(app)
+	expect(app:has("#chat-card")).to_be(false)
+	expect(app:error()).to_be(nil)
 end)

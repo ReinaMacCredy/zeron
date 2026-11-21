@@ -2049,8 +2049,10 @@ return function(props: Props): Node
 			end
 		end
 	end)
+	-- Off since the chat's card took its place; kept until the card is signed off.
+	local live_column = ui.state("live_column", false)
 	local function sidecar_shown(): boolean
-		return in_session() and not on_plugin() and not grouped() and not expanded()
+		return live_column:get() and in_session() and not on_plugin() and not grouped() and not expanded()
 	end
 	local sidecar = ui.div {
 		id = "sidecar-slot",

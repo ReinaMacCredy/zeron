@@ -177,9 +177,6 @@ export type Props = {
 	measure: (number | () -> number)?,
 	-- Its rows' inset each side, in points; by default the theme's.
 	side: number?,
-	-- What opens the conversation, over its first message and scrolling
-	-- with it (a Bot's greeting): in that message's row, so its place is
-	-- measured with it; with no message yet, at the conversation's top.
 	lead: (() -> Node)?,
 	-- How far over what floats at its foot its fade starts. (A fade's first fifth
 	-- hardly shows: this has it show from where it should start.)
@@ -3443,7 +3440,6 @@ local function Transcript(props: Props): Node
 			items = "start",
 			px = if props.side then ui.raw(props.side, "a little wider than the composer") else "$space.5",
 			pt = function(): number
-				-- (Under a `lead`, the gap is the lead's, there before the message lands.)
 				local o = if props.lead and index:get() == 1 then 1 else opened()
 				return ui.raw(pt() * collapsed() * o, "Zeron's gaps over a message (transcript.rs top_gap_for)")
 			end,
@@ -3917,7 +3913,6 @@ local function Transcript(props: Props): Node
 					else List(),
 			},
 		},
-		-- (No message yet: its `lead` where the first message's row will put it.)
 		if props.lead
 			then ui.show(
 				function(): boolean

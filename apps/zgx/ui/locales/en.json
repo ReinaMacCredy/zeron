@@ -4495,6 +4495,17 @@
       "title": "Working directory",
       "add": "Add folder…"
     },
+    "card": {
+      "toggles": "Chat views",
+      "toggle_card": "Workspace card",
+      "toggle_terminal": "Terminal",
+      "toggle_panel": "Right panel",
+      "reveal": "Reveal in Finder",
+      "open_in": "Open in {app}",
+      "finder": "Finder",
+      "commit": "Commit, push & PR",
+      "changes": "Changes"
+    },
     "init": {
       "couldnt_show": "{what} couldn't be shown",
       "home": "The new chat page",

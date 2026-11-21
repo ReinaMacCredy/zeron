@@ -1,4 +1,3 @@
--- Create Bot: what it starts from, then its name and avatar.
 local ds = require("@ds")
 local locale = require("@ds/locale")
 local motion = require("@ds/motion")
@@ -14,8 +13,6 @@ local SCRIM_MS, IN_MS, OUT_MS, STEP_MS = 180, 220, 140, 180
 local EASE = "cubicBezier(.2, .8, .2, 1)"
 local LEFT_W = 372
 
--- Who asked for it (the page or the panel: each holds one, and only the
--- asker's opens).
 local asked = ui.state("bots_create_asked", "")
 
 function M.open(from: string)
@@ -36,7 +33,6 @@ local function trimmed(s: string): string
 	return string.match(s, "^%s*(.-)%s*$") or ""
 end
 
--- A part that arrives: `from` to here, once it is built.
 local function arrives(from: { [string]: any }, ms: number): (any) -> ()
 	return function(el: any)
 		local d = motion.ms(ms)
@@ -70,7 +66,6 @@ local function look_of(d: Draft): () -> avatar.Look
 	end
 end
 
--- The left pane: what is being made.
 local function Preview(d: Draft): Node
 	local function heading(text: any): Node
 		return ui.text {
@@ -113,7 +108,6 @@ local function Preview(d: Draft): Node
 		ui.presence(function(): string
 			return if d.step:get() == 1 then `1:{d.template:get()}` else "2"
 		end, function(key: string): Node
-			-- (A choice made pops in; a step taken, or the dialog opening, only shows it.)
 			local step = d.step:peek()
 			local pop = if step == 1 and seen == 1 then pop else nil
 			seen = step
@@ -181,7 +175,6 @@ local function foot(...: Node): Node
 	return ui.row { w_full = true, shrink = 0, justify = "end", gap = "$space.2", pt = ui.raw(14, "the mockup's dialog foot"), ... }
 end
 
--- Step 1: a blank Bot, or a template.
 local function Goal(d: Draft, next: () -> ()): Node
 	local rows = ui.computed(function(): { templates.Template }
 		local q = string.lower(d.query:get())
@@ -518,7 +511,6 @@ local function Upload(d: Draft): Node
 	}
 end
 
--- Step 2: its name (in the preview) and its avatar.
 local function Customize(d: Draft, back: () -> (), make: () -> ()): Node
 	return ui.column {
 		w_full = true,
@@ -583,7 +575,6 @@ local function Customize(d: Draft, back: () -> (), make: () -> ()): Node
 	}
 end
 
--- What the dialog holds, built as it opens: a draft starts blank each time.
 local Body = ui.component(function(props: { close: () -> (), phase: State<number> }): Node
 	local d: Draft = {
 		step = ui.use_state(1),
@@ -742,7 +733,6 @@ local Body = ui.component(function(props: { close: () -> (), phase: State<number
 						grow = 1,
 						min_h = 0,
 						on_mount = function(el: any)
-							-- (As it opens, the first step is simply there.)
 							if d.moved:peek() then
 								arrives({ opacity = { 0, 1 }, x = { if d.back:peek() then -10 else 10, 0 } }, STEP_MS)(el)
 							end
@@ -755,8 +745,6 @@ local Body = ui.component(function(props: { close: () -> (), phase: State<number
 	}
 end)
 
--- The dialog `from` asked for: the whole window, its scrim and card its own
--- (the modal's dim made clear), kept up while they leave.
 M.Dialog = ui.component(function(props: { from: string }): Node
 	local phase = ui.use_state(0)
 	local shown = ui.use_state(false)
@@ -777,7 +765,6 @@ M.Dialog = ui.component(function(props: { from: string }): Node
 			moving = anime.animate(phase, motion.params({ value = 1, duration = IN_MS, ease = EASE }))
 		elseif shown:peek() then
 			moving = anime.animate(phase, motion.params({ value = 0, duration = OUT_MS, ease = "inQuad" }))
-			-- (Taken down once it has left, unless it was asked for again.)
 			ui.after(math.max(motion.ms(OUT_MS), 1), function()
 				if asked:peek() ~= props.from then
 					shown:set(false)

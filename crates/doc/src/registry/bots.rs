@@ -1,14 +1,4 @@
-//! Bots: a named agent with one long-lived chat.
-//!
-//! A `bots` row holds the agent profile it runs as (name, harness, model,
-//! access, instructions) and what a profile has no place for: its avatar,
-//! whether it is pinned and where, archived, unread, and its chat's id.
-//! Per-field LWW like every row, so a rename on one device and a pin on
-//! another both land.
-//!
-//! An uploaded avatar image travels in a `botAvatars` row of its own, under
-//! the Bot's id: the room refuses an op over 16 KB, and a Bot's instructions
-//! and its image would not both fit one row.
+//! An uploaded avatar image has a `botAvatars` row of its own: the room refuses an op over 16 KB, and a Bot's instructions and its image would not both fit one row.
 
 use super::*;
 use zeron_proto::{
@@ -48,8 +38,6 @@ struct RawBot {
     deleted: bool,
 }
 
-/// A Bot and whether its row is flagged deleted (kept, so a retried create
-/// cannot revive it).
 #[derive(Debug, Clone)]
 struct Kept {
     bot: Bot,
@@ -98,7 +86,6 @@ fn checked_avatar(avatar: &BotAvatar) -> Result<BotAvatar, DocError> {
         .map_err(|part| invalid(&format!("Invalid Bot avatar: {part}")))
 }
 
-/// The avatar as its Bot's row keeps it: the image is the avatar row's.
 fn avatar_field(avatar: &BotAvatar) -> Value {
     json!({ "glyph": avatar.glyph, "frame": avatar.frame, "color": avatar.color })
 }
@@ -131,7 +118,6 @@ fn check_fits(row: &RegistryRow) -> Result<(), DocError> {
     }))
 }
 
-/// Whether the Bot's row, and its image's, would each fit a registry op.
 pub fn check_bot_syncs(bot: &Bot) -> Result<(), DocError> {
     let name = checked_name(&bot.profile.name)?;
     let avatar = checked_avatar(&bot.avatar)?;
@@ -194,8 +180,6 @@ impl RegistryDoc {
         Some(bot)
     }
 
-    /// The Bots there are: the pinned ones first, in their order, then the
-    /// rest, newest first.
     pub fn read_bots(&self) -> Result<Vec<Bot>, DocError> {
         let mut bots: Vec<Bot> = self
             .read_cached::<RawBot, Kept>(KIND_BOTS, Kept::from)
@@ -261,7 +245,6 @@ impl RegistryDoc {
         Ok(op)
     }
 
-    /// The avatar row's op for `image`, or none when it already says so.
     fn bot_image_op(
         &mut self,
         bot_id: &str,
@@ -280,7 +263,6 @@ impl RegistryDoc {
             .map(Some)
     }
 
-    /// A taken id, deleted rows included, is never overwritten: retries must not revive.
     pub fn create_bot(&mut self, bot: &Bot) -> Result<bool, DocError> {
         let id = bot.profile.id.as_str();
         if !valid_row_id(id) {
@@ -329,7 +311,6 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// Only what the patch changes is written. `false`: no such Bot.
     pub fn update_bot(
         &mut self,
         bot_id: &str,
@@ -400,7 +381,6 @@ impl RegistryDoc {
                     set.insert("orderKey".into(), json!(key));
                 }
             }
-            // Newly pinned: last among the pinned.
             None if pinned && !bot.pinned => {
                 let key =
                     pin_order_key_between(self.last_pinned_key(bot_id).as_deref(), None, &hlc)
@@ -421,8 +401,7 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// A flagged row, not a tombstone, so a retried create cannot revive it;
-    /// its image goes, and its chat with it. `None`: no such Bot; else its chat's id.
+    /// A flagged row, not a tombstone, so a retried create cannot revive it.
     pub fn delete_bot(
         &mut self,
         bot_id: &str,

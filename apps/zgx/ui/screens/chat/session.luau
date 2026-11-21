@@ -52,6 +52,7 @@ export type Id = string | () -> string? | State<string?> | nil
 -- it (screens/chat/dock: a side chat's tab docks its composer the same).
 local Dock = require("@app/screens/chat/dock")
 local BotChat = require("@app/screens/bots/chat")
+local Card = require("@app/screens/chat/card")
 
 local function resolve(id: Id): () -> string?
 	if type(id) == "string" then
@@ -250,6 +251,12 @@ local function Session(id: Id?): Node
 		w_full = true,
 		h_full = true,
 		min_h = 0,
+		relative = true,
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(Card.room:peek() - size.w) >= 1 then
+				Card.room:set(size.w)
+			end
+		end,
 		-- A bare Escape that reached the page (nothing inside took it): the
 		-- setting's "Escape stops the agent".
 		on_key = function(e): boolean
@@ -258,6 +265,7 @@ local function Session(id: Id?): Node
 			end
 			return false
 		end,
+		Card.Corner { session = which },
 		ui.presence(kind, function(k: string): Node
 			if k == "waiting" then
 				return ui.div { w_full = true, h_full = true }
@@ -298,7 +306,7 @@ local function Session(id: Id?): Node
 				min_h = 0,
 				-- Under the composer, to its footer's line.
 				pb = Dock.page_pad(),
-				-- A Bot's chat: its avatar and name over the conversation.
+				pr = Card.shift,
 				ui.show(function(): boolean
 					return BotChat.of(which()) ~= nil
 				end, BotChat.Header {
@@ -327,7 +335,6 @@ local function Session(id: Id?): Node
 							end,
 							side = 20,
 							fade_lead = 12,
-							-- A Bot's chat opens with its greeting and what it offers.
 							lead = if BotChat.of(id)
 								then function(): Node
 									return BotChat.Lead {

@@ -17,6 +17,7 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local Card = require("@app/screens/chat/card")
 local Draft = require("@ds/draft_text")
 local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
@@ -2483,7 +2484,7 @@ local function Composer(): Node
 			absolute = true,
 			pointer_events = "none",
 			left = 0,
-			right = 0,
+			right = Card.shift,
 			-- On a new chat by its top, from the page's middle: it moves with
 			-- the page as the page lays out, and what's written grows it down.
 			-- Docked, by its foot.

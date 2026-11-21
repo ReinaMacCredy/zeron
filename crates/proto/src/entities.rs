@@ -3039,9 +3039,7 @@ pub struct AgentProfilesSnapshot {
     pub profiles: Vec<AgentProfile>,
 }
 
-/// A Bot's picture: a glyph in a framed tile of one colour, or the person's own
-/// image. Written whole, as one field, so a switch from one kind to the other
-/// never mixes them.
+/// Written whole, as one field, so a switch between a glyph and an image never mixes them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotAvatar {
@@ -3051,8 +3049,6 @@ pub struct BotAvatar {
     pub frame: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub color: String,
-    /// The person's own image, as a `data:image/…;base64,` URL small enough to
-    /// travel in a registry row of its own ([`BotAvatar::MAX_IMAGE_BYTES`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 }
@@ -3062,8 +3058,6 @@ impl BotAvatar {
     /// A registry op holds 16 KB; the image's row keeps under it with its clocks.
     pub const MAX_IMAGE_BYTES: usize = 14 * 1024;
 
-    /// Trimmed, each part checked: a glyph, frame and colour are short lowercase
-    /// names, an image a base64 data URL of an image type. `Err` names the bad part.
     pub fn normalized(self) -> Result<BotAvatar, &'static str> {
         let name = |v: String, part: &'static str| {
             let v = v.trim().to_owned();
@@ -3089,8 +3083,6 @@ impl BotAvatar {
     }
 }
 
-/// A named, persistent agent with one long-lived chat: an agent profile (its
-/// `id` is the Bot's) plus what a profile has no place for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bot {
@@ -3101,14 +3093,12 @@ pub struct Bot {
     pub chat_id: String,
     #[serde(default)]
     pub pinned: bool,
-    /// Its place among the pinned ones (`pin_order_key_between`); kept when unpinned.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub order_key: String,
     #[serde(default)]
     pub archived: bool,
     #[serde(default)]
     pub unread: bool,
-    /// The template it was made from: where its greeting and suggestions come from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -3118,12 +3108,10 @@ pub struct Bot {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotPatch {
-    /// Who it is and how it works, whole; only what differs is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<AgentProfileDraft>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<BotAvatar>,
-    /// Pinning puts it last among the pinned unless `order_key` says where.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

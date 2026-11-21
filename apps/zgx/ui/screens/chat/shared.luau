@@ -1419,7 +1419,6 @@ M.open_model = ui.shared("chat.composer.open_model", 0)
 -- A new chat's agent asked for from elsewhere (the Skills page's Try now): an agent's id; the composer takes its first model unless it runs that agent already, then clears it.
 M.want_agent = ui.shared("chat.composer.want_agent", nil :: string?)
 M.composer_shown = ui.shared("chat.composer.shown", 0)
--- Words sent to the open chat from outside its composer (a Bot's suggestion picked), by the composer's own send: `M.say(text)`.
 M.said = ui.shared("chat.composer.said", { n = 0, text = "" })
 function M.say(text: string)
 	M.said:set { n = M.said:peek().n + 1, text = text }
