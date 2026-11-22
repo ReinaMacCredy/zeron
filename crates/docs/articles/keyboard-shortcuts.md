@@ -54,6 +54,7 @@ These live in [Settings > General > Chat](zeron://settings/chat) and [Settings >
 - Cmd+W (macOS) closes the right pane's active tab first, then the focused session tab, and closes the window only when neither is left. In the browser pane it closes the browser tab.
 - Browser: with focus in the [browser](zeron://docs/browser) pane, Cmd+L focuses the address bar, Cmd+T opens a tab, Cmd+W closes it, and Cmd+[ and Cmd+] go back and forward. A key you bound to another shortcut keeps that shortcut.
 - Device screen: with focus on a [Device hub](zeron://docs/device-hub) screen, Cmd+R is sent to the device instead of toggling the right sidebar.
+- Composer: while it is empty, Shift+Up and Shift+Down step the chat's context size for models with a **Context** card (see [Compaction](zeron://docs/compaction)).
 
 ## Text editing keys
 
