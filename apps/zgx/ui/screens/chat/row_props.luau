@@ -3,6 +3,7 @@
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 local FileLinks = require("@app/screens/chat/file_links")
+local FileCards = require("@app/screens/chat/file_cards")
 local Shared = require("@app/screens/chat/shared")
 local Computer = require("@app/screens/settings/computer")
 local FilePaths = require("@app/screens/files/paths")
@@ -77,6 +78,7 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 			local r = FileLinks.resolve(target, if s then s.cwd else nil)
 			return r ~= nil
 		end
+		props.file_cards = FileCards(peek)
 	end
 	return props
 end

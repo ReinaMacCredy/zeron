@@ -55,9 +55,11 @@ type Wash = { lines: { string }, used: { [string]: boolean }, color: string }
 local locale = require("@self/locale")
 local look = require("@self/look")
 local References = require("@self/references")
+local FileCard = require("@self/file_card")
 
 -- A link's context menu entry (ds/links, ds/context_menu's).
 export type LinkEntry = Links.Entry
+export type FileCards = FileCard.Files
 export type Props = {
 	veil: boolean?,
 	veil_seed: boolean?,
@@ -98,6 +100,7 @@ export type Props = {
 	-- files (`file`: the chip a prompt's mention is), or one of its agent's
 	-- skills (`skill`, its name: the chip a picked skill is). Nil: a link.
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	file_cards: FileCard.Files?,
 	-- What the message carries, by name (a sent prompt's: its files,
 	-- pictures, quotes, chats…): an "(attachment: <name>)" in its words
 	-- naming one of them is drawn as that one's chip. (Only a prompt's:
@@ -264,6 +267,8 @@ type Ctx = {
 	attachment_icon: ((target: string) -> string?)?,
 	invocations: boolean?,
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	file_cards: FileCard.Files?,
+	live: (() -> boolean)?,
 	attached: { [string]: { kind: string, icon: string? } }?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
@@ -1493,9 +1498,110 @@ local function pending_height(b: any): number
 	return lines * 22
 end
 
+local CARDS_MOST = 12
+local function file_refs(list: { MarkdownRun }, out: { FileCard.Item }, seen: { [string]: boolean }): boolean
+	local function add(target: string, words: string): boolean
+		if not seen[target] then
+			seen[target] = true
+			table.insert(out, { target = target, words = words })
+		end
+		return #out <= CARDS_MOST
+	end
+	local prev: string? = nil
+	for _, r in list do
+		if r.img or (r :: any).attached then
+			return false
+		end
+		if r.a then
+			if opens(r.a) or (string.match(r.a, "^zeron%-") and not string.match(r.a, "^zeron%-file:")) then
+				return false
+			end
+			if r.a ~= prev and not add(r.a, r.x) then
+				return false
+			end
+		else
+			for word in string.gmatch(r.x, "%S+") do
+				if not string.find(word, "[./]") or not add(word, word) then
+					return false
+				end
+			end
+		end
+		prev = r.a
+	end
+	return true
+end
+
+local function cards_of(b: MarkdownBlock): { FileCard.Item }?
+	local out: { FileCard.Item } = {}
+	local seen: { [string]: boolean } = {}
+	if b.t == "p" then
+		if not file_refs(b.s, out, seen) then
+			return nil
+		end
+	elseif b.t == "ul" or b.t == "ol" then
+		for _, item in b.items do
+			local only = item[1]
+			if #item ~= 1 or only.t ~= "p" or not file_refs(only.s, out, seen) then
+				return nil
+			end
+		end
+	end
+	return if #out > 0 then out else nil
+end
+
+local function no_cards(ctx: Ctx?): Ctx?
+	if not (ctx and ctx.file_cards) then
+		return ctx
+	end
+	local plain = table.clone(ctx)
+	plain.file_cards = nil
+	return plain
+end
+
 -- One block, by its kind; `ink`, its text's colour where not the primary (a
 -- quote's).
 local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
+	local cards = if ctx and ctx.file_cards then cards_of(b) else nil
+	if cards and ctx and ctx.file_cards then
+		local files, live, plain = ctx.file_cards, ctx.live, no_cards(ctx)
+		local targets: { string } = {}
+		for _, it in cards do
+			table.insert(targets, it.target)
+		end
+		local sig = `{ctx.group or ""}\0{table.concat(targets, "\0")}`
+		return ui.presence(function(): string
+			if FileCard.shown[sig] then
+				return "cards"
+			elseif live and live() then
+				return "words"
+			end
+			local all = true
+			for _, target in targets do
+				if not files.find(target) then
+					all = false
+				end
+			end
+			return if all then "cards" else "words"
+		end, function(k: string): Node
+			if k == "words" then
+				return block(b, ink, plain)
+			end
+			FileCard.remember(sig)
+			local f = ctx.find
+			if f then
+				local paragraphs = if b.t == "p" then { b.s } else {}
+				if b.t == "ul" or b.t == "ol" then
+					for _, item in b.items do
+						table.insert(paragraphs, (item[1] :: any).s)
+					end
+				end
+				for _, s in paragraphs do
+					f.n += #MarkdownFind.occurrences(MarkdownFind.words(s), f.q)
+				end
+			end
+			return FileCard.Row { files = files, items = cards, open = ctx.open, pictures = ctx.pictures, group = ctx.group }
+		end, { w_full = true, min_w = 0 })
+	end
 	if (b :: any).t == "pending" then
 		-- (Its place, held until it's parsed: a frame or two.)
 		return ui.div { w_full = true, h = pending_height(b) }
@@ -1663,7 +1769,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				render = if lang == "markdown" or lang == "md"
 					then function(): Node
 						local inner: any = if ctx then table.clone(ctx) else { tasks = {} }
-						inner.find, inner.veil, inner.source, inner.task, inner.tasks = nil, nil, nil, nil, {}
+						inner.find, inner.veil, inner.source, inner.task, inner.tasks, inner.file_cards = nil, nil, nil, nil, {}, nil
 						local nodes: { [any]: any } = { w_full = true, min_w = 0, gap = if inner.small then "$space.3" else "$space.4" }
 						for _, sub in parse(b.text, {}) do
 							table.insert(nodes, block(sub, ink, inner))
@@ -1675,6 +1781,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 		}
 	elseif b.t == "ul" or b.t == "ol" then
 		local items: { Node } = {}
+		local inner = no_cards(ctx)
 		local ordered = b.t == "ol"
 		local start = if b.t == "ol" then b.start else 1
 		for i, item in b.items do
@@ -1711,7 +1818,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 					w_full = true,
 					items = "start",
 					lead,
-					ui.column { grow = 1, min_w = 0, gap = "$space.2", blocks(body, ink, ctx) },
+					ui.column { grow = 1, min_w = 0, gap = "$space.2", blocks(body, ink, inner) },
 				}
 			)
 		end
@@ -1722,7 +1829,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			w_full = true,
 			gap = "$space.4",
 			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$zeron.prose.quote_rail" },
-			ui.column { grow = 1, min_w = 0, gap = "$space.3", blocks(b.b, "$text.secondary", ctx) },
+			ui.column { grow = 1, min_w = 0, gap = "$space.3", blocks(b.b, "$text.secondary", no_cards(ctx)) },
 		}
 	elseif b.t == "hr" then
 		return ui.div { w_full = true, h = 1, my = "$space.2", bg = "$border" }
@@ -1953,9 +2060,18 @@ end
 return function(props: Props): Node
 	local text = props.text
 	local opts: MarkdownOptions = { key = props.key, breaks = props.breaks }
-	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.invocations or props.run_code
+	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.link_chip or props.attached or props.task or props.pictures or props.small or props.invocations or props.run_code or props.file_cards
 		then { run_code = props.run_code, image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, link_chip = props.link_chip, attached = props.attached, file_link = props.file_link, chat_mark = props.chat_mark, attachment_icon = props.attachment_icon, invocations = props.invocations, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
+	if ctx and props.file_cards then
+		ctx.file_cards = props.file_cards
+		-- (A reply being written: its files stay words until it ends, so a paragraph turns to cards once.)
+		local always = props.veil == true
+		ctx.live = if props.window and props.window.live then props.window.live
+			else function(): boolean
+				return always
+			end
+	end
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).
 	if type(text) == "function" then

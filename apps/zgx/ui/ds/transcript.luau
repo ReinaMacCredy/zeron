@@ -221,6 +221,7 @@ export type Props = {
 	-- What a link is drawn as: one of the chat's files or its agent's
 	-- skills, as a chip (ds/markdown `link_chip`).
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	file_cards: Markdown.FileCards?,
 	-- A find over the conversation (screens/chat/find): its matches marked
 	-- in every message, the current one's message scrolled to and its block
 	-- into view. `current().row` is its message's place in `messages`.
@@ -836,6 +837,7 @@ type View = {
 	on_computer_approved: (() -> ())?,
 	on_computer_enable: (() -> ())?,
 	file_link: ((target: string) -> boolean)?,
+	file_cards: Markdown.FileCards?,
 	open_file: ((path: string) -> ())?,
 	file_opens: ((path: string) -> boolean)?,
 	on_sign_in: (() -> ())?,
@@ -1220,6 +1222,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			file_link = if view then view.file_link else nil,
 			link_menu = if view then view.link_menu else nil,
 			link_chip = if view then view.link_chip else nil,
+			file_cards = if view then view.file_cards else nil,
 			find = if view and view.find then view.find(`{m.id}:{b.id}`) else nil,
 			wash = if view then view.wash else nil,
 			group = `reply:{m.id}`,
@@ -1573,6 +1576,7 @@ local function reply(
 			file_link = if view then view.file_link else nil,
 			link_menu = if view then view.link_menu else nil,
 			link_chip = if view then view.link_chip else nil,
+			file_cards = if view then view.file_cards else nil,
 			find = if view and view.find then view.find(`{m.id}:r`) else nil,
 			wash = if view then view.wash else nil,
 			group = `reply:{m.id}`,
@@ -3694,7 +3698,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state),
 					})
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, plan_lookup = if plan_call then plan_lookup else nil, plan_closed = if plan_call then plan_closed else nil, plan_ref = plan_ref, plan_place = function(step: string, ref: Ref, gone: boolean?)
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, file_cards = props.file_cards, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, plan_lookup = if plan_call then plan_lookup else nil, plan_closed = if plan_call then plan_closed else nil, plan_ref = plan_ref, plan_place = function(step: string, ref: Ref, gone: boolean?)
 								if not gone then
 									step_refs[step] = ref
 								elseif step_refs[step] == ref then

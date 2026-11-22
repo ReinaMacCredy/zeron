@@ -2959,8 +2959,11 @@ files_stub.reveal = function(target: any, path: string): any
 	note(`reveal:{target.chat}:{target.root}:{path}`)
 	return settled(nil)
 end
+files_stub.read = function(_target: any, path: string): any
+	return settled({ path = path, text = '[package]\nname = "atlas"\n', size = 26, encoding = "utf8", truncated = false })
+end
 files_stub.list = function(_target: any, dir: string): any
-	local entries = if dir == "" then { { name = "Cargo.toml", path = "Cargo.toml", dir = false, kind = "file", ignored = false, readonly = false } } else {}
+	local entries = if dir == "" then { { name = "Cargo.toml", path = "Cargo.toml", dir = false, kind = "file", size = 26, ignored = false, readonly = false } } else {}
 	return settled({ can_move = false, can_delete = false, truncated = false, entries = entries })
 end
 ui.command {
@@ -2979,7 +2982,7 @@ ui.command {
 		}
 		local reply = "The fix is in [the parser](src/parse.rs#L12) and [the host](/work/atlas/src/main.rs:40). "
 			.. "Not [this one](/etc/hosts.conf), nor [the docs](https://example.com/a.rs). "
-			.. "PR: **https://github.com/zeronsh/example/pull/1**.\n\nCargo.toml\n\nversion 1.2"
+			.. "PR: **https://github.com/zeronsh/example/pull/1**.\n\nSee Cargo.toml\n\nversion 1.2"
 		store.messages:push {
 			id = "la1",
 			role = "assistant",
