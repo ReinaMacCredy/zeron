@@ -72,6 +72,9 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 			end
 		end,
 	}
+	props.on_visual_send = function(text: string, title: string): boolean
+		return M.visual_send(chat(), peek(), text, title)
+	end
 	if props.open_link then
 		props.file_link = function(target: string): boolean
 			local s = peek()
@@ -81,6 +84,22 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 		props.file_cards = FileCards(peek)
 	end
 	return props
+end
+
+-- Through `chat.send`, never as an answer: the host queues it behind a running turn (one waiting on a question too), and a question left open with no turn to wait in refuses it.
+function M.visual_send(id: string?, s: any, text: string, title: string): boolean
+	if not id or not s then
+		return false
+	end
+	if s.ask ~= nil and s.running ~= true then
+		Shared.refuse_in(id, ui.t("ds.visual.send_waits"):get())
+		return false
+	end
+	local from = string.gsub(if title ~= "" then title else "Visual", "[\r\n]+", " ")
+	store.send({ session = id, text = `{text}\n\n(Sent from "{from}", not typed.)` } :: any):after(function() end, function()
+		Shared.refuse_in(id, ui.t("chat.composer.didnt_send"):get())
+	end)
+	return true
 end
 
 -- The engine's `parse_computer_invocation`: up to three spaces, then /computer-use alone or before a space.

@@ -14,6 +14,9 @@
 --   chart               ds/chart: bars, lines, areas, scatter
 --   button, toggle,     ds Button, Switch, Slider; tabs a Segmented control
 --   slider, tabs        (a Select for many or long options)
+--   input, select       ds TextField, Select
+--   disclosure          a quiet toggle over its children, as a chart's Data table
+--   quiz                ds/quiz: drawn and graded here
 --   link                the accent, opened where the app opens links
 --   rule, space         a hairline, room
 --   canvas              zgx's canvas: the script's drawing, in our tokens
@@ -25,6 +28,7 @@
 -- script's handlers (`visuals.event`), and it is drawn again only when its
 -- own tree changes shape: values, labels and colours follow in place, so a
 -- slider being dragged keeps its drag while the script renders under it.
+-- A send goes to `on_send` only from the person's own press or Enter, never from anything the script runs.
 -- A script that fails, or runs past its budget, shows one quiet line, as a
 -- picture that can't be shown does (its message only behind a secondary
 -- click, Copy error); the transcript around it carries on.
@@ -47,6 +51,8 @@ local status = require("@self/status")
 local locale = require("@self/locale")
 local Links = require("@ds/links")
 local ReplyPicture = require("@self/reply_picture")
+local TextField = require("@self/text_field")
+local Quiz = require("@self/quiz")
 
 export type Props = {
 	id: string,
@@ -55,6 +61,7 @@ export type Props = {
 	caption: string?,
 	device: string?,
 	source: string?,
+	on_send: ((text: string) -> boolean)?,
 }
 
 -- What the host says of every visual: `{ [id] = { rev, gen } }`.
@@ -65,7 +72,7 @@ local FRAME = 33
 
 -- What can be built at a size of its own in a row; the rest fill its spare
 -- width there (the shipping app's "fluid" nodes).
-local FLUID = { slider = true, chart = true, canvas = true, scene = true, shader = true, table = true, rule = true }
+local FLUID = { slider = true, chart = true, canvas = true, scene = true, shader = true, table = true, rule = true, input = true }
 
 local CONTROLS = {
 	button = true,
@@ -124,6 +131,9 @@ local FOLLOWS = {
 	pitch = true,
 	zoom = true,
 	spin = true,
+	open = true,
+	toggle = true,
+	submit = true,
 }
 
 local function signature(v: any, out: { string })
@@ -188,6 +198,11 @@ type Ctx = {
 	event: (handler: number?, arg: any?) -> (),
 	-- A failure while drawing (a canvas's, a scene's), shown under it.
 	drew: (error: string?) -> (),
+	saved: (key: string) -> any,
+	save: (key: string, value: any) -> (),
+	send: (key: string?, text: string) -> boolean,
+	sent: (key: string) -> boolean,
+	can_send: boolean,
 }
 
 local build: (n: any, ctx: Ctx, parent: string) -> Node
@@ -364,6 +379,144 @@ local VisualSlider = ui.component(function(props: { n: any, ctx: Ctx }): Node
 	}
 end)
 
+local function trim(s: string): string
+	return string.match(s, "^%s*(.-)%s*$") or ""
+end
+
+local VisualInput = ui.component(function(props: { n: any, ctx: Ctx }): Node
+	local n, ctx = props.n, props.ctx
+	local get = ctx.at(n.p)
+	local function peek(): any
+		return ctx.peek(n.p)
+	end
+	local key = `input:{n.key or n.p}`
+	local value = ui.use_state(n.value or "")
+	-- (Only the script's own change comes in: a field with no on_change keeps what's typed as the visual renders.)
+	local seen = n.value or ""
+	ui.effect(function()
+		local now = get()
+		if now and now.value ~= nil and now.value ~= seen then
+			seen = now.value
+			if now.value ~= value:peek() then
+				value:set(now.value)
+			end
+		end
+	end)
+	ui.effect(function()
+		local v = value:get()
+		local now = peek()
+		if now and now.change and v ~= now.value then
+			ctx.event(now.change, v)
+		end
+	end)
+	local field = ui.ref()
+	local function sent(): boolean
+		return n.send ~= nil and ctx.sent(key)
+	end
+	local function go()
+		local now = peek()
+		if not now then
+			return
+		end
+		local typed = value:peek()
+		if now.submit then
+			ctx.event(now.submit, typed)
+		end
+		if now.send == nil or ctx.sent(key) then
+			return
+		end
+		local words = trim(typed)
+		if words == "" then
+			pcall(function()
+				(field :: any):focus()
+			end)
+			return
+		end
+		ctx.send(key, if now.send ~= "" then `{now.send}\n{words}` else words)
+	end
+	return ui.column {
+		class = "visual-input",
+		w_full = true,
+		min_w = 0,
+		gap = "$space.1",
+		if n.label
+			then ui.text {
+				function(): string
+					local now = get()
+					return if now then now.label or "" else ""
+				end,
+				literal = true,
+				truncate = true,
+				text_size = "$zeron.visual.text.sm.size",
+				line_height = "$zeron.visual.text.sm.line",
+				color = "$text.secondary",
+			}
+			else nil,
+		ui.row {
+			w_full = true,
+			min_w = 0,
+			gap = "$space.2",
+			items = "center",
+			TextField {
+				value = value,
+				placeholder = n.placeholder or "",
+				name = n.label or ctx.title(),
+				size = "sm",
+				grow = 1,
+				input_ref = field,
+				disabled = sent,
+				on_key = function(e: any): boolean
+					if e.key == "Enter" then
+						go()
+						return true
+					end
+					return false
+				end,
+			},
+			if n.send ~= nil
+				then Button {
+					class = "visual-send",
+					tone = "secondary",
+					size = "sm",
+					disabled = function(): boolean
+						return sent() or not ctx.can_send
+					end,
+					on_click = go,
+					ui.text {
+						function(): string
+							return locale.s(if sent() then "ds.visual.sent" else "ds.visual.send")
+						end,
+						literal = true,
+					},
+				}
+				else nil,
+		},
+	}
+end)
+
+local VisualSelect = ui.component(function(props: { n: any, ctx: Ctx }): Node
+	local n, ctx = props.n, props.ctx
+	local get, peek = ctx.at(n.p), function()
+		return ctx.peek(n.p)
+	end
+	local value = synced(get, peek, ctx, n.value)
+	local function options(): { any }
+		local out = {}
+		local now = get()
+		for _, o in if now then now.options or {} else {} do
+			table.insert(out, { value = o.value, label = o.label })
+		end
+		return out
+	end
+	local label = if n.label
+		then function(): string
+			local now = get()
+			return if now then now.label or "" else ""
+		end
+		else nil
+	return Select { value = value, options = options, size = "sm", label = label, name = if n.label then nil else ctx.title() }
+end)
+
 -- ---- when it can't be shown ----------------------------------------------------
 
 -- A visual that can't be shown, or stopped: one quiet line, as a picture
@@ -398,10 +551,10 @@ local function problem(message: () -> string, stopped: boolean?): Node
 	end, { w_full = true })
 end
 
-local function ghost(props: { class: string, label: string, icon: Node, on_click: () -> () }): Node
+local function ghost(props: { class: string, label: string | () -> string, icon: Node, on_click: () -> () }): Node
 	return ui.button {
 		class = props.class,
-		label = props.label,
+		label = if type(props.label) == "string" then props.label else nil,
 		h = 24,
 		px = ui.raw(7, "the frame's quiet buttons, as the design's"),
 		gap = "$space.1",
@@ -419,6 +572,52 @@ local function ghost(props: { class: string, label: string, icon: Node, on_click
 		ui.text { props.label, literal = true },
 	}
 end
+
+local Disclosure = ui.component(function(props: { n: any, ctx: Ctx, kids: { Node } }): Node
+	local n, ctx = props.n, props.ctx
+	local get = ctx.at(n.p)
+	local open = ui.use_state(n.open == true)
+	local seen = n.open == true
+	ui.effect(function()
+		local now = get()
+		if now and (now.open == true) ~= seen then
+			seen = now.open == true
+			open:set(seen)
+		end
+	end)
+	return ui.column {
+		class = "visual-disclosure",
+		w_full = true,
+		min_w = 0,
+		items = "start",
+		gap = "$space.2",
+		ghost {
+			class = "visual-disclosure-toggle",
+			label = function(): string
+				local now = get()
+				return if now then now.label or "" else ""
+			end,
+			icon = ui.div {
+				shrink = 0,
+				rotate = function(): number
+					return if open:get() then 90 else 0
+				end,
+				Icon { name = "chevron-right", size = 13 },
+			},
+			on_click = function()
+				local v = not open:peek()
+				open:set(v)
+				local now = ctx.peek(n.p)
+				if now and now.toggle then
+					ctx.event(now.toggle, v)
+				end
+			end,
+		},
+		ui.show(function(): boolean
+			return open:get()
+		end, ui.column { class = "visual-disclosure-body", w_full = true, min_w = 0, gap = "$space.2", props.kids }),
+	}
+end)
 
 -- ---- canvases -------------------------------------------------------------------
 
@@ -1079,6 +1278,37 @@ build = function(n: any, ctx: Ctx, parent: string): Node
 		return ui.column(place({ w_full = parent ~= "row", min_w = 0, Canvas { n = n, ctx = ctx } }, n, parent))
 	elseif k == "scene" or k == "shader" then
 		return ui.column(place({ w_full = parent ~= "row", min_w = 0, Surface { n = n, ctx = ctx } }, n, parent))
+	elseif k == "button" and n.send ~= nil then
+		local get = ctx.at(n.p)
+		local key = `button:{n.send}`
+		return Button(place({
+			class = "visual-send-button",
+			tone = if n.primary then "primary" else "secondary",
+			size = "sm",
+			disabled = function(): boolean
+				return ctx.sent(key) or not ctx.can_send
+			end,
+			on_click = function()
+				local now = ctx.peek(n.p)
+				if not now or ctx.sent(key) then
+					return
+				end
+				if now.click then
+					ctx.event(now.click)
+				end
+				ctx.send(key, now.send)
+			end,
+			ui.text {
+				function(): string
+					if ctx.sent(key) then
+						return locale.s("ds.visual.sent")
+					end
+					local now = get()
+					return if now then now.label else ""
+				end,
+				literal = true,
+			},
+		}, n, parent))
 	elseif k == "button" then
 		local get = ctx.at(n.p)
 		return Button(place({
@@ -1098,6 +1328,37 @@ build = function(n: any, ctx: Ctx, parent: string): Node
 		}, n, parent))
 	elseif k == "tabs" then
 		return ui.row(place({ min_w = 0, Tabs { n = n, ctx = ctx } }, n, parent))
+	elseif k == "input" then
+		return ui.column(place({ w_full = parent ~= "row", min_w = 0, VisualInput { n = n, ctx = ctx } }, n, parent))
+	elseif k == "select" then
+		return ui.row(place({ min_w = 0, VisualSelect { n = n, ctx = ctx } }, n, parent))
+	elseif k == "disclosure" then
+		local kids: { Node } = {}
+		for _, child in n.children or {} do
+			table.insert(kids, build(child, ctx, "column"))
+		end
+		return ui.column(place({ w_full = parent ~= "row", min_w = 0, Disclosure { n = n, ctx = ctx, kids = kids } }, n, parent))
+	elseif k == "quiz" then
+		local key = `quiz:{n.key or n.p}`
+		return ui.column(place({
+			w_full = parent ~= "row",
+			min_w = 0,
+			Quiz {
+				questions = n.questions or {},
+				essay = n.essay,
+				saved = function(): any
+					return ctx.saved(key)
+				end,
+				save = function(value: any)
+					ctx.save(key, value)
+				end,
+				on_send = if ctx.can_send
+					then function(text: string): boolean
+						return ctx.send(nil, text)
+					end
+					else nil,
+			},
+		}, n, parent))
 	elseif k == "toggle" then
 		return ui.row(place({ min_w = 0, Toggle { n = n, ctx = ctx } }, n, parent))
 	elseif k == "slider" then
@@ -1185,6 +1446,24 @@ return ui.component(function(props: Props): Node
 		return table.concat(out, " ")
 	end)
 	local drew = ui.use_state("")
+	local function saved(key: string): any
+		local ok, v = pcall(ui.call_sync, "visuals.saved", { id = id, key = key })
+		return if ok then v else nil
+	end
+	local function save(key: string, value: any)
+		pcall(ui.invoke, "visuals.save", { id = id, key = key, value = value })
+	end
+	local sent = ui.use_state({} :: { [string]: boolean })
+	local sent_read = false
+	ui.effect(function()
+		if not sent_read and snap:get().state == "ready" then
+			sent_read = true
+			local was = saved("sent")
+			if type(was) == "table" then
+				sent:set(was)
+			end
+		end
+	end)
 	local function title(): string
 		local t = props.title or snap:peek().title or ""
 		return if t ~= "" then t else locale.s("ds.visual.untitled")
@@ -1217,6 +1496,26 @@ return ui.component(function(props: Props): Node
 				end)
 			end
 		end,
+		saved = saved,
+		save = save,
+		send = function(key: string?, text: string): boolean
+			local on_send = props.on_send
+			if not on_send or (key and sent:peek()[key]) then
+				return false
+			end
+			if on_send(text) ~= true then
+				return false
+			end
+			if key then
+				sent:set_key({ key }, true)
+				save("sent", sent:peek())
+			end
+			return true
+		end,
+		sent = function(key: string): boolean
+			return sent:get()[key] == true
+		end,
+		can_send = props.on_send ~= nil,
 	}
 	local function error(): string
 		local s = snap:get()
@@ -1271,6 +1570,7 @@ return ui.component(function(props: Props): Node
 					on_click = function()
 						pcall(ui.invoke, "visuals.reset", id)
 						drew:set("")
+						sent:set({})
 						resets:set(resets:peek() + 1)
 					end,
 				}

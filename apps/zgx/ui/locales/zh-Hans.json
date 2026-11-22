@@ -922,7 +922,8 @@
       "selected_numbered": "{n}. 选中的文本",
       "selected": "选中的文本",
       "user_comment": "用户评论：{comment}",
-      "steered": "一并引导"
+      "steered": "一并引导",
+      "from_visual": "来自{title}"
     },
     "reply_picture": {
       "not_a_picture": "不是可显示的图片",
@@ -1286,7 +1287,37 @@
       "reset": "重置",
       "data_table": "数据表",
       "building": "正在生成{title}…",
-      "building_untitled": "正在生成可视化…"
+      "building_untitled": "正在生成可视化…",
+      "send": "发送给智能体",
+      "sent": "已发送",
+      "send_waits": "请先回答智能体的问题：这条消息没有发送。"
+    },
+    "quiz": {
+      "question": "第 {i}/{n} 题",
+      "previous": "上一题",
+      "next_question": "下一题",
+      "hint": "提示",
+      "check": "检查",
+      "correct": "正确",
+      "not_quite": "不太对",
+      "not_all": "没有选全：请看上面的标记",
+      "next": "下一题",
+      "to_unanswered": "去未答的题",
+      "see_results": "查看结果",
+      "back_to_results": "返回结果",
+      "results": "结果",
+      "correct_count": "答对",
+      "score": "得分",
+      "you_chose": "你选了：{choices}",
+      "try_again": "再试一次",
+      "explain": "讲解第 {list} 题",
+      "harder": "再来 5 道更难的题",
+      "asked": "已发送给智能体",
+      "choose_one": "选择一个答案。",
+      "choose_all": "选择所有正确答案。",
+      "answer": "你的答案",
+      "send": "发送给智能体",
+      "sent": "已发送"
     },
     "links": {
       "open": "打开",

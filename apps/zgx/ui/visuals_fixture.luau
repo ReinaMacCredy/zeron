@@ -11,7 +11,7 @@ ds.setup()
 local Visual = require("@ds/visual")
 local Markdown = require("@ds/markdown")
 
-local VISUALS: { { name: string, title: string, source: string } } = {
+local VISUALS: { { name: string, title: string, source: string, sends: boolean? } } = {
 	{
 		name = "dashboard",
 		title = "API latency",
@@ -189,7 +189,63 @@ return function()
 end
 ]],
 	},
+	{
+		name = "send",
+		title = "Checkout latency",
+		sends = true,
+		source = [[
+local s = ui.state { q = "", pick = "checkout", n = 0, open = false }
+return function()
+  return ui.column { gap = 12,
+    ui.input { label = "Filter", placeholder = "Type to filter", value = s.q, on_change = function(v) s.q = v end },
+    ui.text { "filter: " .. s.q },
+    s.q ~= "" and ui.rule {},
+    ui.select { label = "Service", options = { "checkout", { label = "Cart", value = "cart" }, "search" }, value = s.pick,
+      on_change = function(v) s.pick = v end },
+    ui.text { "picked " .. s.pick },
+    ui.disclosure { label = s.open and "Hide how it's measured" or "How it's measured", open = s.open,
+      on_toggle = function(o) s.open = o end, ui.text "p95 over the last 7 days, per request." },
+    ui.row { gap = 12, align = "center",
+      ui.button { label = "Explain the spike", send = "Explain the spike on Wednesday.", on_click = function() s.n += 1 end },
+      ui.text { "pressed " .. s.n },
+    },
+    ui.row { gap = 12, align = "center",
+      ui.text "Ask:",
+      ui.input { placeholder = "Ask about it", send = "About the latency chart:" },
+    },
+  }
+end
+]],
+	},
+	{
+		name = "quiz",
+		title = "Quick check: gradient descent",
+		sends = true,
+		source = [[
+return ui.quiz {
+  questions = {
+    { kind = "single", question = "What does the learning rate set?", hint = "Think of one step.",
+      options = {
+        { text = "How many layers the network has" },
+        { text = "How far each step moves the weights", correct = true, why = "Each update is the rate times the gradient." },
+        { text = "How much data a batch holds" },
+      } },
+    { kind = "multi", question = "Which make training unstable?",
+      options = {
+        { text = "A learning rate far too large", correct = true, why = "Steps overshoot the minimum." },
+        { text = "Exploding gradients", correct = true },
+        { text = "A validation set", why = "It only measures." },
+      } },
+    { kind = "truefalse", question = "Gradient descent always finds the global minimum.",
+      options = { { text = "True" }, { text = "False", correct = true, why = "It can stop in a local one." } } },
+  },
+  open = { question = "Why does too large a learning rate make the loss grow?", placeholder = "A sentence or two" },
 }
+]],
+	},
+}
+
+local sent = ui.state("visual_sends", {} :: { string })
 
 ui.command { id = "theme_light", title = "Light theme", run = function()
 	ui.theme.follow_system(false)
@@ -216,10 +272,27 @@ for _, v in VISUALS do
 			w_full = true,
 			gap = "$space.3",
 			Markdown { text = `**{v.title}**: what the agent showed.` },
-			Visual { id = `v:fixture-{v.name}`, title = v.title, source = v.source },
+			Visual {
+				id = `v:fixture-{v.name}`,
+				title = v.title,
+				source = v.source,
+				on_send = if v.sends
+					then function(text: string): boolean
+						sent:push(text)
+						return true
+					end
+					else nil,
+			},
 		})
 	end
 end
+table.insert(blocks, ui.text {
+	function(): string
+		return table.concat(sent:get(), " | ")
+	end,
+	id = "sent-log",
+	literal = true,
+})
 
 return ui.scroll {
 	id = "visuals",

@@ -922,7 +922,8 @@
       "selected_numbered": "{n}. Selected text",
       "selected": "Selected text",
       "user_comment": "User comment: {comment}",
-      "steered": "Steered together"
+      "steered": "Steered together",
+      "from_visual": "From {title}"
     },
     "reply_picture": {
       "not_a_picture": "Not a picture this can show",
@@ -1286,7 +1287,37 @@
       "reset": "Reset",
       "data_table": "Data table",
       "building": "Building {title}…",
-      "building_untitled": "Building visual…"
+      "building_untitled": "Building visual…",
+      "send": "Send to the agent",
+      "sent": "Sent",
+      "send_waits": "Answer the agent's question first: that wasn't sent."
+    },
+    "quiz": {
+      "question": "Question {i}/{n}",
+      "previous": "Previous question",
+      "next_question": "Next question",
+      "hint": "Hint",
+      "check": "Check",
+      "correct": "Correct",
+      "not_quite": "Not quite",
+      "not_all": "Not all of them: see the marks above",
+      "next": "Next",
+      "to_unanswered": "To the unanswered question",
+      "see_results": "See results",
+      "back_to_results": "Back to results",
+      "results": "Results",
+      "correct_count": "correct",
+      "score": "score",
+      "you_chose": "You chose: {choices}",
+      "try_again": "Try again",
+      "explain": "Explain questions {list}",
+      "harder": "5 harder questions",
+      "asked": "Sent to the agent",
+      "choose_one": "Choose one answer.",
+      "choose_all": "Choose every correct answer.",
+      "answer": "Your answer",
+      "send": "Send to the agent",
+      "sent": "Sent"
     },
     "links": {
       "open": "Open",

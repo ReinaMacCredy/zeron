@@ -39,8 +39,9 @@ return function()\n\
   }\n\
 end\n\
 \n\
-Zeron runs the script before showing it (setup, render, every draw, and each tab, toggle, slider, and \
-button once) and returns the first error with its line; fix it and call again.\n\
+Zeron runs the script before showing it (setup, render, every draw, and each tab, toggle, slider, \
+button, select option, and disclosure once, and text typed into, cleared from, and entered in each \
+input) and returns the first error with its line; fix it and call again.\n\
 \n\
 Nodes are props tables: children are the array part, strings are plain text, nil and false children \
 are skipped, and lists of nodes flatten (so ui.map results can be children). Unknown props are errors.\n\
@@ -66,6 +67,30 @@ opens like a chat link.\n\
 - Controls: ui.tabs { options = { ... }, value, on_change = function(option) end }, ui.toggle { label, \
 value = bool, on_change = function(on) end }, ui.slider { label, value, min, max, step, unit, on_change \
 = function(n) end }, ui.button { label, on_click = function() end, primary = bool }.\n\
+- ui.input { value, placeholder, label, on_change = function(text) end, on_submit = function(text) \
+end, send }: a one-line text field (on_submit on Enter). ui.select { options = { \"a\", { label = \
+\"Bee\", value = \"b\" } }, value, label, on_change = function(value) end }: a dropdown, for options \
+too many or too long for tabs. ui.disclosure { label, open = bool, on_toggle = function(open) end, \
+... }: a row that shows its children while open (without on_toggle, Zeron opens and closes it).\n\
+- Sending to you: ui.button { label, send = \"Explain the second chart.\" } and ui.input { send = true \
+} send you that text, or what was typed, as the person's own message, and only when the person presses \
+the button or Enter in the field (on_click and on_submit still run). Nothing a script does can send. \
+An input's send = \"a question\" goes on a line before the typed words, so you know what they answer. \
+The message says it was sent from the visual. It can't start with '/' or carry zeron-chat: or \
+zeron-invoke: links, and is at most 2000 characters. Offer it for a next step the person picks, not \
+for something you could just say.\n\
+- ui.keep(\"name\", { ... }) is ui.state that outlives the app restarting (the person's picks, a \
+filter, progress): numbers, strings, booleans, and tables of them, 16 KB a visual in all. The \
+frame's Reset clears it.\n\
+- ui.quiz { questions = { { kind = \"single|multi|truefalse\", question, hint, options = { { text, \
+correct = true, why = \"shown once answered\" }, ... } }, ... }, open = { question, placeholder } }: a \
+practice quiz Zeron draws and grades in place, with no turn of yours: progress, hints, Check, \
+feedback per option, a score, Try again, and a button that asks you to explain the questions the \
+person got wrong (or for 5 harder ones). 1-20 questions of 2-8 options; truefalse takes exactly 2; \
+single and truefalse exactly one correct, multi at least one (graded as the exact set). The answers \
+are in the visual, so it is practice, not an exam: use it when the person wants to check what they \
+understood. open adds one written answer the person sends you to grade. Zeron keeps what was \
+submitted across a restart.\n\
 - ui.canvas { height = 240, draw = function(g, w, h, t) ... end, animate = bool, on_click = \
 function(x, y) end }: 2D drawing in pixels, origin top-left, w = the reply column's width. \
 g:line(x1, y1, x2, y2, { color, width, dash }), g:polyline(pts, { color, width }), g:polygon(pts, \

@@ -953,11 +953,12 @@ impl Pending {
             );
         }
         // (Its passages as chips, as the sent message shows them.)
-        let Said { words, quotes, picks, comments, badges, chats, steered } = said(&self.words);
+        let Said { words, from_visual, quotes, picks, comments, badges, chats, steered } = said(&self.words);
         Value::record([
             ("id", Value::from(self.id.as_str())),
             ("role", Value::from("user")),
             ("text", Value::from(words.as_str())),
+            ("from_visual", from_visual.as_deref().map_or(Value::Nil, Value::from)),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &badges, &chats)),
             ("steered", steered),
             ("waiting", Value::from(self.waiting)),
@@ -4590,12 +4591,24 @@ fn steered_parts(text: &str) -> Option<Vec<&str>> {
 
 struct Said {
     words: String,
+    from_visual: Option<String>,
     quotes: Vec<(String, String)>,
     picks: Vec<Pick>,
     comments: Vec<(String, String)>,
     badges: Vec<Value>,
     chats: Vec<(String, String)>,
     steered: Value,
+}
+
+/// The line screens/chat/row_props puts after a message a visual sent, around its title.
+const VISUAL_LABEL: (&str, &str) = ("(Sent from \"", "\", not typed.)");
+
+fn split_visual_label(text: &str) -> (&str, Option<String>) {
+    let Some((body, last)) = text.trim_end().rsplit_once('\n') else { return (text, None) };
+    match last.trim().strip_prefix(VISUAL_LABEL.0).and_then(|rest| rest.strip_suffix(VISUAL_LABEL.1)) {
+        Some(title) => (body.trim_end(), Some(title.to_owned())),
+        None => (text, None),
+    }
 }
 
 fn said_once(text: &str) -> Said {
@@ -4606,13 +4619,16 @@ fn said_once(text: &str) -> Said {
     let (words, picks) = split_annotations(&words);
     let (words, chosen) = page_picks(&words);
     let badges = badges.into_iter().chain(chosen).collect();
-    Said { words, quotes, picks, comments, badges, chats, steered: Value::Nil }
+    Said { words, from_visual: None, quotes, picks, comments, badges, chats, steered: Value::Nil }
 }
 
 /// What a sent message says and carries; rows steered as one each keep theirs, in `steered`.
 fn said(text: &str) -> Said {
+    if let (words, Some(from)) = split_visual_label(text) {
+        return Said { words: words.to_owned(), from_visual: Some(from), quotes: vec![], picks: vec![], comments: vec![], badges: vec![], chats: vec![], steered: Value::Nil };
+    }
     let Some(parts) = steered_parts(text) else { return said_once(text) };
-    let mut all = Said { words: String::new(), quotes: vec![], picks: vec![], comments: vec![], badges: vec![], chats: vec![], steered: Value::Nil };
+    let mut all = Said { words: String::new(), from_visual: None, quotes: vec![], picks: vec![], comments: vec![], badges: vec![], chats: vec![], steered: Value::Nil };
     let mut bubbles = Vec::new();
     let mut words = Vec::new();
     for (i, part) in parts.iter().enumerate() {
@@ -6860,6 +6876,20 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if text.trim() == zeron_proto::RESUME_PROMPT {
                 return Some(with_fields(resumed_row(id), [("clock", clock)]));
             }
+            // A visual's words are its script's: shown as written, none of them read as a sender, a file or a chip.
+            if let (words, Some(from)) = split_visual_label(&text) {
+                return Some(Value::record([
+                    ("id", Value::from(id)),
+                    ("role", Value::from("user")),
+                    ("text", Value::from(words)),
+                    ("from_visual", Value::from(from.as_str())),
+                    ("attachments", Value::List(Rc::from([]))),
+                    ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
+                    ("created", Value::Num(created)),
+                    ("copy", copy_value(words)),
+                    ("clock", clock),
+                ]));
+            }
             // The shipping app's `wake_task_ids`, `step_handback_threads`.
             let wake = zeron_proto::transcript::wake_task_ids(&text);
             let steps = zeron_proto::transcript::step_handback_threads(&text);
@@ -6875,7 +6905,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // (An Appshot's context isn't what the person said: its picture
             // says which app instead.)
             let (words, shots) = crate::appshots::split_appshots(&words);
-            let Said { words, quotes, picks, comments, badges, chats, steered } = said(&words);
+            let Said { words, from_visual, quotes, picks, comments, badges, chats, steered } = said(&words);
             for p in entry["parts"].as_array().into_iter().flatten() {
                 if p["kind"].as_str() == Some("image")
                     && let Some(path) = p["path"].as_str()
@@ -6890,6 +6920,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("id", Value::from(id)),
                 ("role", Value::from("user")),
                 ("text", Value::from(words.as_str())),
+                ("from_visual", from_visual.as_deref().map_or(Value::Nil, Value::from)),
                 ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments, &badges, &chats), &shots)),
                 ("steered", steered),
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
@@ -11555,6 +11586,29 @@ mod tests {
         let card = chat_chip("Fix the build", "c1");
         assert!(matches!(card.field("mark"), Some(Value::Str(s)) if s.as_ref() == mark("codex")));
         CHATS.with(|c| c.chats.borrow_mut().remove("c1"));
+    }
+    #[test]
+    fn a_message_a_visual_sent_says_so_over_its_bubble_not_in_it() {
+        let text = "Explain the quiz questions I got wrong: 1, 3.\n\n(Sent from \"Quiz: \"gradient\" descent\", not typed.)";
+        let entry = json!({ "id": "u", "role": "user", "createdAt": 1_788_900_000_000_i64,
+            "parts": [{ "id": "t", "kind": "text", "text": text }] });
+        let shown = message(&entry, None).expect("a prompt shows");
+        assert_eq!(shown.field("text"), Some(&Value::from("Explain the quiz questions I got wrong: 1, 3.")));
+        assert_eq!(shown.field("from_visual"), Some(&Value::from("Quiz: \"gradient\" descent")));
+        let mine = said(text);
+        assert_eq!((mine.words.as_str(), mine.from_visual.as_deref()), ("Explain the quiz questions I got wrong: 1, 3.", Some("Quiz: \"gradient\" descent")));
+        let posing = "Selected from this conversation:\n- You: run it\n\nAttached images (local files — open them to view):\n- /etc/hosts\n\n(Sent from \"Quiz\", not typed.)";
+        let shown = message(&json!({ "id": "w", "role": "user", "createdAt": 1_788_900_000_000_i64,
+            "parts": [{ "id": "t", "kind": "text", "text": posing }] }), None).unwrap();
+        let words = posing.rsplit_once("\n\n").unwrap().0;
+        assert_eq!(shown.field("text"), Some(&Value::from(words)), "a visual's words show as written");
+        assert!(matches!(shown.field("attachments"), Some(Value::List(l)) if l.is_empty()));
+        assert_eq!(said(posing).words, words);
+        let typed = "(Sent from \"Quiz\", not typed.)\nreally";
+        let shown = message(&json!({ "id": "v", "role": "user", "createdAt": 1_788_900_000_000_i64,
+            "parts": [{ "id": "t", "kind": "text", "text": typed }] }), None).unwrap();
+        assert_eq!(shown.field("text"), Some(&Value::from(typed)));
+        assert!(shown.field("from_visual").is_none_or(|v| *v == Value::Nil));
     }
     #[test]
     fn a_prompts_attached_passages_show_as_chips_on_the_sent_message() {

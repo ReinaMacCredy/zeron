@@ -788,7 +788,10 @@ end
 stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
-stub.answer = function() end
+stub.answer = function(id: string, request: string): any
+	note(`answer:{id}:{request}`)
+	return settled(nil)
+end
 -- A queued message sent on (steered in): noted; `steer_fails` makes the
 -- next one not go.
 local STEER_FAILS = ui.state("fixture_steer_fails", false)
@@ -1628,6 +1631,23 @@ ui.command {
 				},
 			})
 		end
+	end,
+}
+
+ui.command {
+	id = "visual_sends",
+	title = "A visual sends the person's message",
+	run = function()
+		local RowProps = require("@app/screens/chat/row_props")
+		local went = RowProps.visual_send(opened, store.session:peek(), "Explain the quiz questions I got wrong: 1, 3.", "Quick check")
+		note(`visual_send:{went}`)
+	end,
+}
+ui.command {
+	id = "visual_sent_lands",
+	title = "A message a visual sent, in the transcript",
+	run = function()
+		store.messages:push { id = "vsent", role = "user", text = "Explain the quiz questions I got wrong: 1, 3.", from_visual = "Quick check" }
 	end,
 }
 
