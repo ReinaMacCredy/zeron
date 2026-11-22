@@ -421,7 +421,6 @@ test("a queued message's edit stays with its chat through opening another, and s
 	expect(app:text('role:textbox "Message"')).to_be("")
 	open(app, "s1")
 	expect(app:text('role:textbox "Message"')).to_be("Queued word")
-	app:click('role:button "Open Queue"')
 	app:frames(30)
 	app:click('role:button "Save to queue"')
 	settle(app)

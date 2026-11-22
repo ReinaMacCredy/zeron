@@ -57,6 +57,10 @@ function M.lead(selected: string, source: string): string
 	return string.sub(source, from, at - 1)
 end
 
+function M.where(q: Quote): string
+	return if q.from then `{q.who}, {q.from}` else q.who
+end
+
 -- The quote's line in the draft.
 function M.line(q: Quote): string
 	return `> {q.who}: {M.excerpt(q.text)}`

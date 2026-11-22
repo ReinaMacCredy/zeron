@@ -986,6 +986,9 @@ local function Composer(): Node
 			parked:set(all)
 			shared.show(key)
 			editing:set(back)
+			if back then
+				TRAY:set("queue")
+			end
 		end)
 	end)
 

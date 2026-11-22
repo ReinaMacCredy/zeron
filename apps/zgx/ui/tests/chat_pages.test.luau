@@ -496,6 +496,14 @@ test("pages: text selected in a page is offered as the transcript's is: Mention 
 	seeded(app)
 	local words = "Nổi sát đỉnh, là phương án gọn nhất à"
 	local line = { 12, 40, 220, 18 }
+	-- The page opened out: its own Mention, in the sheet's header.
+	app:click(`#html-card-expand-{FRAME}`)
+	settle(app)
+	expect(app:has("#html-sheet-mention")).to_be(false)
+	post_to(app, "html-sheet-page", FRAME, { nonce = `p:{PATHS[FRAME]}`, select = { text = "Thanh bên trái, thu gọn được", top = line, bottom = line } })
+	app:click("#html-sheet-mention")
+	settle(app)
+	expect(sheet_open(app)).to_be(false)
 	post(app, FRAME, { nonce = "", select = { text = words, top = line, bottom = line } })
 	expect(app:has("#annotation-pill")).to_be(false)
 	post(app, FRAME, { nonce = `p:{PATHS[FRAME]}`, select = { text = words, top = line, bottom = line } })
@@ -507,6 +515,7 @@ test("pages: text selected in a page is offered as the transcript's is: Mention 
 	settle(app)
 	expect(app:has("#annotation-pill")).to_be(false)
 	expect(app:text('role:textbox "Message"')).to_contain("Nổi sát đỉnh")
+	expect(app:text('role:textbox "Message"')).to_contain("Thanh bên trái")
 	expect(app:error()).to_be(nil)
 end)
 
