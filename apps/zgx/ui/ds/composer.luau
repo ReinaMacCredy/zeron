@@ -116,6 +116,7 @@ export type Fixed = {
 	cloud: boolean?,
 	reach: string?,
 }
+export type AttachItem = { label: string, icon: Icon.Name?, on_click: () -> () }
 export type Props = {
 	value: State<string>,
 	placeholder: (string | Message)?,
@@ -216,6 +217,7 @@ export type Props = {
 	-- dictation): true if it did something with it.
 	on_escape: (() -> boolean)?,
 	on_attach: (() -> ())?,
+	attach_items: (() -> { AttachItem })?,
 	-- Its menus open below it (a composer with room under it: a new
 	-- session's, floating mid-page); by default, above (one at the window's
 	-- foot). A function follows where the composer is (one travelling
@@ -1794,27 +1796,6 @@ return ui.component(function(props: Props): Node
 		end))
 	end
 
-	-- +, as a secondary button: a fill of its own, so it reads as a control
-	-- beside the draft (the microphone stays ghost). Dictating, it is the
-	-- way out.
-	local attach = ui.show(dictating, Button {
-		tone = "secondary",
-		shape = "pill",
-		size = "sm",
-		icon = true,
-		label = locale.t("ds.composer.cancel_dictation"),
-		on_click = on_cancel_dictation,
-		Icon { name = "close", size = 16 },
-	}, Button {
-		tone = "secondary",
-		shape = "pill",
-		size = "sm",
-		icon = true,
-		label = locale.t("ds.composer.attach"),
-		disabled = disabled,
-		on_click = props.on_attach,
-		Icon { name = "plus", size = 18 },
-	})
 	-- Up from the footer: the composer sits at the window's foot, so the
 	-- menu opens (and opens out, browsing) upward from a still bottom edge,
 	-- never flipping across the chip as it grows. With room below
@@ -1826,6 +1807,64 @@ return ui.component(function(props: Props): Node
 		local on = if type(below) == "function" then below() else below == true
 		return if on then "bottom" else "top"
 	end
+	-- +, as a secondary button: a fill of its own, so it reads as a control
+	-- beside the draft (the microphone stays ghost). Dictating, it is the
+	-- way out.
+	local attach_open = ui.use_state(false)
+	local attach_lit = ui.use_state(0)
+	local attach_extra: { AttachItem } = {}
+	local function attach_item(i: number, label: any, icon: Icon.Name?, run: (() -> ())?, els: { any }): Node
+		return ui.menu_item(Menu.lights(Menu.look {
+			label = label,
+			on_click = function()
+				if run then
+					run()
+				end
+			end,
+			if icon then Menu.glyph(icon) else Menu.glyph_space(),
+			FadeText { label, grow = 1, text_size = "$font.size.md", color = "$text.primary" },
+		}, i, attach_lit, els))
+	end
+	local attach = ui.show(dictating, Button {
+		tone = "secondary",
+		shape = "pill",
+		size = "sm",
+		icon = true,
+		label = locale.t("ds.composer.cancel_dictation"),
+		on_click = on_cancel_dictation,
+		Icon { name = "close", size = 16 },
+	}, ui.menu(Menu.panel {
+		open = attach_open,
+		anchor = Button {
+			tone = "secondary",
+			shape = "pill",
+			size = "sm",
+			icon = true,
+			label = locale.t("ds.composer.attach"),
+			disabled = disabled,
+			on_click = function()
+				attach_extra = if props.attach_items then props.attach_items() else {}
+				if #attach_extra == 0 then
+					if props.on_attach then
+						props.on_attach()
+					end
+					return
+				end
+				attach_open:set(true)
+			end,
+			Icon { name = "plus", size = 18 },
+		},
+		placement = { side = side(), align = "start", offset = 8 },
+		w = 220,
+		build = function(): Node
+			local els: { any } = {}
+			local rows: { Node } = { attach_item(1, locale.t("ds.composer.attach_files"), "paperclip", props.on_attach, els) }
+			for i, it in attach_extra do
+				table.insert(rows, attach_item(i + 1, it.label, it.icon, it.on_click, els))
+			end
+			return ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", rows }
+		end,
+	}))
 	-- The footer folds a step at a time as it runs short of room, the
 	-- fullest that fits: 0, all of it; 1, the model's name shortened (its
 	-- effort always whole: ds/model_picker's chip); 2, the access mode

@@ -700,6 +700,7 @@
       "expand": "Expand",
       "more": "+{n}",
       "attach": "Attach",
+      "attach_files": "Attach files",
       "stop_dictating": "Stop dictating",
       "dictate": "Dictate",
       "queue_message": "Queue message",
@@ -1286,6 +1287,7 @@
     "links": {
       "open": "Open",
       "open_in_panel": "Open in browser panel",
+      "open_in_side_panel": "Open in side panel",
       "open_outside": "Open in default browser",
       "copy_link": "Copy link",
       "copy_address": "Copy address",
@@ -1458,7 +1460,9 @@
         "quiet": "{title} quiet {n}m",
         "background": "{title} waits on a background command",
         "running": "{n} running",
-        "finished": "Finished"
+        "finished": "Finished",
+        "hide": "Hide plan",
+        "show": "Show Plan"
       }
     },
     "profiles": {
@@ -1636,13 +1640,17 @@
       "mention": "Mention"
     },
     "html_picks": {
-      "close": "Close",
-      "pill": "{title} · {n, plural, one {# group to pick} other {# groups to pick}}",
-      "left": "{n, plural, one {# group to pick} other {# groups to pick}}",
+      "pill": "{title} · {n, plural, one {# group left} other {# groups left}}",
+      "left": "{n, plural, one {# group left} other {# groups left}}",
       "sent": "Picked options",
-      "close_page": "Close page",
-      "pill_edit": "{title} · change picks",
-      "left_edit": "change picks"
+      "pill_done": "{title} · all picked",
+      "left_done": "all picked",
+      "collapse": "Collapse",
+      "change": "Change",
+      "not_picked": "not picked",
+      "hint": "Click outside, press Esc or type to collapse.",
+      "hint_done": "All picked. Press Enter in the composer to send, or type a note.",
+      "skip_page": "Skip this page"
     },
     "html_card": {
       "closed": "Closed",
@@ -1652,6 +1660,7 @@
       "count_partly_sent_chosen": "{n}/{total} sent · {chosen} chosen",
       "count_all": "All {total} chosen",
       "count_chosen": "{n}/{total} chosen",
+      "picked": "{n}/{total} picked",
       "open_in_browser": "Open in browser",
       "live": "Live",
       "source": "Source",

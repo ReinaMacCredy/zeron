@@ -217,7 +217,7 @@ export type Props = {
 	open_sender: ((chat: string, title: string) -> ())?,
 	-- Those links' context menus where they aren't the web's (ds/markdown's
 	-- `link_menu`).
-	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
+	link_menu: ((target: string, selected: boolean?) -> { Markdown.LinkEntry }?)?,
 	-- What a link is drawn as: one of the chat's files or its agent's
 	-- skills, as a chip (ds/markdown `link_chip`).
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
@@ -828,6 +828,7 @@ type View = {
 	wash: (() -> string?)?,
 	working: any?,
 	pages: HtmlCard.Pages?,
+	page_selection: ((s: any?) -> ())?,
 	on_secret: ((request: string, secret: string?) -> any)?,
 	on_computer: ((request: string, question: string, answer: string) -> any)?,
 	computer_disclosure: (() -> boolean)?,
@@ -1072,6 +1073,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				device = b.device,
 				source = b.source,
 				pages = if view then view.pages else nil,
+				on_select = if view then view.page_selection else nil,
 			}
 		end
 		if b.kind == "html_files" then
@@ -2650,11 +2652,38 @@ local function Transcript(props: Props): Node
 			end
 		end,
 	}
+	local from_page, page_at = false, 0
 	local function settle()
+		from_page = false
 		layer.settle(text_of)
 	end
+	local function page_selection(s: any?)
+		if s then
+			from_page, page_at = true, ui.now()
+			layer.offer(s)
+		elseif from_page then
+			from_page = false
+			layer.clear()
+		end
+	end
+	local function selected_file(s: any): { any }
+		local link_menu = props.link_menu
+		local words = if link_menu and #s.text <= 1024 then string.match(s.text, "^[ \t\r\n`'\"(<%[]*(.-)[ \t\r\n`'\")>%].,;:]*$") else nil
+		if not link_menu or not words or words == "" or string.find(words, "[ \t\r\n]") then
+			return {}
+		end
+		return link_menu(words, true) or {}
+	end
 	local function offers(s: any): { any }
-		return layer.offers(s, text_of)
+		local out = layer.offers(s, text_of)
+		local file = selected_file(s)
+		if #file > 0 then
+			if #out > 0 then
+				table.insert(out, { separator = true })
+			end
+			table.move(file, 1, #file, #out + 1, out)
+		end
+		return out
 	end
 	-- Away from the end long enough to mean it: a moment's leaving isn't,
 	-- nor a send's glide (it steps off the end to rise to it again).
@@ -3647,7 +3676,7 @@ local function Transcript(props: Props): Node
 								end
 							end, handback = function(step: string): Threads.Handback?
 							return handbacks:get()[step]
-						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
+						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, page_selection = if props.annotate then page_selection else nil, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?
@@ -3890,12 +3919,19 @@ local function Transcript(props: Props): Node
 				w_full = true,
 				h_full = true,
 				more = offers,
-				on_release = if props.annotate
-					then function()
-						-- (A turn on: the release ends the gesture first.)
-						ui.after(0, settle)
-					end
-					else nil,
+				on_release = function()
+					-- (A turn on: the release ends the gesture first.)
+					ui.after(0, function()
+						local s = SelectionMenu.read()
+						if s then
+							selected_file(s)
+						end
+						-- (A press in a page may be heard here too, after the page told its selection: that offer stays.)
+						if props.annotate and (s or not from_page or ui.now() - page_at > 400) then
+							settle()
+						end
+					end)
+				end,
 				if props.session
 					then ui.presence(function(): string
 						return (props.session :: State<string?>):get() or ""

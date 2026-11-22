@@ -22,6 +22,9 @@ export type Pages = {
 	open_external: (path: string) -> (),
 	open_in_zeron: (path: string) -> (),
 	resolve: (target: string, root: string?) -> any,
+	tray: ((card: string) -> { n: number, total: number, open: boolean }?)?,
+	hold_tray: ((card: string) -> ())?,
+	toggle_tray: ((card: string) -> ())?,
 }
 
 local MIN_H, MAX_H = 80, 2000
@@ -164,8 +167,9 @@ local function word(v: any, most: number): string?
 	if type(v) ~= "string" then
 		return nil
 	end
-	local s = string.gsub((string.gsub(v, "%c", " ")), "%s+", " ")
-	s = string.match(s, "^%s*(.-)%s*$") or ""
+	-- ASCII only: %c and %s follow the C locale, and under a UTF-8 one they match bytes inside letters.
+	local s = string.gsub((string.gsub(v, "[%z\1-\31\127]", " ")), " +", " ")
+	s = string.match(s, "^ ?(.-) ?$") or ""
 	if #s > most then
 		local cut = most
 		while cut > 0 and (string.byte(s, cut + 1) or 0) >= 0x80 and (string.byte(s, cut + 1) or 0) < 0xC0 do
@@ -178,7 +182,7 @@ end
 
 local function code_of(v: any): string?
 	local c = word(v, 32)
-	return if c and c ~= "" and not string.find(c, "%s") then c else nil
+	return if c and c ~= "" and not string.find(c, " ", 1, true) then c else nil
 end
 
 local function groups_of(list: any, options: boolean): { any }
@@ -317,6 +321,65 @@ local function closed_tag(key: string): Node
 		border_color = "$border",
 		ui.text { locale.t("ds.html_card.closed"), wrap = false, text_size = "$font.size.xs", color = "$text.tertiary" },
 	}
+end
+
+local function tray_chip(key: string, pages: Pages?): Node
+	local now = ui.computed(function(): any
+		return if pages and pages.tray then pages.tray(key) else nil
+	end)
+	local function tray(): { n: number, total: number, open: boolean }?
+		return now:get()
+	end
+	local function words(): string
+		local t = tray()
+		return if t then locale.s("ds.html_card.picked", { n = t.n, total = t.total }) else ""
+	end
+	local function open(): boolean
+		local t = tray()
+		return t ~= nil and t.open
+	end
+	return ui.show(function(): boolean
+		return tray() ~= nil
+	end, ui.button {
+		id = `html-card-picks-{key}`,
+		label = words,
+		expanded = open,
+		h = raw(22, "the mockup's picked chip"),
+		px = raw(8, "the mockup's picked chip"),
+		gap = raw(6, "the mockup's picked chip"),
+		shrink = 0,
+		items = "center",
+		rounded = raw(11, "the mockup's picked chip"),
+		border = 1,
+		border_color = function(): string
+			return if open() then "$border.strong" else "$border"
+		end,
+		bg = function(): string
+			return if open() then "$hover" else "#00000000"
+		end,
+		hover = { bg = "$hover", border_color = "$border.strong" },
+		focus_on_press = false,
+		on_press = function()
+			if pages and pages.hold_tray then
+				pages.hold_tray(key)
+			end
+		end,
+		on_click = function()
+			if pages and pages.toggle_tray then
+				pages.toggle_tray(key)
+			end
+		end,
+		ui.div { w = 6, h = 6, shrink = 0, rounded = "$radius.full", bg = function(): any
+			return raw(picks.ink() :: any, "the pick colour")
+		end },
+		ui.text { words, wrap = false, text_size = "$font.size.xs", color = "$text.primary" },
+		ui.div {
+			rotate = function(): number
+				return if open() then 180 else 0
+			end,
+			Icon { name = "alt-arrow-down", size = 11, color = "$text.tertiary" },
+		},
+	})
 end
 
 local function title_text(words: any): Node
@@ -611,9 +674,37 @@ local function Page(props: any): Node
 			end
 		end
 	end
+	local page_ref = ui.ref()
+	local function line_in(el: any, l: any): any
+		if type(l) ~= "table" then
+			return nil
+		end
+		for i = 1, 4 do
+			local v = l[i]
+			if type(v) ~= "number" or v ~= v or math.abs(v) > 1e6 then
+				return nil
+			end
+		end
+		return { x = el.x + l[1], y = el.y + l[2], w = l[3], h = l[4] }
+	end
+	local function take_select(value: any)
+		local on_select, v = props.on_select, value.select
+		if not on_select or type(v) ~= "table" then
+			return
+		end
+		local el = page_ref:peek()
+		local at = el and el.x ~= nil and el.y ~= nil
+		local top, bottom = if at then line_in(el, v.top) else nil, if at then line_in(el, v.bottom) else nil
+		if type(v.text) ~= "string" or #v.text > 16000 or not string.find(v.text, "[^ \t\r\n]") or not top or not bottom then
+			on_select(nil)
+			return
+		end
+		on_select({ text = v.text, top = top, bottom = bottom })
+	end
 	local function heard(value: any, _origin: any, main_frame: any)
 		if signed(value, main_frame, e.picks) then
 			take_pick(value)
+			take_select(value)
 			return
 		end
 		if not signed(value, main_frame, e.nonce) then
@@ -708,6 +799,7 @@ local function Page(props: any): Node
 			ui.show(function(): boolean
 				return sent().closed == true
 			end, closed_tag(key)),
+			tray_chip(key, pages),
 			header_button(`html-card-expand-{key}`, "expand-arrows", "ds.html_card.expand", function()
 				if e.loaded then
 					sheet:set(true)
@@ -723,15 +815,19 @@ local function Page(props: any): Node
 			if now == "loading" then
 				return ui.column { w_full = true, h = frame }
 			end
-			return api.view {
-				id = `html-page-{key}`,
-				label = props.title,
-				web = e.web,
+			return ui.column {
+				ref = page_ref,
 				w_full = true,
-				h = frame,
-				on_message = heard,
-				on_navigate = navigated(false),
-				on_new_window = open_out,
+				api.view {
+					id = `html-page-{key}`,
+					label = props.title,
+					web = e.web,
+					w_full = true,
+					h = frame,
+					on_message = heard,
+					on_navigate = navigated(false),
+					on_new_window = open_out,
+				},
 			}
 		end, { w_full = true }),
 		Sheet(sheet_props, sheet, e, false),

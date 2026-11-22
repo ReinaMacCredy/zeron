@@ -872,9 +872,12 @@ local QUEUED_FILES = {
 }
 -- (`q2`'s words as the host keeps them: a test may give it a mention.)
 local queued_words = ui.state("test_queued_words", "Queued with files")
+-- The edit each chat holds, as the host keeps its lease: finishing one it doesn't hold is refused.
+local leases: { [string]: string } = {}
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
+	leases[id] = item
 	local s = table.clone(META[id] or {})
 	local q = table.clone(s.queue or {})
 	local words = "Queued words"
@@ -900,6 +903,10 @@ stub.queue_finish = function(id: string, item: string, action: string, text: str
 		files = `:files={table.concat(names, ",")}`
 	end
 	note(`queue_finish:{id}:{item}:{action}:{text or ""}{files}`)
+	if leases[id] ~= item then
+		return { after = function(_self: any, _ok: any, err: (any) -> ()) err({ message = "missing" }) end }
+	end
+	leases[id] = nil
 	local was = "Queued words"
 	for _, row in (META[id] or {}).queue or {} do
 		if row.id == item then
@@ -2952,6 +2959,10 @@ files_stub.reveal = function(target: any, path: string): any
 	note(`reveal:{target.chat}:{target.root}:{path}`)
 	return settled(nil)
 end
+files_stub.list = function(_target: any, dir: string): any
+	local entries = if dir == "" then { { name = "Cargo.toml", path = "Cargo.toml", dir = false, kind = "file", ignored = false, readonly = false } } else {}
+	return settled({ can_move = false, can_delete = false, truncated = false, entries = entries })
+end
 ui.command {
 	id = "link_turn",
 	title = "A turn with file links",
@@ -2968,7 +2979,7 @@ ui.command {
 		}
 		local reply = "The fix is in [the parser](src/parse.rs#L12) and [the host](/work/atlas/src/main.rs:40). "
 			.. "Not [this one](/etc/hosts.conf), nor [the docs](https://example.com/a.rs). "
-			.. "PR: **https://github.com/zeronsh/example/pull/1**."
+			.. "PR: **https://github.com/zeronsh/example/pull/1**.\n\nCargo.toml\n\nversion 1.2"
 		store.messages:push {
 			id = "la1",
 			role = "assistant",

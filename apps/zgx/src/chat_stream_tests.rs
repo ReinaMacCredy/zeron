@@ -17,6 +17,7 @@ fn open_chat() -> (TestApp, Rc<View>) {
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
+        editing: RefCell::default(),
         subagents: app.host.shared("test.subagents", Value::Nil),
         generation: Cell::new(0),
         snapshot: Cell::new(false),

@@ -700,6 +700,7 @@
       "expand": "展开",
       "more": "+{n}",
       "attach": "附加",
+      "attach_files": "附加文件",
       "stop_dictating": "停止听写",
       "dictate": "听写",
       "queue_message": "将消息加入队列",
@@ -1286,6 +1287,7 @@
     "links": {
       "open": "打开",
       "open_in_panel": "在浏览器面板中打开",
+      "open_in_side_panel": "在侧边面板中打开",
       "open_outside": "在默认浏览器中打开",
       "copy_link": "拷贝链接",
       "copy_address": "拷贝地址",
@@ -1458,7 +1460,9 @@
         "quiet": "{title} quiet {n}m",
         "background": "{title} waits on a background command",
         "running": "{n} running",
-        "finished": "Finished"
+        "finished": "Finished",
+        "hide": "隐藏计划",
+        "show": "显示计划"
       }
     },
     "profiles": {
@@ -1636,13 +1640,17 @@
       "mention": "提及"
     },
     "html_picks": {
-      "close": "关闭",
-      "pill": "{title} · {n} 组待选",
-      "left": "{n} 组待选",
+      "pill": "{title} · 还剩 {n} 组",
+      "left": "还剩 {n} 组",
       "sent": "已选选项",
-      "close_page": "关闭页面",
-      "pill_edit": "{title} · 更改选择",
-      "left_edit": "更改选择"
+      "pill_done": "{title} · 已全部选好",
+      "left_done": "已全部选好",
+      "collapse": "收起",
+      "change": "更改",
+      "not_picked": "未选",
+      "hint": "点击外部、按 Esc 或输入文字即可收起。",
+      "hint_done": "已全部选好。在输入框按 Enter 发送，或输入备注。",
+      "skip_page": "跳过此页"
     },
     "html_card": {
       "closed": "已关闭",
@@ -1652,6 +1660,7 @@
       "count_partly_sent_chosen": "已发送 {n}/{total} · 已选 {chosen}",
       "count_all": "{total} 项已全部选好",
       "count_chosen": "已选 {n}/{total}",
+      "picked": "已选 {n}/{total}",
       "open_in_browser": "在浏览器中打开",
       "live": "实时",
       "source": "源代码",

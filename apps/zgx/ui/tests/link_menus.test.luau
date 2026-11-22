@@ -216,6 +216,35 @@ test("a file link: Open, Reveal in Finder on this computer, Copy path", function
 	expect(app:error()).to_be(nil)
 end)
 
+test("selected text naming a file its folder lists: Open in side panel, Reveal in Finder, Copy path; a dotted word it doesn't list gets none", function()
+	local app = setup()
+	local function select(shown: string, words: string)
+		local line: any = nil
+		for row in app:tree("#transcript"):gmatch("[^\n]+") do
+			local x, y, w, h = row:match(" (%-?%d+),(%-?%d+) (%d+)x(%d+)")
+			if x and row:find(shown, 1, true) then
+				line = { x = tonumber(x), y = tonumber(y), w = tonumber(w), h = tonumber(h) }
+			end
+		end
+		expect(line ~= nil).to_be(true)
+		app:set_state("fake_selection", { text = words, top = line, bottom = line })
+		app:click(`#transcript >> ~"{shown}"`)
+		app:frames(5)
+	end
+	select("Cargo.toml", " `Cargo.toml`. ")
+	menu(app, '#transcript >> ~"Cargo.toml"')
+	expect(shows(app, "Copy")).to_be(true)
+	expect(shows(app, "Reveal in Finder")).to_be(true)
+	expect(shows(app, "Copy path")).to_be(true)
+	pick(app, "Open in side panel")
+	expect(app:state("calls")).to_contain("open_file:s2:Cargo.toml")
+	select("version 1.2", "1.2")
+	menu(app, '#transcript >> ~"version 1.2"')
+	expect(shows(app, "Copy")).to_be(true)
+	expect(shows(app, "Open in side panel")).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
 test("a chat mentioned: Open, Copy link (its Zeron link)", function()
 	local app = setup()
 	menu(app, 'role:link ~"Long chat"')

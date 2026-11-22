@@ -35,7 +35,7 @@ local M = {}
 export type Edits = {
 	id: () -> string?,
 	text: State<string>,
-	editing: State<{ item: string, aside: string, aside_cargo: { any }? }?>,
+	editing: State<{ item: string, chat: string?, aside: string, aside_cargo: { any }? }?>,
 	focus: () -> (),
 	say: (tone: string, key: string) -> (),
 	cargo: (() -> { any })?,
@@ -67,7 +67,7 @@ function M.queue_edits(e: Edits): { [string]: any }
 	-- ("commit" saves what's in the draft, "cancel" leaves it as it was.)
 	local function finish(action: string)
 		local now = e.editing:peek()
-		local id = e.id()
+		local id = if now then now.chat or e.id() else nil
 		if not now or not id then
 			return
 		end
@@ -109,7 +109,7 @@ function M.queue_edits(e: Edits): { [string]: any }
 			end
 			store.queue_edit(id, item):after(function(got: any)
 				ui.batch(function()
-					e.editing:set { item = item, aside = e.text:peek(), aside_cargo = if e.cargo then e.cargo() else nil }
+					e.editing:set { item = item, chat = id, aside = e.text:peek(), aside_cargo = if e.cargo then e.cargo() else nil }
 					local text = if got then got.text else ""
 					local files = chips_of(if got then got.attachments else nil)
 					local head, cards, tail = HtmlPicks.split(text)

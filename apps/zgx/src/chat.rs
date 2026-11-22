@@ -888,6 +888,10 @@ struct View {
     /// Prompts not yet in the engine's transcript, by chat. They outlive
     /// the open view: a send can still be in flight while another chat shows.
     pending: RefCell<HashMap<String, Vec<Pending>>>,
+    /// The queued message each chat has in its composer to edit, by chat:
+    /// its lease, held while the composer has its text, whichever chat
+    /// shows meanwhile (the window's; a lane lets go of its chat's).
+    editing: RefCell<HashMap<String, Lease>>,
     /// Moves on every open: an older watch's frames are dropped.
     generation: Cell<u64>,
     /// A finished subagent's transcript, read whole from its uploaded blob
@@ -1026,9 +1030,6 @@ struct Open {
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
-    /// A queued message being edited here: its lease, held while the
-    /// composer has its text.
-    editing: Option<Lease>,
     /// A prompt went and its turn hasn't been seen starting: its entry lands first on a slow session row.
     awaiting_turn: std::cell::Cell<Option<std::time::Instant>>,
     watches: Vec<Watch>,
@@ -1087,6 +1088,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
+        editing: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
         predicts: true,
@@ -1412,9 +1414,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.queue_edit")?; v.begin_edit(args).await.map_err(String::from) }
     });
-    let pick = which.clone();
+    let (pick, main) = (which.clone(), view.clone());
     host.async_action("chat.queue_finish", move |args| {
+        let id = args.field("id").map(text).unwrap_or_default();
         let v = pick(&args);
+        // (An edit the window's composer put away is its view's, though a pane may have that chat open since.)
+        let v = if !v.editing.borrow().contains_key(&id) && main.editing.borrow().contains_key(&id) { main.clone() } else { v };
         async move { crate::plugins::preview::refuse("chat.queue_finish")?; v.finish_edit(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A project's branches, from git where it is (the shipping app's
@@ -1454,6 +1459,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
+        editing: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
         predicts: false,
@@ -2785,6 +2791,10 @@ impl View {
         if same {
             return;
         }
+        // (`predicts`: the window's own view. A lane's slot outlives its tab, so a lease kept there would hold its message for good.)
+        if !self.predicts {
+            self.editing.borrow_mut().clear();
+        }
         let chats = CHATS.with(Rc::clone);
         let was_snapshot = self.snapshot.replace(false);
         self.generation.set(self.generation.get() + 1);
@@ -3523,7 +3533,10 @@ impl View {
             let offline = chat_offline(no_connection, engine::get().unreachable());
             match open.as_ref() {
                 None => Value::Nil,
-                Some(open) => session_value(&chats, open, offline, self.sending(&open.id)),
+                Some(open) => {
+                    let editing = self.editing.borrow();
+                    session_value(&chats, open, offline, self.sending(&open.id), editing.get(&open.id).map(|e| e.item.as_str()))
+                }
             }
         };
         self.session.set(value);
@@ -4162,9 +4175,7 @@ impl View {
             lease: answer["leaseId"].as_str().unwrap_or_default().to_owned(),
             hash: answer["baseTextHash"].clone(),
         };
-        if let Some(open) = self.open.borrow_mut().as_mut().filter(|o| o.id == id) {
-            open.editing = Some(lease.clone());
-        }
+        self.editing.borrow_mut().insert(id.clone(), lease.clone());
         self.publish_session();
         self.keep_lease(id, lease, answer["expiresAtMs"].as_f64());
         // Its files too, as the composer's chips: already on the chat's
@@ -4193,12 +4204,7 @@ impl View {
                 let wait = expires.map_or(10_000., |at| ((at - now) / 2.).clamp(1_000., 30_000.));
                 zgx::timer::sleep(std::time::Duration::from_millis(wait as u64)).await;
                 let Some(me) = weak.upgrade() else { return };
-                let held = me
-                    .open
-                    .borrow()
-                    .as_ref()
-                    .and_then(|o| o.editing.as_ref())
-                    .is_some_and(|e| e.lease == lease.lease);
+                let held = me.editing.borrow().get(&chat).is_some_and(|e| e.lease == lease.lease);
                 if !held {
                     return;
                 }
@@ -4226,13 +4232,7 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let id = args.field("id").map(text).unwrap_or_default();
         let action = args.field("action").map(text).unwrap_or_else(|| "cancel".into());
-        let lease = self
-            .open
-            .borrow_mut()
-            .as_mut()
-            .filter(|o| o.id == id)
-            .and_then(|o| o.editing.take())
-            .ok_or("missing")?;
+        let lease = self.editing.borrow_mut().remove(&id).ok_or("missing")?;
         self.publish_session();
         let chat = chats.chat(&id).ok_or("missing")?;
         let mut params = json!({
@@ -9014,7 +9014,7 @@ fn chat_offline(no_connection: bool, unreachable: bool) -> bool {
     no_connection && unreachable
 }
 
-fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Value {
+fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool, editing: Option<&str>) -> Value {
     let chat = chats.chat(&open.id);
     // Ready once its transcript has come (this device's copy, read first,
     // whatever its host's state): its rows show at once, and the chat itself
@@ -9082,7 +9082,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
             if let Some(from) = q["fromChatId"].as_str().filter(|f| !f.is_empty()) {
                 fields.push(("from", Value::from(from)));
             }
-            let mine = open.editing.as_ref().is_some_and(|e| q["id"].as_str() == Some(&e.item));
+            let mine = editing.is_some_and(|item| q["id"].as_str() == Some(item));
             if mine {
                 fields.push(("editing", Value::Bool(true)));
             }
@@ -10584,7 +10584,7 @@ mod tests {
             json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "pi", "model": "kimi-k3" } }),
         );
         let open = Open { id: "c".into(), ..Open::default() };
-        let label = |chats: &Chats| session_value(chats, &open, false, false).field("model_label").map(text);
+        let label = |chats: &Chats| session_value(chats, &open, false, false, None).field("model_label").map(text);
         assert_eq!(label(&chats).as_deref(), Some("kimi-k3"));
         chats.known_remotes.borrow_mut().insert(
             "laptop".into(),
@@ -10596,7 +10596,7 @@ mod tests {
             },
         );
         assert_eq!(label(&chats).as_deref(), Some("Kimi K3"));
-        let model = session_value(&chats, &open, false, false).field("model").map(text);
+        let model = session_value(&chats, &open, false, false, None).field("model").map(text);
         assert_eq!(model.as_deref(), Some("pi/kimi-k3"));
     }
 
@@ -10607,14 +10607,14 @@ mod tests {
     fn a_sessions_agent_is_its_recorded_harness() {
         let chats = Chats::default();
         let open = Open { id: "c".into(), ..Open::default() };
-        let agent = |chats: &Chats| session_value(chats, &open, false, false).field("agent").map(text).filter(|a| !a.is_empty());
+        let agent = |chats: &Chats| session_value(chats, &open, false, false, None).field("agent").map(text).filter(|a| !a.is_empty());
         assert_eq!(agent(&chats), None);
         chats.chats.borrow_mut().insert(
             "c".into(),
             json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "codex" } }),
         );
         assert_eq!(agent(&chats).as_deref(), Some("codex"));
-        assert!(matches!(session_value(&chats, &open, false, false).field("model"), None | Some(Value::Nil)));
+        assert!(matches!(session_value(&chats, &open, false, false, None).field("model"), None | Some(Value::Nil)));
     }
 
     #[test]
@@ -12290,7 +12290,7 @@ mod tests {
         let chats = Chats::default();
         chats.chats.borrow_mut().insert("c".to_owned(), json!({ "id": "c", "config": config("claude-code", json!({ "autoCompact": "400k" })) }));
         let open = Open { id: "c".to_owned(), context_usage: (Some(100_000.), Some(1_000_000.)), ..Open::default() };
-        let v = session_value(&chats, &open, false, false);
+        let v = session_value(&chats, &open, false, false, None);
         assert_eq!(v.field("context_window").and_then(Value::as_f64), Some(400_000.));
         assert_eq!(v.field("context").and_then(Value::as_f64), Some(0.25));
     }
@@ -12352,6 +12352,7 @@ mod tests {
                     rpc: RefCell::default(),
                     open: RefCell::default(),
                     pending: RefCell::default(),
+                    editing: RefCell::default(),
                     generation: Cell::new(0),
                     snapshot: Cell::new(false),
                     predicts: false,
@@ -12452,6 +12453,7 @@ mod tests {
                 rpc: RefCell::default(),
                 open: RefCell::default(),
                 pending: RefCell::default(),
+                editing: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
                 predicts: false,
@@ -12592,6 +12594,7 @@ mod tests {
                 rpc: RefCell::default(),
                 open: RefCell::new(Some(open)),
                 pending: RefCell::default(),
+                editing: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
                 stats: app.host.shared("t.stats", Value::Nil),
@@ -12649,6 +12652,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "fork".into(), entries, heard: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -12721,6 +12725,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -12767,6 +12772,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -12860,6 +12866,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -12919,6 +12926,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             predicts: false,
@@ -12976,6 +12984,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -13036,7 +13045,7 @@ mod tests {
         use super::{Chats, Entry, Open, session_value, text};
         use serde_json::json;
         let chats = Chats::default();
-        let state = |chats: &Chats, open: &Open| session_value(chats, open, false, false).field("state").map(text).unwrap_or_default();
+        let state = |chats: &Chats, open: &Open| session_value(chats, open, false, false, None).field("state").map(text).unwrap_or_default();
         let rows = vec![Entry::new(json!({ "id": "u0", "role": "user", "parts": [] }))];
         let mut open = Open { id: "c".into(), ..Open::default() };
         assert_eq!(state(&chats, &open), "loading", "nothing come yet");
