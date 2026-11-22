@@ -523,6 +523,49 @@ local function signed(value: any, main_frame: any, nonce: string?): boolean
 	return main_frame == true and type(value) == "table" and value.kind == "zeron.page" and type(nonce) == "string" and nonce ~= "" and value.nonce == nonce
 end
 
+-- The page whose text is selected (one at a time, as the window's own selection is).
+local selected: any = nil
+
+-- Ends a page's selection: another page's, the transcript's own text, or a word of the pill took its place.
+function M.unselect()
+	local e = selected
+	selected = nil
+	if e and e.loaded then
+		api.run(e.web, "window.__zeronUnselect&&window.__zeronUnselect();")
+	end
+end
+
+-- A page's selection as the window's (ds/selection_menu's `read`): its text, and its first and last
+-- lines where the page's box `el` shows them, kept inside it.
+local function selection_of(v: any, el: any): any?
+	if type(v) ~= "table" or type(v.text) ~= "string" or not string.find(v.text, "%S") then
+		return nil
+	end
+	if not el or el.x == nil or el.y == nil or not el.width or not el.height then
+		return nil
+	end
+	local scale = if type(v.width) == "number" and v.width > 0 and v.width < math.huge then el.width / v.width else 1
+	local function line(r: any): any?
+		if type(r) ~= "table" then
+			return nil
+		end
+		for i = 1, 4 do
+			if type(r[i]) ~= "number" or r[i] ~= r[i] or math.abs(r[i]) == math.huge then
+				return nil
+			end
+		end
+		local w, h = math.clamp(r[3] * scale, 1, el.width), math.clamp(r[4] * scale, 1, el.height)
+		return {
+			x = el.x + math.clamp(r[1] * scale, 0, el.width - w),
+			y = el.y + math.clamp(r[2] * scale, 0, el.height - h),
+			w = w,
+			h = h,
+		}
+	end
+	local top, bottom = line(v.top), line(v.bottom)
+	return if top and bottom then { text = v.text, top = top, bottom = bottom } else nil
+end
+
 local function Page(props: any): Node
 	local key = props.key
 	local e = entry_of(key)
@@ -611,6 +654,32 @@ local function Page(props: any): Node
 			end
 		end
 	end
+	local view = ui.ref()
+	-- Text selected on the page: offered as the transcript's own selection is (`props.on_select`), nil once it's gone.
+	local function take_select(value: any)
+		local offer = props.on_select
+		if not offer then
+			return
+		end
+		local s = selection_of(value, view:peek())
+		if not s then
+			if selected == e then
+				selected = nil
+				offer(nil)
+			end
+			return
+		end
+		if selected ~= e then
+			M.unselect()
+		end
+		selected = e
+		s.clear = function()
+			if selected == e then
+				M.unselect()
+			end
+		end
+		offer(s)
+	end
 	local function heard(value: any, _origin: any, main_frame: any)
 		if signed(value, main_frame, e.picks) then
 			take_pick(value)
@@ -618,6 +687,9 @@ local function Page(props: any): Node
 		end
 		if not signed(value, main_frame, e.nonce) then
 			return
+		end
+		if value.select ~= nil then
+			take_select(value.select)
 		end
 		if type(value.edges) == "number" then
 			api.chain(e.web, value.edges)
@@ -725,6 +797,7 @@ local function Page(props: any): Node
 			end
 			return api.view {
 				id = `html-page-{key}`,
+				ref = view,
 				label = props.title,
 				web = e.web,
 				w_full = true,

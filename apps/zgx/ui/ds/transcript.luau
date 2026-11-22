@@ -828,6 +828,8 @@ type View = {
 	wash: (() -> string?)?,
 	working: any?,
 	pages: HtmlCard.Pages?,
+	-- Text selected on a page (`html_render`): its selection, nil once it's gone.
+	page_select: ((s: any?) -> ())?,
 	on_secret: ((request: string, secret: string?) -> any)?,
 	on_computer: ((request: string, question: string, answer: string) -> any)?,
 	computer_disclosure: (() -> boolean)?,
@@ -1072,6 +1074,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				device = b.device,
 				source = b.source,
 				pages = if view then view.pages else nil,
+				on_select = if view then view.page_select else nil,
 			}
 		end
 		if b.kind == "html_files" then
@@ -2652,7 +2655,22 @@ local function Transcript(props: Props): Node
 	}
 	local function settle()
 		layer.settle(text_of)
+		-- (One selection at a time: the text's takes a page's place.)
+		if SelectionMenu.read() then
+			HtmlCard.unselect()
+		end
 	end
+	-- Text selected on a page: the pill by it, as by the transcript's own (the page says where its lines are).
+	local page_select = if props.annotate
+		then function(s: any?)
+			if s then
+				SelectionMenu.clear()
+				layer.offer(s)
+			else
+				layer.clear()
+			end
+		end
+		else nil
 	local function offers(s: any): { any }
 		return layer.offers(s, text_of)
 	end
@@ -3647,7 +3665,7 @@ local function Transcript(props: Props): Node
 								end
 							end, handback = function(step: string): Threads.Handback?
 							return handbacks:get()[step]
-						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
+						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, page_select = page_select, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

@@ -209,6 +209,8 @@ function M.new(opts: {
 	local bar: Ref? = nil
 	local words: { Ref } = {}
 	local holding = false
+	-- The pill whose offered selection ended while a word of it held the keys: it goes once they are let go.
+	local ended: number? = nil
 	local function away()
 		local el = if bar then bar:peek() else nil
 		if el then
@@ -316,13 +318,23 @@ function M.new(opts: {
 	end
 	L.commit = commit
 
+	-- What ends an offered selection that isn't the host's (a page's), and the pill it was offered with.
+	local offered_end: (() -> ())?, offered_gen = nil, 0
+	-- The selection ended: the host's, and an offered one's own.
+	local function unselect(p: any)
+		SelectionMenu.clear()
+		if offered_end and offered_gen == p.gen then
+			offered_end()
+		end
+		offered_end = nil
+	end
 	local function add()
 		local p = pending:peek()
 		if not p or not notes then
 			return
 		end
 		away()
-		SelectionMenu.clear()
+		unselect(p)
 		local id = notes.add(p.text, p.anchor)
 		if id then
 			open_editor(id, false, "")
@@ -334,7 +346,7 @@ function M.new(opts: {
 			return
 		end
 		away()
-		SelectionMenu.clear()
+		unselect(p)
 		notes.side(p.text)
 	end
 	local function mention()
@@ -343,7 +355,7 @@ function M.new(opts: {
 			return
 		end
 		away()
-		SelectionMenu.clear()
+		unselect(p)
 		notes.mention({ text = p.text, who = p.who })
 	end
 
@@ -405,10 +417,18 @@ function M.new(opts: {
 		local p = if notes then pending_of(s) else nil
 		if p then
 			p.offered = true
+			offered_end, offered_gen, ended = s.clear, p.gen, nil
 		end
 		pending:set(if p and p.at then p else nil)
 	end
+	-- An offered selection ended where it was made. (A press on one of the pill's words takes the keys from a
+	-- page, and its selection with them: the pill stays while the word holds them, for the click to land.)
 	function L.clear()
+		local p = pending:peek()
+		if holding and p and p.offered then
+			ended = p.gen
+			return
+		end
 		away()
 	end
 	-- The window's key, while this layer's pill shows (`M.key`; with no key,
@@ -542,6 +562,18 @@ function M.new(opts: {
 			end,
 			on_blur = function()
 				holding = false
+				if ended then
+					-- (A turn on: Tab's next word takes the keys first.)
+					ui.after(0, function()
+						local p = pending:peek()
+						if ended and not holding then
+							if p and p.gen == ended then
+								away()
+							end
+							ended = nil
+						end
+					end)
+				end
 			end,
 			on_click = act,
 			label,

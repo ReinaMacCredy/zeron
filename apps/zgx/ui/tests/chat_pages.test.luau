@@ -702,3 +702,51 @@ test("picks: the pill's X closes the page it shows, not just its card, for good"
 	round_pick(app, ROUND2, "A1")
 	expect(picked_any(app)).to_be(false)
 end)
+
+test("pages: text selected on a page gets the transcript's pill by it, and Mention quotes it into the draft and ends the page's selection", function()
+	local app = mount("chat_fixture.luau")
+	seeded(app)
+	local page = box_of(app, `#html-page-{FRAME}`, `html-page-{FRAME}`) :: any
+	expect(page ~= nil).to_be(true)
+	-- (Its lines as the page's viewport has them, twice as wide as its box: halved.)
+	local words = "Bo góc thường, nổi sát đỉnh"
+	post(app, FRAME, { select = { text = words, top = { 40, 20, 300, 18 }, bottom = { 600, 56, 200, 18 }, width = page.w * 2 } })
+	expect(app:has("#annotation-pill")).to_be(true)
+	local pill = box_of(app, "#annotation-pill", "annotation-pill") :: any
+	-- Under its last line, ending with it.
+	expect(math.abs(pill.y - (page.y + 28 + 9 + 6)) <= 1).to_be(true)
+	expect(math.abs(pill.x + pill.w - (page.x + 300 + 100)) <= 1).to_be(true)
+	-- Gone from the page: the pill goes with it.
+	post(app, FRAME, { select = false })
+	expect(app:has("#annotation-pill")).to_be(false)
+	-- Unsigned, or with no text: nothing offered.
+	post(app, FRAME, { nonce = "x", select = { text = words, top = { 40, 20, 300, 18 }, bottom = { 40, 56, 200, 18 } } })
+	post(app, FRAME, { select = { text = " \n", top = { 40, 20, 300, 18 }, bottom = { 40, 56, 200, 18 } } })
+	post(app, FRAME, { select = { text = words, top = { 40, 0 / 0, 300, 18 }, bottom = "x" } })
+	expect(app:has("#annotation-pill")).to_be(false)
+	-- Gone from the page while a word of the pill holds the keys (a press on it takes them from the page): the pill stays for the click.
+	app:click(`#html-page-{FRAME}`)
+	settle(app)
+	post(app, FRAME, { select = { text = words, top = { 40, 20, 300, 18 }, bottom = { 40, 56, 200, 18 } } })
+	app:key("Tab")
+	post(app, FRAME, { select = false })
+	expect(app:has("#annotation-pill")).to_be(true)
+	app:key("enter")
+	settle(app)
+	expect(app:has("#annotation-pill")).to_be(false)
+	post(app, FRAME, { select = { text = words, top = { 40, 20, 300, 18 }, bottom = { 40, 56, 200, 18 } } })
+	app:click("#annotation-mention")
+	settle(app)
+	expect(app:has("#annotation-pill")).to_be(false)
+	expect(app:text('role:textbox "Message"')).to_contain(`> Opus: {words}`)
+	local runs = app:state("page_runs")
+	expect(runs[#runs]).to_be(`html:{FRAME}|window.__zeronUnselect&&window.__zeronUnselect();`)
+	-- Another page's selection takes the first's place.
+	post(app, FRAME, { select = { text = words, top = { 40, 20, 300, 18 }, bottom = { 40, 56, 200, 18 } } })
+	local before = #app:state("page_runs")
+	post(app, PICTURES, { select = { text = "Sea", top = { 10, 10, 40, 18 }, bottom = { 10, 10, 40, 18 } } })
+	runs = app:state("page_runs")
+	expect(#runs).to_be(before + 1)
+	expect(runs[#runs]).to_be(`html:{FRAME}|window.__zeronUnselect&&window.__zeronUnselect();`)
+	expect(app:has("#annotation-pill")).to_be(true)
+end)

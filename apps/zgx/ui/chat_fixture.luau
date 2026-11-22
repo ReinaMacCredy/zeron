@@ -3956,7 +3956,7 @@ do
 			heard[props.id] = props.on_message
 			navigators[props.id] = props.on_navigate
 		end
-		return ui.column { id = props.id, label = props.label, w_full = true, h = props.h, min_h = props.min_h, grow = props.grow }
+		return ui.column { id = props.id, ref = props.ref, label = props.label, w_full = true, h = props.h, min_h = props.min_h, grow = props.grow }
 	end
 	html_api.retheme = function(_args: any): string
 		return "retheme()"
