@@ -906,6 +906,7 @@ fn consent_part(request_id: &str) -> MessagePart {
         id: request_id.into(),
         request_id: request_id.into(),
         questions: vec![zeron_proto::UserInputQuestion {
+            note: None,
             approval: false,
             id: "consent".into(),
             header: "Computer".into(),
@@ -1348,6 +1349,7 @@ fn a_foreground_request_is_a_card_until_answered_then_its_outcome() {
         id: "fg".into(),
         request_id: "fg".into(),
         questions: vec![zeron_proto::UserInputQuestion {
+            note: None,
             approval: false,
             id: "foreground".into(),
             header: "Computer".into(),
