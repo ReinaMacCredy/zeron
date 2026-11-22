@@ -589,10 +589,12 @@ async fn computer_runs_get_host_context_and_skip_the_prompt_for_recorded_shapes(
     let grok = || AcpHarness::grok().with_executable(fixture_path());
     let devin = || AcpHarness::devin().with_executable(fixture_path());
     let hermes = || AcpHarness::hermes().with_executable(fixture_path());
-    // These agents offer only full access, so a supervised request runs with it.
-    assert_eq!(outcome(grok(), true).await, "ctx=1 61:once 62:other");
+    // Devin offers only full access, so a supervised request runs with it.
     assert_eq!(outcome(devin(), true).await, "ctx=1 61:once 62:other");
-    assert_eq!(outcome(grok(), false).await, "ctx=0 61:other 62:other");
+    assert_eq!(outcome(devin(), false).await, "ctx=0 61:other 62:other");
+    // Grok's nearest mode is Auto, which asks the person (the test says No).
+    assert_eq!(outcome(grok(), true).await, "ctx=1 61:once 62:refused");
+    assert_eq!(outcome(grok(), false).await, "ctx=0 61:refused 62:refused");
     assert_eq!(outcome(hermes(), true).await, "ctx=1 61:other 62:other");
 }
 
@@ -3482,6 +3484,16 @@ for raw in sys.stdin:
             "sessionId": "agy-wedge",
             "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}
         }})
+        # A step boundary: a steer waits out streaming text, so the cancel
+        # goes out only once a tool has closed.
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-wedge",
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Read file", "kind": "read", "status": "in_progress"}
+        }})
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "agy-wedge",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "completed", "rawOutput": "ok"}
+        }})
     elif method == "session/cancel":
         # Wedge: ignore cancel and never resolve session/prompt.
         time.sleep(30)
@@ -3500,7 +3512,7 @@ for raw in sys.stdin:
         .expect("wedged preempt settled within stop_timeout")
     {
         let ev = item.expect("stream event");
-        if matches!(ev, AgentEvent::TextDelta { .. }) && !sent {
+        if matches!(ev, AgentEvent::ToolResult { .. }) && !sent {
             sent = true;
             steer_tx.send(SteerMessage::text("steer me")).await.unwrap();
         }
