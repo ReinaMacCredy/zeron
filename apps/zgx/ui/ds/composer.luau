@@ -433,6 +433,7 @@ local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
 local LIFT = "$zeron.space.hair"
 type Folded = { level: number, access_at: { [string]: number }, model_at: { [string]: number }? }
 local FOOTER_SIDES, FOOTER_GAP = 20, 4
+local SIZED_MS = 1400
 -- With cargo or a question over the draft, the draft keeps the strip's
 -- `below` over it (the theme's; read as the composer is built) rather than
 -- the open text box's own top.
@@ -2020,6 +2021,19 @@ return ui.component(function(props: Props): Node
 	end)
 
 	local picker_open = props.model_open or ui.use_state(false)
+	local step_context = ui.use_state({ n = 0, by = 0 })
+	local sized = ui.use_state(nil :: context_usage.Sized?)
+	local sizes = 0
+	local function context_stepped(label: string, moved: boolean)
+		sizes += 1
+		local mine = sizes
+		sized:set({ label = label, n = mine, held = not moved })
+		ui.after(SIZED_MS, function()
+			if sizes == mine then
+				sized:set(nil)
+			end
+		end)
+	end
 	local picker_outside = ui.use_state(false)
 	local picker_was = picker_open:peek()
 	ui.effect(function()
@@ -2083,6 +2097,8 @@ return ui.component(function(props: Props): Node
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			step_with = props.step_effort,
+			step_context_with = step_context,
+			on_context_step = context_stepped,
 			close_with = props.model_close,
 			showing = picker_open,
 			outside = picker_outside,
@@ -3340,6 +3356,10 @@ return ui.component(function(props: Props): Node
 					if unit and unit.keys(e) then
 						return true
 					end
+					if (e.key == "ArrowUp" or e.key == "ArrowDown") and e.shift and not e.cmd and not e.alt and not e.ctrl and not has_text() then
+						step_context:set({ n = step_context:peek().n + 1, by = if e.key == "ArrowUp" then 1 else -1 })
+						return true
+					end
 					if e.key == "Tab" and e.alt and not e.cmd and not e.ctrl and mission_on() then
 						step_size(if e.shift then -1 else 1)
 						return true
@@ -3845,6 +3865,7 @@ return ui.component(function(props: Props): Node
 						plan = plan,
 						compaction = readout,
 						side = side,
+						sized = sized,
 					}
 					elseif props.context then ring(props.context)
 					else nil,
