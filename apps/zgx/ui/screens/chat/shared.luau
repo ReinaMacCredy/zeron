@@ -2242,6 +2242,37 @@ function M.set_draft_of(key: string, field: string, value: any)
 	kept:set(all)
 end
 
+-- A chat's draft while it is asked a question, by its id. The composer is
+-- the answer's then, so the words written before it are set aside as it's
+-- asked (`set_aside`) and back once it's answered or gone (`put_back`):
+-- never sent as its answer. (Its chips stay: an answer carries none.)
+local aside = ui.shared("chat.composer.aside", {} :: { [string]: string })
+function M.set_aside(key: string)
+	if aside:peek()[key] ~= nil then
+		return
+	end
+	local text = M.peek_text_of(key)
+	ui.batch(function()
+		aside:set_key({ key }, text)
+		if text ~= "" then
+			M.set_draft_of(key, "text", "")
+		end
+	end)
+end
+-- (Over an answer left unsent, as the draft was there first.)
+function M.put_back(key: string)
+	local text = aside:peek()[key]
+	if text == nil then
+		return
+	end
+	ui.batch(function()
+		aside:set_key({ key }, nil)
+		if text ~= "" then
+			M.set_draft_of(key, "text", text)
+		end
+	end)
+end
+
 -- A chip taken off chat `key`'s draft, wherever the draft is.
 function M.remove_cargo_of(key: string, id: string)
 	if here:peek() == key then

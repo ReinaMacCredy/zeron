@@ -788,7 +788,12 @@ end
 stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
-stub.answer = function() end
+-- A question answered (noted, its words in brackets): it's gone.
+stub.answer = function(id: string, request: string, answer: any): any
+	note(`answer:{id}:{request}:{table.concat(answer.values, "+")}:[{answer.text}]`)
+	publish(id, { ask = ui.null })
+	return settled(nil)
+end
 -- A queued message sent on (steered in): noted; `steer_fails` makes the
 -- next one not go.
 local STEER_FAILS = ui.state("fixture_steer_fails", false)
