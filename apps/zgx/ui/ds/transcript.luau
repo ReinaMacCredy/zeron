@@ -46,6 +46,7 @@ local opened_at = 0
 local Icon = require("@self/icon")
 local Markdown = require("@self/markdown")
 local UserMessage = require("@self/user_message")
+local AskCard = require("@self/ask_card")
 local Lightbox = require("@self/lightbox")
 local ReplyPicture = require("@self/reply_picture")
 local Visual = require("@self/visual")
@@ -234,6 +235,7 @@ export type Props = {
 	pages: HtmlCard.Pages?,
 	-- A secret card's answer: the secret, or nil to decline (a promise).
 	on_secret: ((request: string, secret: string?) -> any)?,
+	ask_card: { asked: (request: string) -> boolean, answer: (request: string, answer: any) -> any }?,
 	-- A computer card's answer (a promise); whether its first-use words show, and that one was allowed.
 	on_computer: ((request: string, question: string, answer: string) -> any)?,
 	computer_disclosure: (() -> boolean)?,
@@ -833,6 +835,7 @@ type View = {
 	page_selection: ((s: any?) -> ())?,
 	page_mention: ((text: string, who: string) -> ())?,
 	on_secret: ((request: string, secret: string?) -> any)?,
+	ask_card: { asked: (request: string) -> boolean, answer: (request: string, answer: any) -> any }?,
 	on_computer: ((request: string, question: string, answer: string) -> any)?,
 	computer_disclosure: (() -> boolean)?,
 	on_computer_approved: (() -> ())?,
@@ -1169,7 +1172,34 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				return brow:get().line or ""
 			end, function(line: string): Node
 				if line == "input" then
-					return Rows.Question { key = key, now = now_b, find = find }
+					local card = if view then view.ask_card else nil
+					return ui.presence(function(): string
+						local n = now_b()
+						if n.outcome == "pending" and n.question and n.request and card and card.asked(n.request) then
+							return `card:{n.request}`
+						elseif n.quick and n.reply then
+							return "quick"
+						end
+						return "row"
+					end, function(mode: string): Node
+						local n = now_b()
+						if string.sub(mode, 1, 5) == "card:" then
+							return AskCard.Card {
+								request = n.request,
+								question = n.question,
+								answer = function(a: any): any
+									return card.answer(n.request, a)
+								end,
+							}
+						elseif mode == "quick" then
+							return ui.column {
+								w_full = true,
+								pb = ui.raw(14, "a quick reply in the reply, as the design's"),
+								UserMessage { id = `quick-{key}`, text = n.reply, plain = true, label = locale.s("ds.ask_card.quick_reply") },
+							}
+						end
+						return Rows.Question { key = key, now = now_b, find = find }
+					end, { w_full = true, min_w = 0 })
 				elseif line == "secret" then
 					return Rows.Secret { key = key, now = now_b, find = find, on_answer = if view then view.on_secret else nil }
 				elseif line == "computer_consent" or line == "computer_foreground" then
@@ -3722,7 +3752,7 @@ local function Transcript(props: Props): Node
 								end
 							end, handback = function(step: string): Threads.Handback?
 							return handbacks:get()[step]
-						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, page_selection = if props.annotate then page_selection else nil, page_mention = if props.annotate then page_mention else nil, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code, on_visual_send = props.on_visual_send })),
+						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, page_selection = if props.annotate then page_selection else nil, page_mention = if props.annotate then page_mention else nil, on_secret = props.on_secret, ask_card = props.ask_card, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code, on_visual_send = props.on_visual_send })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?

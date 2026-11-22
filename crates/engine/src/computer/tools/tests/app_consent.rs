@@ -236,6 +236,7 @@ fn the_always_label_maps_to_an_always_decision() {
         vec![UserInputAnswer {
             question_id: "consent".into(),
             labels: vec![label.into()],
+            note: None,
         }]
     };
     assert_eq!(consent_decision(&answer("Allow")), ApprovalDecision::Accept);

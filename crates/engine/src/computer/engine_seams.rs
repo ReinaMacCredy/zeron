@@ -140,6 +140,9 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
         prefill: None,
         multiline: false,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     }
 }
 
@@ -176,6 +179,9 @@ pub fn foreground_question(app: Option<&ComputerConsentApp>) -> UserInputQuestio
         prefill: None,
         multiline: false,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     }
 }
 
@@ -329,6 +335,7 @@ mod tests {
             foreground_allowed(&[UserInputAnswer {
                 question_id: COMPUTER_FOREGROUND_QUESTION_ID.into(),
                 labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+                note: None,
             }])
         };
         assert_eq!(answer(&["Allow for this turn"]), Some(true));

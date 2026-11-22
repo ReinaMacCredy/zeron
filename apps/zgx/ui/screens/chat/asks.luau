@@ -177,7 +177,15 @@ function M.bind(b: Bind): { [string]: any }
 	end)
 	local question = ui.computed(function(): any
 		local a = ask:get()
-		return if a and a.kind == "question" then a.question else nil
+		if not a or a.kind ~= "question" then
+			return nil
+		end
+		if a.question.inline then
+			local q = table.clone(a.question)
+			q.request = a.request
+			return q
+		end
+		return a.question
 	end)
 	local approval = ui.computed(function(): any
 		local a = ask:get()
@@ -367,7 +375,29 @@ function M.bind(b: Bind): { [string]: any }
 				store.approve(id, a.request, scope)
 			end
 		end,
-		on_deny = on_ask(store.deny),
+		on_deny = function(change: any?)
+			local id, a = b.id(), ask:peek()
+			if not (id and a) then
+				return
+			end
+			if not change then
+				store.deny(id, a.request)
+				return
+			end
+			if not string.find(change.text, "%S") then
+				if b.notice then
+					b.notice { tone = "warning", key = "ds.composer.changes_need_words", dismissable = true }
+				elseif b.say then
+					b.say("warning", "ds.composer.changes_need_words")
+				end
+				change.focus()
+				return
+			end
+			store.request_changes(id, a.request, change.text):after(function() end, function(err: any)
+				change.keep()
+				say("ds.pills.answer_failed", err)
+			end)
+		end,
 		queue = queue,
 		engine_queue = engine_queue,
 		can_steer = can_steer,

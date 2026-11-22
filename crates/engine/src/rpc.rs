@@ -108,7 +108,7 @@ use crate::workspace_host::WorkspaceHost;
 const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_SEARCH_FEATURED_PATHS: usize = 32;
 /// Under the 30-minute MCP call ceiling the harnesses are configured with, so
-/// the card settles here instead of outliving a call the harness abandoned.
+/// the call returns here instead of being abandoned; the card stays open.
 const ASK_USER_WAIT: Duration = Duration::from_secs(25 * 60);
 
 #[derive(Debug, Deserialize)]
@@ -5883,7 +5883,10 @@ impl RpcService for EngineRpc {
                     .ask_user(&p.chat_id, &p.run_secret, p.questions, ASK_USER_WAIT)
                     .await
                     .map_err(RpcError::Failed)?;
-                RpcReply::value(&serde_json::json!({ "answers": answers }))
+                RpcReply::value(&match answers {
+                    Some(answers) => serde_json::json!({ "answers": answers }),
+                    None => serde_json::json!({ "answers": [], "waiting": true }),
+                })
             }
             methods::REQUEST_SECRET => {
                 let p = parse_params(params)?;

@@ -3891,6 +3891,7 @@ mod tests {
         let picked = vec![zeron_proto::UserInputAnswer {
             question_id: "q".into(),
             labels: vec!["B".into()],
+            note: None,
         }];
         assert!(!doc.resolve_input("nope", Some(&picked), 5).unwrap());
         assert!(doc.resolve_input("r1", Some(&picked), 5).unwrap());
@@ -3921,6 +3922,7 @@ mod tests {
             answers: Some(vec![zeron_proto::UserInputAnswer {
                 question_id: "q".into(),
                 labels: vec!["Deep dive".into()],
+                note: None,
             }]),
             asked_at_ms: None,
             answered_at_ms: None,
@@ -4707,6 +4709,9 @@ mod computer_marker_tests {
             prefill: None,
             multiline: false,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         }
     }
 
@@ -4807,6 +4812,7 @@ mod computer_marker_tests {
         let answers = vec![UserInputAnswer {
             question_id: "q1".into(),
             labels: vec!["No".into()],
+            note: None,
         }];
         crate::fold_event_into_parts(
             &mut parts,

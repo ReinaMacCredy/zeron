@@ -4120,6 +4120,9 @@ impl Harness for AskingHarness {
                     multiline: false,
                     approval,
                     action: None,
+                    details: Vec::new(),
+                    allow_note: false,
+                    quick: false,
                 }])
                 .await
                 .unwrap_or_default();
@@ -4253,6 +4256,7 @@ async fn a_child_blocked_on_a_tool_approval_wakes_its_owner_with_the_request() {
                 vec![zeron_proto::UserInputAnswer {
                     question_id: "q-curl".into(),
                     labels: vec!["Yes, proceed".into()],
+                    note: None,
                 }],
             )
             .unwrap()
@@ -4379,6 +4383,7 @@ async fn an_input_wake_answered_before_the_owner_reads_it_is_dropped() {
                 vec![zeron_proto::UserInputAnswer {
                     question_id: "q-curl".into(),
                     labels: vec!["Yes, proceed".into()],
+                    note: None,
                 }],
             )
             .unwrap()
@@ -4469,6 +4474,7 @@ async fn an_input_wake_into_an_owner_parked_on_its_own_question_leaves_that_ques
                 vec![zeron_proto::UserInputAnswer {
                     question_id: "q-curl".into(),
                     labels: vec!["Yes, proceed".into()],
+                    note: None,
                 }],
             )
             .unwrap()

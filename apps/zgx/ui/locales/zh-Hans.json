@@ -722,7 +722,8 @@
         "plan": "描述目标。智能体会写计划，不做更改。",
         "plan_asks": "描述目标。智能体会写计划并等待你确认。",
         "mission": "描述目标。智能体会写计划并等待你确认。",
-        "mission_runs": "描述目标。智能体会制定计划并在线程中运行各个步骤。"
+        "mission_runs": "描述目标。智能体会制定计划并在线程中运行各个步骤。",
+        "inline_answer": "或输入回答"
       },
       "message": "消息",
       "branch": {
@@ -796,7 +797,10 @@
         "size_steps": "最多 {n} 步",
         "size_no_limit": "不限步数",
         "size_next": "下一档规模"
-      }
+      },
+      "question_above": "上方有 1 个问题在等待",
+      "request_changes": "要求修改",
+      "changes_need_words": "输入要修改的内容，然后按“要求修改”。"
     },
     "markdown": {
       "fit_content": "适合内容",
@@ -1806,6 +1810,17 @@
         "title": "找不到它的根文件",
         "body": "它的 % !TEX root 行指向 {root}，但该文件不存在。"
       }
+    },
+    "ask_card": {
+      "waiting": "等待你的回答",
+      "recommended": "推荐",
+      "note": "添加备注（可选）",
+      "choose_one": "选择一个选项。",
+      "choose_many": "选择一个或多个。",
+      "send": "发送选择",
+      "sending": "正在发送…",
+      "quick_reply": "快速回复",
+      "failed": "回答没有发出。请重试。"
     }
   },
   "settings": {

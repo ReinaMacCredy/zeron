@@ -1344,12 +1344,12 @@ impl Agents {
                 .iter()
                 .filter_map(|a| {
                     let question = a.get("question").or_else(|| a.get("question_id")).and_then(Json::as_str)?;
-                    Some(UserInputAnswer { question_id: question.to_owned(), labels: labels(a.get("labels").or_else(|| a.get("label"))?) })
+                    Some(UserInputAnswer { question_id: question.to_owned(), labels: labels(a.get("labels").or_else(|| a.get("label"))?), note: None })
                 })
                 .collect(),
             Some(Json::Object(map)) => map
                 .iter()
-                .map(|(question, v)| UserInputAnswer { question_id: question.clone(), labels: labels(v) })
+                .map(|(question, v)| UserInputAnswer { question_id: question.clone(), labels: labels(v), note: None })
                 .collect(),
             _ => Vec::new(),
         };

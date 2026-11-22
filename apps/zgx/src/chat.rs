@@ -7358,12 +7358,27 @@ fn line_block(part: &Json, streaming: bool) -> Option<Value> {
                 Value::record([("label", Value::from(line.label.as_str())), ("answer", Value::from(line.answer.as_str())), ("skipped", Value::Bool(line.skipped))])
             };
             let (outcome, text, lines) = match input_outcome(&questions, resolved, answers.as_deref()) {
-                InputOutcome::Pending => return block("input", vec![("title", Value::from(header.as_str())), ("outcome", Value::from("pending"))]),
+                InputOutcome::Pending => {
+                    let mut fields = vec![("title", Value::from(header.as_str())), ("outcome", Value::from("pending"))];
+                    let raw = part["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
+                    if asks_inline(raw) && let Some(request) = part["requestId"].as_str() {
+                        fields.push(("request", Value::from(request)));
+                        fields.push(("question", question_value(&raw[0], 0, 1, true)));
+                    }
+                    return block("input", fields);
+                }
                 InputOutcome::Unrecorded => ("unrecorded", header, Vec::new()),
                 InputOutcome::Closed(line) => ("closed", said(&line), vec![row(&line)]),
                 InputOutcome::Answered(lines) => ("answered", lines.iter().map(said).collect::<Vec<_>>().join(" · "), lines.iter().map(row).collect()),
             };
-            block("input", vec![("text", Value::from(text.as_str())), ("outcome", Value::from(outcome)), ("answers", Value::List(lines.into()))])
+            let mut fields = vec![("text", Value::from(text.as_str())), ("outcome", Value::from(outcome)), ("answers", Value::List(lines.into()))];
+            let quick = matches!(questions.as_slice(), [q] if q.quick && !q.multi_select);
+            let reply = answers.as_deref().and_then(|a| a.first()).map(|a| a.labels.join(", ")).filter(|r| !r.trim().is_empty());
+            if quick && outcome == "answered" && let Some(reply) = reply {
+                fields.push(("quick", Value::Bool(true)));
+                fields.push(("reply", Value::from(reply.as_str())));
+            }
+            block("input", fields)
         }
         _ => None,
     }
@@ -9004,6 +9019,68 @@ fn single(questions: &[Json], label: &str) -> Vec<Json> {
         .collect()
 }
 
+fn with_note(mut answers: Vec<Json>, note: &str) -> Vec<Json> {
+    for answer in &mut answers {
+        answer["note"] = json!(note);
+    }
+    answers
+}
+
+fn asks_inline(questions: &[Json]) -> bool {
+    match questions {
+        [q] => {
+            q["options"].as_array().is_some_and(|o| !o.is_empty())
+                && !is_approval(questions)
+                && q["approval"].as_bool() != Some(true)
+                && !is_secret(q)
+                && q["kind"]["type"].as_str().is_none()
+        }
+        _ => false,
+    }
+}
+
+fn question_value(q: &Json, page: usize, pages: usize, inline: bool) -> Value {
+    let details = q["details"].as_array();
+    let options: Vec<Value> = q["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+        .enumerate()
+        .map(|(i, o)| {
+            let detail = details.and_then(|d| d.get(i));
+            let mut fields = vec![("value", Value::from(o)), ("label", Value::from(o))];
+            if let Some(d) = detail.and_then(|d| d["description"].as_str()).filter(|d| !d.trim().is_empty()) {
+                fields.push(("detail", Value::from(d)));
+            }
+            if detail.is_some_and(|d| d["recommended"].as_bool() == Some(true)) {
+                fields.push(("recommended", Value::Bool(true)));
+            }
+            Value::record(fields)
+        })
+        .collect();
+    let mut question = vec![
+        ("text", Value::from(q["question"].as_str().unwrap_or_default())),
+        ("options", Value::List(options.into())),
+        ("multi", Value::Bool(q["multiSelect"].as_bool() == Some(true))),
+        ("page", Value::Num((page + 1) as f64)),
+        ("pages", Value::Num(pages as f64)),
+    ];
+    if let Some(h) = q["header"].as_str().filter(|h| !h.is_empty()) {
+        question.push(("header", Value::from(h)));
+    }
+    if q["allowNote"].as_bool() == Some(true) {
+        question.push(("note", Value::Bool(true)));
+    }
+    if q["quick"].as_bool() == Some(true) && q["multiSelect"].as_bool() != Some(true) {
+        question.push(("quick", Value::Bool(true)));
+    }
+    if inline {
+        question.push(("inline", Value::Bool(true)));
+    }
+    Value::record(question)
+}
+
 /// What the composer shows of a question: an approval (what it would do),
 /// or the page of questions not yet answered.
 fn is_secret(question: &Json) -> bool {
@@ -9064,27 +9141,10 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
             ),
         ]));
     }
-    let options: Vec<Value> = q["options"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Json::as_str)
-        .map(|o| Value::record([("value", Value::from(o)), ("label", Value::from(o))]))
-        .collect();
-    let mut question = vec![
-        ("text", Value::from(q["question"].as_str().unwrap_or_default())),
-        ("options", Value::List(options.into())),
-        ("multi", Value::Bool(q["multiSelect"].as_bool() == Some(true))),
-        ("page", Value::Num((page + 1) as f64)),
-        ("pages", Value::Num(questions.len() as f64)),
-    ];
-    if let Some(h) = q["header"].as_str().filter(|h| !h.is_empty()) {
-        question.push(("header", Value::from(h)));
-    }
     Some(Value::record([
         ("request", Value::from(request)),
         ("kind", Value::from("question")),
-        ("question", Value::record(question)),
+        ("question", question_value(q, page, questions.len(), asks_inline(questions))),
     ]))
 }
 
@@ -11254,6 +11314,45 @@ mod tests {
         for dropped in ["handoff", "classifier", "compaction"] {
             assert!(lines(json!({ "kind": dropped, "id": "p" })).is_empty(), "{dropped}");
         }
+    }
+
+    #[test]
+    fn a_choice_asked_alone_carries_its_card_into_the_reply_and_leaves_its_record() {
+        let reply = |parts: Json| json!({ "id": "a", "role": "assistant", "status": "streaming", "parts": parts });
+        let choice = json!({ "id": "q", "header": "Build", "question": "How?", "options": ["Config", "Alerts"], "allowNote": true,
+            "details": [{ "description": "Just the TTL." }, { "recommended": true }] });
+        let part = |questions: Json, resolved: bool, answers: Json| {
+            json!({ "kind": "input", "id": "r", "requestId": "r", "resolved": resolved, "questions": questions, "answers": answers })
+        };
+        let line = |p: Json| blocks(&reply(json!([p]))).list()[0].clone();
+        let pending = line(part(json!([choice]), false, Json::Null));
+        assert_eq!(pending.field("request"), Some(&Value::from("r")));
+        let card = pending.field("question").expect("the card's question");
+        assert_eq!(card.field("inline"), Some(&Value::Bool(true)));
+        assert_eq!(card.field("note"), Some(&Value::Bool(true)));
+        let options = card.field("options").unwrap().list();
+        assert_eq!(options[0].field("detail"), Some(&Value::from("Just the TTL.")));
+        assert_eq!(options[0].field("recommended"), None);
+        assert_eq!(options[1].field("recommended"), Some(&Value::Bool(true)));
+        let composer = composer_ask(std::iter::once(&reply(json!([part(json!([choice]), false, Json::Null)]))), |_| 0).unwrap();
+        assert_eq!(composer.field("question").and_then(|q| q.field("inline")), Some(&Value::Bool(true)));
+
+        let two = json!([choice, { "id": "q2", "header": "Scope", "question": "Where?", "options": ["Cart"] }]);
+        assert_eq!(line(part(two, false, Json::Null)).field("question"), None, "several questions stay the composer's");
+        let open = json!([{ "id": "q", "header": "Name", "question": "Call it?", "options": [] }]);
+        assert_eq!(line(part(open, false, Json::Null)).field("question"), None, "an open question stays the composer's");
+        let approval = json!([{ "id": "q", "header": "Approve command", "question": "Run `ls`?", "options": ["Yes", "No"], "approval": true }]);
+        assert_eq!(line(part(approval, false, Json::Null)).field("question"), None, "an approval never draws in the reply");
+        let permission = json!([{ "id": "q", "header": "Agent question", "question": "Edit a.rs?", "options": ["Allow once", "Use B"], "approval": true }]);
+        assert_eq!(line(part(permission, false, Json::Null)).field("question"), None, "nor does a question that grants a permission");
+
+        let noted = line(part(json!([choice]), true, json!([{ "questionId": "q", "labels": ["Alerts"], "note": "only for cart" }])));
+        assert_eq!(noted.field("text"), Some(&Value::from("Build → Alerts “only for cart”")));
+        assert_eq!(noted.field("quick"), None);
+        let quick = json!([{ "id": "q", "header": "Next", "question": "What next?", "options": ["Open PR", "Stop"], "quick": true }]);
+        let chip = line(part(quick, true, json!([{ "questionId": "q", "labels": ["Open PR"] }])));
+        assert_eq!(chip.field("quick"), Some(&Value::Bool(true)));
+        assert_eq!(chip.field("reply"), Some(&Value::from("Open PR")));
     }
 
     #[test]

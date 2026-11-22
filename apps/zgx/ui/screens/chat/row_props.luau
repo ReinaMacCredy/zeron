@@ -72,6 +72,18 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 			end
 		end,
 	}
+	-- An inline question's card only while it's the one the chat waits on (an older one left open can't be answered here).
+	props.ask_card = {
+		asked = function(request: string): boolean
+			local s = session()
+			local a = if s then s.ask else nil
+			return a ~= nil and a.request == request and a.question ~= nil and a.question.inline == true
+		end,
+		answer = function(request: string, answer: any): any
+			local id = chat()
+			return if id then store.answer(id, request, { values = answer.values, text = "", note = answer.note }) else nil
+		end,
+	}
 	props.on_visual_send = function(text: string, title: string): boolean
 		return M.visual_send(chat(), peek(), text, title)
 	end

@@ -722,7 +722,8 @@
         "plan": "Describe the goal. The agent writes a plan and changes nothing.",
         "plan_asks": "Describe the goal. The agent writes a plan and waits for your OK.",
         "mission": "Describe the goal. The agent writes a plan and waits for your OK.",
-        "mission_runs": "Describe the goal. The agent plans it and runs the steps on threads."
+        "mission_runs": "Describe the goal. The agent plans it and runs the steps on threads.",
+        "inline_answer": "Or type an answer"
       },
       "message": "Message",
       "branch": {
@@ -796,7 +797,10 @@
         "size_steps": "up to {n} steps",
         "size_no_limit": "no limit",
         "size_next": "next size"
-      }
+      },
+      "question_above": "1 question waiting above",
+      "request_changes": "Request changes",
+      "changes_need_words": "Type what to change, then press Request changes."
     },
     "markdown": {
       "fit_content": "Fit content",
@@ -1806,6 +1810,17 @@
         "title": "Its root file isn't there",
         "body": "Its % !TEX root line names {root}, which doesn't exist."
       }
+    },
+    "ask_card": {
+      "waiting": "Waiting for you",
+      "recommended": "Recommended",
+      "note": "Add a note (optional)",
+      "choose_one": "Choose one option.",
+      "choose_many": "Choose one or more.",
+      "send": "Send choice",
+      "sending": "Sending…",
+      "quick_reply": "Quick reply",
+      "failed": "Your answer didn't go. Try again."
     }
   },
   "settings": {

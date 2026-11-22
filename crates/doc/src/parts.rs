@@ -1480,6 +1480,7 @@ mod tests {
         let picked = vec![UserInputAnswer {
             question_id: "q".into(),
             labels: vec!["B".into()],
+            note: None,
         }];
         let mut parts = Vec::new();
         for id in ["answered", "closed", "legacy"] {

@@ -5045,6 +5045,9 @@ fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
                                 .unwrap_or(false),
                             kind: None,
                             action: None,
+                            details: Vec::new(),
+                            allow_note: false,
+                            quick: false,
                         },
                     ))
                 })

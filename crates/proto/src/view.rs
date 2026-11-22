@@ -1187,6 +1187,16 @@ pub fn input_outcome(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
+            let note = answers
+                .iter()
+                .find(|a| a.question_id == question.id)
+                .and_then(|a| a.note.as_deref())
+                .map(single_line)
+                .filter(|n| !n.is_empty() && !given.is_empty());
+            let answer = match note {
+                Some(note) => format!("{answer} “{}”", clip(&note, ANSWER_DISPLAY_MAX)),
+                None => answer,
+            };
             AnswerLine {
                 label: answer_label(question, questions),
                 answer,
@@ -1417,6 +1427,9 @@ mod input_outcome_tests {
             kind: None,
             approval: false,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         }
     }
 
@@ -1424,6 +1437,7 @@ mod input_outcome_tests {
         UserInputAnswer {
             question_id: id.into(),
             labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+            note: None,
         }
     }
 
@@ -1496,6 +1510,14 @@ mod input_outcome_tests {
                 .map(|l| (l.typed, l.skipped))
                 .collect::<Vec<_>>(),
             vec![(false, false), (false, false), (true, false), (false, true)]
+        );
+        let noted = [UserInputAnswer {
+            note: Some(" keep it\nshort ".into()),
+            ..answer("depth", &["Deep dive"])
+        }];
+        assert_eq!(
+            lines(input_outcome(&qs[..1], true, Some(&noted))),
+            vec!["Recherche → Deep dive “keep it short”"]
         );
     }
 

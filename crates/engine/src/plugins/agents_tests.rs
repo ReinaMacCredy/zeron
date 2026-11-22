@@ -1025,8 +1025,8 @@ async fn messages_a_question_is_answered_as_respond_to_input_answers_it() {
     assert_eq!(
         answered[0].2,
         [
-            UserInputAnswer { question_id: "q1".into(), labels: vec!["Yes".into()] },
-            UserInputAnswer { question_id: "q2".into(), labels: vec!["Later".into()] },
+            UserInputAnswer { question_id: "q1".into(), labels: vec!["Yes".into()], note: None },
+            UserInputAnswer { question_id: "q2".into(), labels: vec!["Later".into()], note: None },
         ]
     );
     // A request named is answered as named; no answers is a bad call.

@@ -101,6 +101,7 @@ fn controls(answers: Vec<UserInputAnswer>) -> (RunControls, Controls) {
                         ids.into_iter().map(|id| UserInputAnswer {
                             question_id: id,
                             labels: a.labels.clone(),
+                            note: None,
                         })
                     })
                     .collect();
@@ -375,6 +376,7 @@ fn yes() -> UserInputAnswer {
     UserInputAnswer {
         question_id: "*".into(),
         labels: vec!["Yes".into()],
+        note: None,
     }
 }
 
@@ -614,6 +616,7 @@ async fn a_question_goes_to_the_user_and_back() {
     let (run, mut controls) = controls(vec![UserInputAnswer {
         question_id: "q1".into(),
         labels: vec!["Changed".into()],
+        note: None,
     }]);
     let mut stream = harness
         .run(request(dir.path(), "question", "ask me"), run)

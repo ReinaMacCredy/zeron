@@ -472,6 +472,7 @@ async fn extension_dialogs_roundtrip_without_autoaccepting_and_preserve_editor_t
                         vec![zeron_proto::UserInputAnswer {
                             question_id: questions[0].id.clone(),
                             labels: vec![l.into()],
+                            note: None,
                         }]
                     })
                     .unwrap_or_default(),

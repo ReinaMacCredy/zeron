@@ -22,6 +22,7 @@ struct Page {
     question: String,
     labels: Vec<String>,
     typed: bool,
+    note: Option<String>,
 }
 
 struct Pills {
@@ -297,6 +298,24 @@ fn approves_plan(chat: &str, request: &str) -> bool {
     request == crate::threads::PLAN_REQUEST && crate::threads::waiting_plans().iter().any(|(id, _)| id == chat)
 }
 
+fn decided(decision: &str, questions: &[Json], args: &Value) -> Option<Result<Vec<Json>, Outcome>> {
+    let yes_no = is_approval(questions) || is_plan(questions);
+    Some(Ok(match decision {
+        "once" | "always" => single(questions, "Yes"),
+        "deny" if yes_no => single(questions, "No"),
+        "changes" if yes_no => {
+            let words = args.field("text").map(text).unwrap_or_default();
+            if words.trim().is_empty() {
+                return Some(Err("empty"));
+            }
+            with_note(single(questions, "No"), words.trim())
+        }
+        "changes" => return Some(Err("failed")),
+        "deny" => Vec::new(),
+        _ => return None,
+    }))
+}
+
 fn is_plan(questions: &[Json]) -> bool {
     questions.iter().any(|q| q["approval"].as_bool() == Some(true) && q["header"].as_str() == Some(zeron_proto::PLAN_APPROVAL_HEADER))
 }
@@ -458,11 +477,9 @@ impl Chats {
         if secret && decision != "deny" {
             return Err("failed");
         }
-        let (answers, took_page) = match decision.as_str() {
-            "once" | "always" => (single(questions, "Yes"), false),
-            "deny" if is_approval(questions) || is_plan(questions) => (single(questions, "No"), false),
-            "deny" => (Vec::new(), false),
-            _ => match self.take_page(id, request, questions, args) {
+        let (answers, took_page) = match decided(&decision, questions, args) {
+            Some(answers) => (answers?, false),
+            None => match self.take_page(id, request, questions, args) {
                 Some(answers) => (answers, true),
                 None => {
                     self.publish_answers();
@@ -509,10 +526,25 @@ impl Chats {
         if wizard.request != request {
             *wizard = Wizard { request: request.to_owned(), pages: Vec::new() };
         }
-        let question = questions.get(wizard.pages.len()).and_then(|q| q["id"].as_str()).unwrap_or_default().to_owned();
-        wizard.pages.push(Page { question, labels, typed });
-        (wizard.pages.len() >= questions.len())
-            .then(|| wizard.pages.iter().map(|p| json!({ "questionId": p.question, "labels": p.labels })).collect())
+        let asked = questions.get(wizard.pages.len());
+        let question = asked.and_then(|q| q["id"].as_str()).unwrap_or_default().to_owned();
+        let note = args
+            .field("note")
+            .map(text)
+            .or_else(|| (!typed).then_some(words))
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty() && !labels.is_empty() && asked.is_some_and(|q| q["allowNote"].as_bool() == Some(true)));
+        wizard.pages.push(Page { question, labels, typed, note });
+        (wizard.pages.len() >= questions.len()).then(|| {
+            wizard
+                .pages
+                .iter()
+                .map(|p| match &p.note {
+                    Some(note) => json!({ "questionId": p.question, "labels": p.labels, "note": note }),
+                    None => json!({ "questionId": p.question, "labels": p.labels }),
+                })
+                .collect()
+        })
     }
 
     fn mark_answered(&self, id: &str, request: &str, answered: bool) {
@@ -544,7 +576,7 @@ impl Chats {
         let Some(page) = popped else { return Value::Nil };
         self.publish_answers();
         let chosen: Vec<Value> = if page.typed { Vec::new() } else { page.labels.iter().map(|l| Value::from(l.as_str())).collect() };
-        let words = if page.typed { page.labels.first().map_or("", String::as_str) } else { "" };
+        let words = if page.typed { page.labels.first().map_or("", String::as_str) } else { page.note.as_deref().unwrap_or_default() };
         Value::record([("chosen", Value::List(chosen.into())), ("text", Value::from(words))])
     }
 }
@@ -607,6 +639,36 @@ pub(super) mod tests {
         assert!(matches!(typed.field("chosen"), Some(Value::List(l)) if l.is_empty()));
         assert_eq!(typed.field("text").map(text).as_deref(), Some("use dev"));
         assert!(matches!(back("r"), Value::Nil), "on the first page");
+    }
+
+    #[test]
+    fn a_note_goes_with_a_pick_only_where_the_question_takes_one() {
+        let noted = json!([{ "id": "q1", "question": "How?", "options": ["A", "B"], "allowNote": true }]);
+        let chats = with_waiting("c", "r", noted.clone());
+        let answers = chats.take_page("c", "r", noted.as_array().unwrap(), &answer_of(&["B"], " but no new deps ")).expect("one page");
+        assert_eq!(answers, vec![json!({ "questionId": "q1", "labels": ["B"], "note": "but no new deps" })]);
+        let chats = with_waiting("c", "r", noted.clone());
+        let card = Value::record([("values", Value::List(vec![Value::from("A")].into())), ("note", Value::from("soon"))]);
+        assert_eq!(chats.take_page("c", "r", noted.as_array().unwrap(), &card).expect("one page")[0]["note"], "soon");
+        let chats = with_waiting("c", "r", noted.clone());
+        let typed = chats.take_page("c", "r", noted.as_array().unwrap(), &answer_of(&[], "neither")).expect("one page");
+        assert_eq!(typed, vec![json!({ "questionId": "q1", "labels": ["neither"] })], "typed alone is the answer");
+
+        let plain = json!([{ "id": "q1", "question": "How?", "options": ["A", "B"] }]);
+        let chats = with_waiting("c", "r", plain.clone());
+        let answers = chats.take_page("c", "r", plain.as_array().unwrap(), &answer_of(&["B"], "ignored")).expect("one page");
+        assert_eq!(answers, vec![json!({ "questionId": "q1", "labels": ["B"] })]);
+    }
+
+    #[test]
+    fn request_changes_needs_words_and_answers_no_with_them() {
+        let approval = json!([{ "id": "q", "header": "Approve command", "question": "Run `ls`?", "options": ["Yes", "No"], "approval": true }]);
+        let approval = approval.as_array().unwrap();
+        let changes = |words: &str| Value::record([("text", Value::from(words))]);
+        assert_eq!(decided("changes", approval, &changes("  ")), Some(Err("empty")));
+        assert_eq!(decided("changes", approval, &changes(" use ls -la ")), Some(Ok(vec![json!({ "questionId": "q", "labels": ["No"], "note": "use ls -la" })])));
+        let question = json!([{ "id": "q", "question": "Which?", "options": ["A"] }]);
+        assert_eq!(decided("changes", question.as_array().unwrap(), &changes("x")), Some(Err("failed")), "only an approval asks for changes");
     }
 
     #[test]

@@ -3,6 +3,7 @@
 --     essay = { question, placeholder? }?, saved = fn, save = fn, on_send = fn }
 
 local Button = require("@self/button")
+local Choice = require("@self/choice")
 local Icon = require("@self/icon")
 local Stat = require("@self/stat")
 local TextField = require("@self/text_field")
@@ -19,7 +20,7 @@ export type Props = {
 }
 
 local LETTERS = { "A", "B", "C", "D", "E", "F", "G", "H" }
-local CLEAR = "#00000000"
+local CLEAR = Choice.CLEAR
 
 local function right(q: Question, chosen: { [number]: boolean }?): boolean
 	for j, o in q.options do
@@ -192,10 +193,10 @@ return ui.component(function(props: Props): Node
 		return ui.row { class = "quiz-top", w_full = true, min_h = 26, gap = "$space.2", items = "center", kids }
 	end
 
-	local function marker(q: Question, qi: number, j: number): Node
+	local function look(q: Question, qi: number, j: number): () -> (string, string, string)
 		local multi = q.kind == "multi"
 		local o = q.options[j]
-		local function look(): (string, string, string)
+		return function(): (string, string, string)
 			read()
 			local chosen = (S.chosen[qi] or {})[j] == true
 			if not S.checked[qi] then
@@ -213,51 +214,10 @@ return ui.component(function(props: Props): Node
 			end
 			return CLEAR, "$border.strong", if q.kind == "single" then "letter:$text.tertiary" else ""
 		end
-		return ui.row {
-			class = "quiz-mark",
-			w = 20,
-			h = 20,
-			shrink = 0,
-			mt = ui.raw(1, "a mark level with its words' first line, as the design's"),
-			items = "center",
-			justify = "center",
-			rounded = if multi then ui.raw(6, "a multi choice's square mark, as the design's") else "$radius.full",
-			bg = function(): string
-				local fill = look()
-				return fill
-			end,
-			border = function(): number
-				local _, ring = look()
-				return if ring == CLEAR then 0 elseif ring == "$success" then 1.5 else 1
-			end,
-			border_color = function(): string
-				local _, ring = look()
-				return ring
-			end,
-			ui.presence(function(): string
-				local _, _, inside = look()
-				return inside
-			end, function(inside: string): Node
-				local what, ink = string.match(inside, "^(%a+):(.+)$")
-				if what == "letter" then
-					return ui.text {
-						LETTERS[j] or "",
-						literal = true,
-						text_size = ui.raw(11, "a mark's letter, as the design's"),
-						weight = "$font.weight.semibold",
-						color = ink,
-					}
-				elseif what == "check" or what == "cross" then
-					return Icon { name = if what == "check" then "check" else "close", size = 12, color = ink }
-				end
-				return ui.div {}
-			end),
-		}
 	end
 
 	local function option(q: Question, qi: number, j: number): Node
 		local o = q.options[j]
-		local hovered = ui.use_state(false)
 		local function checked(): boolean
 			read()
 			return S.checked[qi] == true
@@ -279,45 +239,20 @@ return ui.component(function(props: Props): Node
 			S.chosen[qi] = now
 			changed()
 		end
-		return ui.row {
+		return Choice.Row {
 			class = "quiz-option",
-			role = if q.kind == "multi" then "checkbox" else "radio",
+			mark_class = "quiz-mark",
+			multi = q.kind == "multi",
 			label = o.text,
-			checked = chosen,
-			focusable = true,
-			w_full = true,
-			min_w = 0,
-			gap = ui.raw(10, "an option's mark and words, as the design's"),
-			items = "start",
-			px = "$space.2",
-			py = ui.raw(7, "an option's room, as the design's"),
-			rounded = ui.raw(10, "an option's wash, as the design's"),
-			cursor = "pointer",
-			bg = function(): string
-				if checked() then
-					return CLEAR
-				end
-				if chosen() then
-					return "$zeron.secondary.bg"
-				end
-				return if hovered:get() then "$hover" else CLEAR
-			end,
+			letter = LETTERS[j],
+			chosen = chosen,
+			on_pick = pick,
+			look = look(q, qi, j),
+			settled = checked,
 			opacity = function(): number
 				return if checked() and not chosen() and not o.correct then 0.5 else 1
 			end,
-			on_hover = function(inside: boolean)
-				hovered:set(inside)
-			end,
-			on_click = pick,
-			on_key = function(e: any): boolean
-				if e.key == "Enter" or e.key == " " then
-					pick()
-					return true
-				end
-				return false
-			end,
-			marker(q, qi, j),
-			ui.column {
+			body = ui.column {
 				grow = 1,
 				min_w = 0,
 				body(o.text),

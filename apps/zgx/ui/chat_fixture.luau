@@ -788,9 +788,109 @@ end
 stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
-stub.answer = function(id: string, request: string): any
+local INLINE: { [string]: any } = {
+	q9 = {
+		header = "Build",
+		text = "How should the TTL change go in?",
+		note = true,
+		inline = true,
+		options = {
+			{ value = "Config only", label = "Config only", detail = "Change the TTL in config/cache.toml, nothing else." },
+			{ value = "Config and an alert", label = "Config and an alert", detail = "Alert when the cache hit rate drops under 80%.", recommended = true },
+			{ value = "Adaptive TTL", label = "Adaptive TTL", detail = "Most flexible, but adds a new dependency." },
+		},
+	},
+	q10 = {
+		header = "Next",
+		text = "What next?",
+		quick = true,
+		inline = true,
+		options = {
+			{ value = "Open a PR", label = "Open a PR" },
+			{ value = "Rerun the bench", label = "Rerun the bench" },
+			{ value = "Stop here", label = "Stop here" },
+		},
+	},
+}
+local function inline_block(request: string, answered: { [string]: any }?): any
+	local q = INLINE[request]
+	if not answered then
+		return { id = `in-{request}`, kind = "line", line = "input", outcome = "pending", title = q.header, request = request, question = q }
+	end
+	local block = { id = `in-{request}`, kind = "line", line = "input", outcome = "answered", text = `{q.header} → {answered.shown}`, answers = { { label = q.header, answer = answered.shown, skipped = false } } }
+	if q.quick then
+		block.quick = true
+		block.reply = answered.reply
+	end
+	return block
+end
+local function land_inline(request: string, values: { string }, words: string?)
+	local reply = if #values > 0 then table.concat(values, ", ") else (words or "")
+	local shown = if #values == 0 then `“{reply}”` elseif words and words ~= "" then `{reply} “{words}”` else reply
+	for i, m in store.messages:peek() do
+		if m.id == `inline-{request}` then
+			store.messages:set_key({ i, "blocks", 2 }, inline_block(request, { shown = shown, reply = reply }))
+		end
+	end
+	if opened then
+		publish(opened, { ask = ui.null })
+	end
+end
+-- `test_answer_held`: an inline answer stays on its way until it's let go.
+local answer_held = ui.state("test_answer_held", false)
+local held_answers: { () -> () } = {}
+ui.effect(function()
+	if not answer_held:get() then
+		local go = held_answers
+		held_answers = {}
+		for _, f in go do
+			f()
+		end
+	end
+end)
+stub.answer = function(id: string, request: string, answer: any?): any
 	note(`answer:{id}:{request}`)
+	local a = answer or {}
+	note(`answered:{id}:{request}:{table.concat(a.values or {}, "+")}:{a.note or ""}:{a.text or ""}`)
+	if not INLINE[request] then
+		return settled(nil)
+	end
+	local function land()
+		land_inline(request, a.values or {}, if a.note and a.note ~= "" then a.note else a.text)
+	end
+	if answer_held:peek() then
+		table.insert(held_answers, land)
+		return { after = function() end }
+	end
+	land()
 	return settled(nil)
+end
+stub.request_changes = function(id: string, request: string, text: string): any
+	note(`request_changes:{id}:{request}:{text}`)
+	publish(id, { ask = ui.null })
+	return settled(nil)
+end
+for request in INLINE do
+	ui.command {
+		id = `ask_inline_{request}`,
+		title = `The agent asks {request} in its reply`,
+		run = function()
+			if not opened then
+				return
+			end
+			publish(opened, { ask = { request = request, kind = "question", question = INLINE[request] } })
+			store.messages:push {
+				id = `inline-{request}`,
+				role = "assistant",
+				text = "Before I change it, one thing to settle.",
+				model = "Opus",
+				blocks = {
+					{ id = "t1", kind = "text", text = "Before I change it, one thing to settle." },
+					inline_block(request),
+				},
+			}
+		end,
+	}
 end
 -- A queued message sent on (steered in): noted; `steer_fails` makes the
 -- next one not go.

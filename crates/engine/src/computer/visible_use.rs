@@ -911,12 +911,16 @@ mod tests {
                 prefill: None,
                 multiline: false,
                 action: None,
+                details: Vec::new(),
+                allow_note: false,
+                quick: false,
             }],
             resolved: answer.is_some(),
             answers: answer.map(|label| {
                 vec![zeron_proto::UserInputAnswer {
                     question_id: "q1".into(),
                     labels: vec![label.into()],
+                    note: None,
                 }]
             }),
             asked_at_ms: None,

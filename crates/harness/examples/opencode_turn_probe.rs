@@ -89,6 +89,7 @@ async fn main() {
                             zeron_proto::UserInputAnswer {
                                 question_id: question.id,
                                 labels: vec!["Yes".into()],
+                                note: None,
                             }
                         })
                         .collect();

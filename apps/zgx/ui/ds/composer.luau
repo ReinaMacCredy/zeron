@@ -56,6 +56,7 @@ local Compaction = require("@self/compaction")
 local limit_notice = require("@self/composer_limit")
 local composer_surface = require("@self/composer_surface")
 local ask = require("@self/composer_ask")
+local AskCard = require("@self/ask_card")
 local mentions = require("@self/composer_mentions")
 local references = require("@self/references")
 local locale = require("@self/locale")
@@ -286,7 +287,7 @@ export type Props = {
 	on_close_question: (() -> ())?,
 	approval: State<ask.Approval?>?,
 	on_approve: ((scope: "once" | "always") -> ())?,
-	on_deny: (() -> ())?,
+	on_deny: ((change: { text: string, focus: () -> (), keep: () -> () }?) -> ())?,
 	-- Whether an approval can be given for good ("Always allow"); by
 	-- default, yes. An agent that only asks each time hides it.
 	can_always: (boolean | () -> boolean)?,
@@ -2357,6 +2358,57 @@ return ui.component(function(props: Props): Node
 			},
 		})
 	end
+	local function request_changes()
+		if not props.on_deny then
+			return
+		end
+		local words = value:peek()
+		local function focus()
+			local el = field:peek()
+			if el then
+				el:focus()
+			end
+		end
+		if string.find(words, "%S") then
+			value:set("")
+		end
+		(props.on_deny :: any)({
+			text = words,
+			focus = focus,
+			keep = function()
+				value:set(words)
+			end,
+		})
+	end
+	local function waiting_above(): Node
+		return ui.row {
+			w_full = true,
+			px = "$space.3",
+			pt = "$space.2",
+			ui.button {
+				class = "composer-ask-above",
+				label = locale.t("ds.composer.question_above"),
+				h = 24,
+				px = ui.raw(7, "a quiet button, as the design's"),
+				gap = "$space.1",
+				items = "center",
+				rounded = ui.raw(7, "a quiet button, as the design's"),
+				bg = "#00000000",
+				color = "$text.tertiary",
+				text_size = "$font.size.xs",
+				hover = { bg = "$hover", color = "$text.primary" },
+				focus_on_press = false,
+				on_click = function()
+					local q = question()
+					if not (q and q.request and AskCard.reveal(q.request)) then
+						(require :: any)("@self/transcript").latest()
+					end
+				end,
+				Icon { name = "alt-arrow-up", size = 13 },
+				ui.text { locale.t("ds.composer.question_above") },
+			},
+		}
+	end
 	-- A question's way through: Back (from the second page), then Submit
 	-- (or Next, with pages to come), dimmed until something is picked or
 	-- typed. An approval's: Deny, Always allow, Allow.
@@ -2396,7 +2448,17 @@ return ui.component(function(props: Props): Node
 				hook = false,
 				gap = "$space.2",
 				items = "center",
-				Button { locale.t("ds.composer.deny"), size = "sm", tone = "ghost", on_click = props.on_deny },
+				Button {
+					locale.t("ds.composer.deny"),
+					size = "sm",
+					tone = "ghost",
+					on_click = function()
+						if props.on_deny then
+							props.on_deny()
+						end
+					end,
+				},
+				Button { locale.t("ds.composer.request_changes"), size = "sm", tone = "secondary", on_click = request_changes },
 				ui.show(
 					function(): boolean
 						local always = props.can_always
@@ -2876,7 +2938,9 @@ return ui.component(function(props: Props): Node
 		}),
 		ui.presence(function(): string?
 			local q = question()
-			if q then
+			if q and q.inline then
+				return "above"
+			elseif q then
 				-- A new question (or its next page) is built afresh.
 				return `question:{q.text}:{q.page or 1}:{if q.multi then 1 else 0}`
 			elseif approval() then
@@ -2889,6 +2953,9 @@ return ui.component(function(props: Props): Node
 			local kind = string.match(key, "^(%a+)")
 			if kind == "mini" then
 				return mini_strip()
+			end
+			if kind == "above" then
+				return waiting_above()
 			end
 			if kind == "question" then
 				local q = question() :: ask.Question
@@ -2972,7 +3039,10 @@ return ui.component(function(props: Props): Node
 		return if #text < #p and string.sub(p, 1, #text) == text then p else nil
 	end
 	local function placeholder(): string
-		if question() then
+		local q = question()
+		if q and q.inline then
+			return locale.s("ds.composer.placeholder.inline_answer")
+		elseif q then
 			return locale.s(if picked() > 0 then "ds.composer.placeholder.answer_picked" else "ds.composer.placeholder.answer")
 		elseif approval() then
 			return locale.s("ds.composer.placeholder.instead")
@@ -3372,7 +3442,7 @@ return ui.component(function(props: Props): Node
 						return true
 					end
 					local q = question()
-					if q then
+					if q and not q.inline then
 						local d = string.match(e.key, "^(%d)$")
 						if d and not has_text() and not e.cmd and not e.ctrl and not e.alt then
 							local o = q.options[tonumber(d) :: number]

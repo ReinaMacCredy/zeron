@@ -69,6 +69,9 @@ export type Props = {
 	-- Rows steered as one (src/chat.rs `said`): each its own bubble, with what it carried.
 	steered: { { text: string, attachments: { Attachment }? } }?,
 	from: string?,
+	label: string?,
+	-- Words someone else chose (an agent's option label): drawn as they are, never as markdown.
+	plain: boolean?,
 	-- It lands in a transcript on its own (ds/transcript): what came with it rises after this long, its words a beat later.
 	rise: number?,
 }
@@ -532,6 +535,9 @@ local One = ui.component(function(props: Props): Node
 						end
 						return tostring(n)
 					end, function(): Node
+						if props.plain then
+							return ui.text { props.text, literal = true, wrap = true, min_w = 0, text_size = "$font.size.md", line_height = "$font.line.md", color = "$text.primary" }
+						end
 						return Markdown { text = words_now, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, attachment_icon = attachment_icon, invocations = true, find = props.find, wash = props.wash, attached = attached_by_name(props.attachments) }
 					end, { w_full = true }),
 				},
@@ -577,7 +583,8 @@ local One = ui.component(function(props: Props): Node
 	end
 	local function from_visual(node: Node?): Node?
 		local from = props.from
-		if not node or not from or from == "" then
+		local said = props.label or (if from and from ~= "" then locale.s("ds.user_message.from_visual", { title = from }) else nil)
+		if not node or not said then
 			return node
 		end
 		return ui.column {
@@ -592,7 +599,7 @@ local One = ui.component(function(props: Props): Node
 				mr = ui.raw(6, "the label in from the bubble's edge, as the design's"),
 				Icon { name = "lucide-undo-2", size = 12, color = "$text.tertiary" },
 				ui.text {
-					locale.s("ds.user_message.from_visual", { title = from }),
+					said,
 					literal = true,
 					text_size = "$font.size.xs",
 					color = "$text.tertiary",
