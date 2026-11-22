@@ -209,6 +209,15 @@ test("composer place: ⇧↑ ⇧↓ in an empty draft step the context a stop, t
 	app:key("shift+ArrowUp")
 	settle(app)
 	expect(picks().autoCompact).to_be("300k")
+	-- A new chat reports no window: the size alone.
+	app:set_state("test_place_draft", "")
+	app:set_state("test_place_usage", nil)
+	settle(app)
+	app:key("shift+ArrowUp")
+	rolled()
+	expect(picks().autoCompact).to_be("400k")
+	expect(says("400K")).to_be(true)
+	expect(says("/")).to_be(false)
 end)
 
 -- A hover card is framed once (ds/hover_card): zgx's layer hugs the card
