@@ -80,6 +80,7 @@ pub(super) fn form(params: &Value) -> Option<Form> {
 
     if properties.is_empty() {
         let question = UserInputQuestion {
+            note: None,
             id: super::new_message_id(),
             header,
             question: if message.is_empty() {
@@ -127,6 +128,7 @@ pub(super) fn form(params: &Value) -> Option<Form> {
             Kind::Text | Kind::Number { .. } => (Vec::new(), false),
         };
         let question = UserInputQuestion {
+            note: None,
             id: super::new_message_id(),
             header: header.clone(),
             question: text,

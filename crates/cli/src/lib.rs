@@ -138,6 +138,14 @@ enum Command {
     /// the old version just before it hands over.
     #[command(name = "update-watchdog", hide = true)]
     UpdateWatchdog,
+    /// An agent's models, discovered now with the credentials this process's
+    /// environment points it at, as JSON on stdout: what a Cloud sign-in on
+    /// this computer keeps as the new account's (started by the engine).
+    #[command(name = "discover-models", hide = true)]
+    DiscoverModels {
+        /// The agent (`antigravity`, `grok`, …).
+        harness: String,
+    },
 }
 
 /// `zeron app`: run by the `zeron` binary, which links the UI driver client.
@@ -279,6 +287,7 @@ pub enum EngineCommand {
     Hook { chat: String, port: Option<u16> },
     Plugin(PluginCommand),
     Template(TemplateCommand),
+    DiscoverModels(String),
 }
 
 /// Where this binary runs [`EngineCommand`]s.
@@ -377,6 +386,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
                         | Command::Ui(_)
                         | Command::Plugin { .. }
                         | Command::Template { .. }
+                        | Command::DiscoverModels { .. }
                 )
             ),
         );
@@ -402,6 +412,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
         Some(Command::Hook { chat, port }) => engine(EngineCommand::Hook { chat, port }),
         Some(Command::Ui(command)) => Launch::Ui(command),
         Some(Command::Triage { dry_run }) => Launch::Triage { dry_run },
+        Some(Command::DiscoverModels { harness }) => engine(EngineCommand::DiscoverModels(harness)),
         Some(Command::Plugin { command }) => engine(EngineCommand::Plugin(command)),
         Some(Command::Template { command }) => engine(EngineCommand::Template(command)),
         #[cfg(target_os = "linux")]
@@ -441,7 +452,8 @@ impl Command {
             | Self::Mcp { .. }
             | Self::Hook { .. }
             | Self::Plugin { .. }
-            | Self::Template { .. } => true,
+            | Self::Template { .. }
+            | Self::DiscoverModels { .. } => true,
             #[cfg(target_os = "linux")]
             Self::Appshot => false,
             Self::Update { .. }

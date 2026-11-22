@@ -64,6 +64,7 @@ async fn check_persistence(
         auto_approve: true,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: vec![],
         worktree: None,
         branch: None,

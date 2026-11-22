@@ -42,13 +42,16 @@ const UNSUPPORTED_ARCHIVES: &[&str] = &[
     ".dmg", ".pkg", ".msi",
 ];
 
-/// an archive release whose integrity is proven after extraction (by a
-/// vendor code signature) rather than by a digest pinned in zeron's source.
+/// an archive release whose integrity is proven by a registry sha-256 digest
+/// and/or post-extraction verification (vendor code signature, version probe)
+/// rather than a sha-512 pinned in zeron's source.
 pub struct VerifiedRelease<'a> {
     pub name: &'a str,
     pub version: &'a str,
     pub url: &'a str,
     pub entry: &'a str,
+    /// lowercase hex SHA-256 of the downloaded archive, verified when present.
+    pub sha256: Option<&'a str>,
     /// written as the install marker once verification passes.
     pub marker: &'a str,
 }
@@ -138,7 +141,7 @@ impl<'a> From<&'a VerifiedRelease<'a>> for Source<'a> {
             url: release.url,
             entry: release.entry,
             sha512: None,
-            sha256: None,
+            sha256: release.sha256,
             kind: ArchiveKind::Zip,
             marker: release.marker,
         }
@@ -910,12 +913,41 @@ mod tests {
                     .unwrap();
                 zip.write_all(b"#!/bin/sh\n").unwrap();
                 let bytes = zip.finish().unwrap().into_inner();
+                let digest = format!("{:x}", Sha256::digest(&bytes));
                 let url = serve(bytes).await;
+                let wrong_digest = VerifiedRelease {
+                    name: "verified-acp",
+                    version: "2.0.0",
+                    url: &url,
+                    entry: "server",
+                    sha256: Some(&"0".repeat(64)),
+                    marker: "registry-sha256",
+                };
+                let mismatch = install_verified(&wrong_digest, "Test", |_| async {
+                    panic!("verify must not run when SHA-256 mismatches");
+                })
+                .await
+                .unwrap_err();
+                assert!(
+                    mismatch.to_string().contains("SHA-256 mismatch"),
+                    "{mismatch}"
+                );
+                let root = adapters_root().unwrap();
+                assert!(!root.join("verified-acp").exists());
+                assert!(
+                    std::fs::read_dir(&root)
+                        .unwrap()
+                        .flatten()
+                        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".tmp-")),
+                    "a checksum mismatch leaves no temporary directory behind"
+                );
+
                 let release = VerifiedRelease {
                     name: "verified-acp",
                     version: "2.0.0",
                     url: &url,
                     entry: "server",
+                    sha256: Some(&digest),
                     marker: "vendor-signature",
                 };
 
@@ -926,7 +958,6 @@ mod tests {
                 .await
                 .unwrap_err();
                 assert!(rejected.to_string().contains("not signed"), "{rejected}");
-                let root = adapters_root().unwrap();
                 assert!(!root.join("verified-acp").exists());
                 assert!(
                     std::fs::read_dir(&root)

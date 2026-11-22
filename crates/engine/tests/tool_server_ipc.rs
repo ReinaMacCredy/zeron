@@ -72,6 +72,7 @@ impl Harness for EnvHarness {
 fn run_payload() -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
+            code_mode: false,
             prompt: "stay".into(),
             harness: None,
             model: None,

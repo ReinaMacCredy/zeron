@@ -57,6 +57,7 @@ async fn main() {
             zeron_proto::AccessMode::FullAccess
         },
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         resume: None,
         worktree: None,

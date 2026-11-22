@@ -64,8 +64,8 @@ local function walk(app: any)
 		app:frames(8)
 		check(`Tab {i}`)
 	end
-	-- (Every step a row's (a link, a tool row, a message's lane or its Copy), but the side chat's tab each way and the last Tab, back to the composer.)
-	expect(seen).to_be(27)
+	-- (Every step a row's: a link, a tool row, a message's lane or its Copy.)
+	expect(seen).to_be(28)
 end
 
 test("Tab and ⇧Tab through a long chat bring each focused row clear of the title fade and the composer", function()

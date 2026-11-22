@@ -17,11 +17,12 @@
 
 use loro::ToJson;
 use serde::{Deserialize, Serialize};
+use zeron_proto::ChatConfig;
 
 use crate::schema::{DocError, SessionDoc};
 
 /// One unsent message waiting its turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuedMessage {
     /// Stable through promotion: the host uses this as the transcript user
@@ -64,6 +65,11 @@ pub struct QueuedMessage {
     /// Composed by the engine with no sender thread, so it is not the person's message.
     #[serde(default, skip_serializing_if = "is_false")]
     pub engine_sent: bool,
+    /// Chat configuration selected when this row was queued (agent, model,
+    /// reasoning effort, model options). When set, the host dispatches this
+    /// row with these run-target settings and updates the chat's saved config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ChatConfig>,
 }
 
 /// Why a queued row is not currently eligible for automatic or explicit
@@ -117,6 +123,7 @@ impl QueuedMessage {
             task_steps: Vec::new(),
             input_request: None,
             engine_sent: false,
+            config: None,
         }
     }
 }
@@ -418,6 +425,12 @@ fn write_queued_map(map: &loro::LoroMap, item: &QueuedMessage) -> Result<(), Doc
             crate::schema::loro_value_from_json(&serde_json::to_value(gate)?),
         )?;
     }
+    if let Some(config) = &item.config {
+        map.insert(
+            "config",
+            crate::schema::loro_value_from_json(&serde_json::to_value(config)?),
+        )?;
+    }
     Ok(())
 }
 
@@ -482,6 +495,10 @@ fn queued_from_json(v: serde_json::Value) -> Option<QueuedMessage> {
                 })
             }),
         },
+        config: v
+            .get("config")
+            .filter(|c| !c.is_null())
+            .and_then(|c| serde_json::from_value(c.clone()).ok()),
     })
 }
 
@@ -540,6 +557,7 @@ mod tests {
             task_steps: Vec::new(),
             input_request: None,
             engine_sent: false,
+            config: None,
         }
     }
 
@@ -794,5 +812,42 @@ mod tests {
             "every row survives exactly once"
         );
         assert!(left.iter().any(|i| i.text == "b-edited"));
+    }
+
+    #[test]
+    fn queued_config_round_trips_through_moves_and_edits() {
+        let d = doc();
+        let cfg = ChatConfig {
+            harness: zeron_proto::HarnessId::Antigravity,
+            model: Some("gemini-4-neon".into()),
+            reasoning: Some(zeron_proto::ReasoningLevel::High),
+            model_options: serde_json::Map::new(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            instructions: String::new(),
+            profile_id: None,
+            instance_id: None,
+            disabled_tools: Vec::new(),
+            access: zeron_proto::AccessMode::FullAccess,
+            plan: false,
+            mission: None,
+        };
+        let mut switched = item("q-switch", "try neon");
+        switched.config = Some(cfg.clone());
+        d.push_queued(&item("q-plain", "plain")).unwrap();
+        d.push_queued(&switched).unwrap();
+
+        d.move_queued("q-switch", 0).unwrap();
+        d.set_queued_text("q-switch", "try neon edited", 2_000).unwrap();
+
+        let rows = d.read_queue().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "q-switch");
+        assert_eq!(rows[0].text, "try neon edited");
+        assert_eq!(rows[0].config.as_ref(), Some(&cfg));
+        assert_eq!(rows[1].id, "q-plain");
+        assert_eq!(rows[1].config, None);
+
+        let taken = d.take_queued("q-switch").unwrap().unwrap();
+        assert_eq!(taken.config.as_ref(), Some(&cfg));
     }
 }

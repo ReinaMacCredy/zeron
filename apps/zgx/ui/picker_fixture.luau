@@ -148,5 +148,9 @@ return ui.column {
 		context_tokens = function(): number?
 			return context:get()
 		end,
+		-- A model its catalog does not list, by the name its chat gave it.
+		model_label = function(): string?
+			return if (ui.state("test_picker_model", nil :: string?):get() or ""):find("/", 1, true) then "Unlisted" else nil
+		end,
 	},
 }

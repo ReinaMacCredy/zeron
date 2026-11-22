@@ -131,6 +131,7 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             auto_approve: true,
             access: zeron_proto::AccessMode::FullAccess,
             plan: false,
+            code_mode: false,
             attachments: vec![pending_ref.to_string()],
             worktree: None,
             branch: None,

@@ -624,6 +624,11 @@ impl AccessMode {
                 .into_iter()
                 .find(|mode| modes.contains(mode));
         }
+        if matches!(self, AccessMode::Supervised | AccessMode::AutoAcceptEdits)
+            && modes.contains(&AccessMode::AutoReview)
+        {
+            return Some(AccessMode::AutoReview);
+        }
         Some(resolve_access(self, modes))
     }
 
@@ -817,6 +822,13 @@ pub struct RunRequest {
     /// changing anything. Honored by harnesses that advertise it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan: bool,
+    /// Code Mode: enable the provider's scriptable JavaScript tool-calling
+    /// runtime (Settings → Providers). Stamped by the HOST engine before a
+    /// run launches, like `mcp` and `extra_mcp`; honored by drivers that
+    /// support it (`zeron_harness::supports_code_mode`). Additive +
+    /// serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub code_mode: bool,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Absolute paths of image attachments already staged on the run device
@@ -889,6 +901,7 @@ impl std::fmt::Debug for RunRequest {
             auto_approve,
             access,
             plan,
+            code_mode,
             resume,
             attachments,
             worktree,
@@ -911,6 +924,7 @@ impl std::fmt::Debug for RunRequest {
             .field("auto_approve", auto_approve)
             .field("access", access)
             .field("plan", plan)
+            .field("code_mode", code_mode)
             .field("resume", resume)
             .field("attachments", attachments)
             .field("worktree", worktree)
@@ -1708,6 +1722,11 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
+    /// A short note from the agent's reviewer on why this is asked. Already
+    /// included in `question` for clients that only read text; a client that
+    /// knows the field can show it apart from what is asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub approval: bool,
     #[serde(
@@ -2090,6 +2109,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&kind).unwrap(), wire);
         let question = UserInputQuestion {
             approval: false,
+            note: None,
             id: "foreground".into(),
             header: "Computer".into(),
             question: "Ghostty needs to come to the front to type.".into(),
@@ -2224,6 +2244,19 @@ mod tests {
             AutoAcceptEdits.honored_by(&AccessMode::ALL),
             Some(AutoAcceptEdits)
         );
+    }
+
+    #[test]
+    fn stricter_modes_run_in_auto_when_only_auto_is_offered() {
+        use AccessMode::*;
+        let auto_and_full = [AutoReview, FullAccess];
+        assert_eq!(Supervised.honored_by(&auto_and_full), Some(AutoReview));
+        assert_eq!(AutoAcceptEdits.honored_by(&auto_and_full), Some(AutoReview));
+        assert_eq!(AutoReview.honored_by(&auto_and_full), Some(AutoReview));
+        assert_eq!(FullAccess.honored_by(&auto_and_full), Some(FullAccess));
+        // Full-only agents keep the legacy fallback.
+        assert_eq!(Supervised.honored_by(&[FullAccess]), Some(FullAccess));
+        assert_eq!(AutoAcceptEdits.honored_by(&[FullAccess]), Some(FullAccess));
     }
 
     #[test]

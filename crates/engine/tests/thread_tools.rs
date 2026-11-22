@@ -297,6 +297,7 @@ fn queue_run(core: &EngineCore, chat_id: &str, command_id: &str, message_id: &st
             id: command_id.into(),
             payload: SessionCommandPayload::Run {
                 request: RunRequest {
+                    code_mode: false,
                     prompt: prompt.into(),
                     harness: None,
                     model: None,
@@ -4110,6 +4111,7 @@ impl Harness for AskingHarness {
             let mut text = "noted".to_string();
             if asks {
                 let answers = (request_input)(vec![zeron_proto::UserInputQuestion {
+                    note: None,
                     id: "q-curl".into(),
                     header: "Agent question".into(),
                     question: "Execute `curl -o main.jpg https://example.com/a.jpg`".into(),

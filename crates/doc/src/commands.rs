@@ -410,6 +410,7 @@ mod tests {
             auto_approve: false,
             access: zeron_proto::AccessMode::FullAccess,
             plan: false,
+            code_mode: false,
             attachments: Vec::new(),
             worktree: None,
             branch: None,

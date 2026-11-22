@@ -52,6 +52,7 @@ fn run_request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,
@@ -1058,6 +1059,88 @@ async fn a_resume_the_provider_rejects_retries_in_a_fresh_session() {
     assert_eq!(
         requests.lock().unwrap()[3].resume.as_deref(),
         Some("hs-fresh")
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn corrupt_session_fallback_replays_prior_history_via_turn_control() {
+    struct RecoveringHarness {
+        recovered_prompts: Arc<Mutex<Vec<Option<String>>>>,
+    }
+    #[async_trait]
+    impl Harness for RecoveringHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Recovering"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[ReasoningLevel::Medium]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            let recovered = controls.turn.take_recovery_prompt();
+            self.recovered_prompts.lock().unwrap().push(recovered.clone());
+            let events = if request.resume.is_some() {
+                // Simulate an ACP driver hitting a corrupt trajectory DB on
+                // session/resume, opening a fresh session, and replaying the
+                // host-prepared recovery prompt.
+                let delivered = recovered.unwrap_or(request.prompt);
+                completed_turn("hs-recovered", &format!("replayed:{delivered}"))
+            } else {
+                completed_turn("hs-corrupt", &format!("stored:{}", request.prompt))
+            };
+            Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = data_dir(&tmp);
+    let recovered_prompts: Arc<Mutex<Vec<Option<String>>>> = Default::default();
+    let core = assemble(
+        &dir,
+        RecoveringHarness {
+            recovered_prompts: recovered_prompts.clone(),
+        },
+    );
+    pre_title(&core);
+    queue_run(&core, "remember code OBSIDIAN-742", "msg-user-1");
+    wait_for(|| complete_assistant_count(&core) == 1, "first turn").await;
+
+    queue_run(&core, "what was the code?", "msg-user-2");
+    wait_for(|| complete_assistant_count(&core) == 2, "recovered turn").await;
+
+    let captured = recovered_prompts.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].is_none(), "initial turn has no recovery prompt");
+    let replay = captured[1]
+        .as_deref()
+        .expect("resumed turn receives host-prepared recovery prompt");
+    assert!(
+        replay.contains("OBSIDIAN-742")
+            && replay.contains("stored:remember code OBSIDIAN-742")
+            && replay.ends_with("\n\nwhat was the code?"),
+        "unexpected recovery prompt: {replay}"
+    );
+    // The current user message itself must not be duplicated inside <conversation>.
+    let conv_section = replay.split("</conversation>").next().unwrap();
+    assert!(
+        !conv_section.contains("what was the code?"),
+        "current prompt leaked into prior conversation: {replay}"
     );
     core.shutdown().await;
 }

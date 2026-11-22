@@ -115,6 +115,8 @@ const ENGINE_METHODS: &[&str] = &[
     "SetDelegationSettings",
     // Providers' "Auto-resume after usage limits" (read by `settings.auto_resume`).
     "SetAutoResumeLimits",
+    "GetCodeMode",
+    "SetCodeMode",
     // "Keep Zeron running after you quit" (src/quit_prompt.rs).
     "GetBackgroundSettings",
     "SetBackgroundSettings",

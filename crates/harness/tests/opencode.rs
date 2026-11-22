@@ -278,6 +278,7 @@ fn request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         resume: None,
         worktree: None,

@@ -782,6 +782,7 @@ impl Harness for CodexHarness {
             && to_effort(live.reasoning) == to_effort(next.reasoning)
             && service_tier(live) == service_tier(next)
             && live.plan == next.plan
+            && live.code_mode == next.code_mode
     }
     /// `turn/start` carries model, effort and service tier, and each sticks
     /// for later turns — so a change applies from the next turn without a
@@ -789,12 +790,15 @@ impl Harness for CodexHarness {
     /// that way (an omitted parameter keeps the previous value). The
     /// access mode, the computer grant and a branch cut are fixed when
     /// the thread starts.
+    /// Code Mode is a `thread/start`/`thread/resume` config override, so
+    /// switching it starts a fresh thread.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
             && run_access(live) == run_access(next)
             && live.computer_control == next.computer_control
             && (next.branch.is_none() || next.branch == live.branch)
+            && live.code_mode == next.code_mode
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
             && (service_tier(next).is_some() || service_tier(live).is_none())
@@ -1456,6 +1460,13 @@ fn thread_params(
             .as_object_mut()
             .expect("config overrides are an object")
             .extend(codex_extra_mcp_overrides(&request.extra_mcp));
+    }
+    if one_shot.is_none() && request.code_mode {
+        p.entry("config")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("config overrides are an object")
+            .insert("features.code_mode".into(), true.into());
     }
     p.insert("cwd".into(), Value::String(request.cwd.clone()));
     p.insert("approvalPolicy".into(), approval_policy.into());
@@ -3633,6 +3644,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
             };
             let question = UserInputQuestion {
                 approval: false,
+                note: None,
                 id: new_message_id(),
                 header: {
                     let h = field(["header", "title", "label"]);
@@ -3849,6 +3861,7 @@ mod tests {
             auto_approve: false,
             access: permission_mode,
             plan,
+            code_mode: false,
             attachments: Vec::new(),
             worktree: None,
             branch: None,
@@ -3875,6 +3888,10 @@ mod tests {
         let mut moved = run_request(AccessMode::FullAccess, false);
         moved.cwd = "/elsewhere".into();
         assert!(!harness.reconfigures_in_place(&live, &moved));
+        let mut code_mode = run_request(AccessMode::FullAccess, false);
+        code_mode.code_mode = true;
+        assert!(!harness.same_runtime(&live, &code_mode));
+        assert!(!harness.reconfigures_in_place(&live, &code_mode));
         assert!(harness.supports_plan());
     }
 
@@ -4022,6 +4039,7 @@ mod tests {
 
     fn computer_request(computer_control: bool) -> RunRequest {
         RunRequest {
+            code_mode: false,
             prompt: String::new(),
             harness: None,
             model: None,

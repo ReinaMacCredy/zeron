@@ -106,6 +106,7 @@ impl SecretRequests {
             .map_or(DEFAULT_WAIT, Duration::from_millis)
             .clamp(MIN_WAIT, MAX_WAIT);
         let question = UserInputQuestion {
+            note: None,
             id: SECRET_QUESTION_ID.into(),
             header: label.into(),
             question: reason.into(),
