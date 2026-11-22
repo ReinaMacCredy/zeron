@@ -5433,7 +5433,13 @@ fn merged_config(config: &Json, args: &Value) -> Json {
     // The model's other options, picked whole: each option's choice by id
     // (one at its default is left out, as the shipping app leaves it);
     // Fast's own stays as it is (`fast` below sets it).
-    if let Some(Value::Map(picked)) = args.field("options") {
+    // (Every pick back at its default is Luau's `{}`, which arrives as an empty list.)
+    let picked = match args.field("options") {
+        Some(Value::Map(picked)) => Some(&picked[..]),
+        Some(Value::List(none)) if none.is_empty() => Some(&[][..]),
+        _ => None,
+    };
+    if let Some(picked) = picked {
         let mut next = serde_json::Map::new();
         if let Some((key, _, _)) = &fast_of_model
             && let Some(v) = c["modelOptions"].get(key)
@@ -11596,6 +11602,9 @@ mod tests {
         assert_eq!(picked["modelOptions"], json!({ "lead": "b" }));
         let none = merged_config(&chat, &Value::record([("options", Value::record::<&str>([]))]));
         assert_eq!(none["modelOptions"], json!({}));
+        // (As a script sends it: Luau's `{}` arrives as an empty list.)
+        let cleared = merged_config(&chat, &Value::record([("options", Value::List(Vec::new().into()))]));
+        assert_eq!(cleared["modelOptions"], json!({}));
     }
 
     #[test]
