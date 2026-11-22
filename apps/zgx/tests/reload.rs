@@ -1173,11 +1173,14 @@ fn a_shrinking_window_keeps_a_streaming_reply_in_view() {
     app.frames(30);
     std::thread::sleep(std::time::Duration::from_millis(300));
     app.frames(30);
-    // (The Live state column railed first: its flip mid-walk is its own, up to 15 off for its 300 ms.)
-    app.click("#sidecar-collapse");
-    app.frames(30);
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    app.frames(30);
+    // (The Live state column, where it still shows (`live_column`), railed first: its flip mid-walk is
+    // its own, up to 15 off for its 300 ms.)
+    if app.find("#sidecar-collapse").is_some() {
+        app.click("#sidecar-collapse");
+        app.frames(30);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        app.frames(30);
+    }
     let draft = app.host.shared("chat.draft", Value::Nil);
     let mut words = String::new();
     let mut bad = Vec::new();

@@ -172,24 +172,25 @@ local Tile = ui.component(function(props: { row: any, index: () -> number }): No
 			ref = ref,
 			class = "bot-tile",
 			label = name,
-			tooltip = ui.row {
-				px = ui.raw(9, "the mockup's tip"),
-				py = ui.raw(5, "the mockup's tip"),
-				gap = ui.raw(8, "the mockup's tip"),
-				rounded = ui.raw(8, "the mockup's tip"),
-				bg = ui.raw("#161615", "the mockup's tip, dark in both themes"),
-				text_size = "$font.size.xs",
-				ui.text { name, literal = true, color = ui.raw("#ffffff", "on the dark tip") },
-				ui.show(function(): boolean
-					local i = index()
-					return i >= 1 and i <= 9
-				end, ui.text {
-					function(): string
-						return ui.shortcut_text(`alt+shift+{math.clamp(index(), 1, 9)}`)
-					end,
-					literal = true,
-					color = ui.raw("#ffffff99", "on the dark tip"),
-				}),
+			tooltip = ds.HoverCard.Tip {
+				px = "$space.2",
+				py = "$space.1",
+				ui.row {
+					items = "center",
+					gap = "$space.2",
+					text_size = "$font.size.xs",
+					ui.text { name, literal = true, color = "$text.primary" },
+					ui.show(function(): boolean
+						local i = index()
+						return i >= 1 and i <= 9
+					end, ui.text {
+						function(): string
+							return ui.shortcut_text(`alt+shift+{math.clamp(index(), 1, 9)}`)
+						end,
+						literal = true,
+						color = "$text.tertiary",
+					}),
+				},
 			},
 			tooltip_delay = 400,
 			on_mount = arrive(bot.id),

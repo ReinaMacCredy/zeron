@@ -1904,7 +1904,16 @@ return ui.component(function(props: Props): Node
 		end
 		folded:set { level = level, access_at = at, model_at = chip_at }
 	end
+	-- (One made again, its measures kept: its first layout passes can run
+	-- narrower than it ends, and a fold taken for them needs more than its
+	-- room to undo. It folds again once its pill is back at its kept width,
+	-- or soon after if it never is.)
+	local settled = pill_w:peek() <= 0
+	local settle_w = pill_w:peek()
 	local function refold()
+		if not settled then
+			return
+		end
 		local level = level_now
 		local f, r, m = pill_w:peek(), right_w:peek(), model_w:peek()
 		-- (Not laid out yet: as it was.)
@@ -1980,6 +1989,15 @@ return ui.component(function(props: Props): Node
 		props.effort:get()
 		refold()
 	end)
+
+	if not settled then
+		ui.after(250, function()
+			if not settled then
+				settled = true
+				refold()
+			end
+		end)
+	end
 
 	local picker_open = props.model_open or ui.use_state(false)
 	local picker_outside = ui.use_state(false)
@@ -3052,6 +3070,9 @@ return ui.component(function(props: Props): Node
 				pill_w:set(size.w)
 				pill_shown:set(size.w > 0)
 				pill_narrow:set(is_narrow(size.w))
+			end
+			if not settled and math.abs(size.w - settle_w) < 0.5 then
+				settled = true
 			end
 			refold()
 		end,

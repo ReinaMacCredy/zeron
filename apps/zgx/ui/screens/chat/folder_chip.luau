@@ -31,7 +31,7 @@ function M.place(opts: {
 		if p.on_measures then
 			local told = p.on_measures
 			ui.effect(function()
-				if natural.width then
+				if natural.width and natural.width > 0 then
 					told(natural.width, 0, 0)
 				end
 			end)
