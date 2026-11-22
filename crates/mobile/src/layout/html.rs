@@ -173,6 +173,7 @@ fn theme_css(dark: bool, text_scale: f32) -> String {
         ("--card-foreground", css(p.text)),
         ("--popover", card.clone()),
         ("--popover-foreground", css(p.text)),
+        ("--solid", card.clone()),
         ("--secondary", chip.clone()),
         ("--secondary-foreground", css(p.text)),
         ("--border", css(p.border)),
@@ -266,7 +267,7 @@ mod tests {
             "--background:", "--foreground:", "--muted-foreground:", "--card:", "--border:",
             "--primary:", "--accent:", "--destructive:", "--success:", "--chart-6:", "--font-sans:",
             "--font-mono:", "--font-size:", "--font-size-2xl:", "--line-height:", "--hover:",
-            "--surface-treatment:",
+            "--surface-treatment:", "--solid:",
         ] {
             assert!(page.contains(name), "{name} missing");
             assert!(shared::THEME_GUIDE.contains(name.trim_end_matches(':')));
