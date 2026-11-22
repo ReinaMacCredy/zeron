@@ -558,7 +558,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_render",
-            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html`, `path` or `url`, or only `close`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `path` is an .html file you already wrote in this thread's folder, shown as `html` is without reading it back. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` and `path` pages. {} {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::PICK_GUIDE, html_render::THEME_GUIDE),
+            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline where it belongs in your reply: write the paragraph that leads to it, call this, then go on; the text adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html`, `path` or `url`, or only `close`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `path` is an .html file you already wrote in this thread's folder, shown as `html` is without reading it back. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` and `path` pages. {} {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::PICK_GUIDE, html_render::THEME_GUIDE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2045,6 +2045,10 @@ impl ThreadTools {
     async fn show_visual(&self, args: &Value) -> Result<Value, String> {
         let script = args["script"].as_str().ok_or("script must be a string")?;
         let title = args["title"].as_str().ok_or("title must be a string")?;
+        let caption = match &args["caption"] {
+            Value::Null => None,
+            raw => Some(raw.as_str().ok_or("caption must be a string")?),
+        };
         let assets: std::collections::BTreeMap<String, String> = match &args["assets"] {
             Value::Null => Default::default(),
             raw => serde_json::from_value(raw.clone())
@@ -2054,12 +2058,12 @@ impl ThreadTools {
         let shown = self
             .call_engine(
                 methods::PUBLISH_VISUAL,
-                json!({ "chatId": self.chat_id, "title": title, "script": script, "assets": assets }),
+                json!({ "chatId": self.chat_id, "title": title, "caption": caption, "script": script, "assets": assets }),
             )
             .await?;
         Ok(json!({
             "visual": shown,
-            "message": "Shown to the reader above your reply. Don't mention or describe the visual; reply with only what it doesn't already say.",
+            "message": "Shown to the reader here, in place in your reply. Go on writing; don't mention or describe the visual, say only what it doesn't already say.",
         }))
     }
 
@@ -2078,7 +2082,7 @@ impl ThreadTools {
             .await?;
         Ok(json!({
             "image": shown,
-            "message": "Shown to the reader above your reply. Don't mention or describe the image; reply with only what it doesn't already show.",
+            "message": "Shown to the reader here, in place in your reply. Go on writing; don't mention or describe the image, say only what it doesn't already show.",
         }))
     }
 
@@ -6182,7 +6186,7 @@ mod tests {
             .tools
             .call(
                 "show_visual",
-                &json!({ "script": "return ui.text 'chart'", "title": "Chart", "chatId": "other" }),
+                &json!({ "script": "return ui.text 'chart'", "title": "Chart", "caption": "Source: a.csv", "chatId": "other" }),
             )
             .await
             .unwrap();
@@ -6192,6 +6196,7 @@ mod tests {
         assert_eq!(sent[0]["chatId"], "a");
         assert_eq!(sent[0]["script"], "return ui.text 'chart'");
         assert_eq!(sent[0]["assets"], json!({}));
+        assert_eq!(sent[0]["caption"], "Source: a.csv");
         assert!(
             rig.tools
                 .call(

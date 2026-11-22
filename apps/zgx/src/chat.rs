@@ -7603,6 +7603,12 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
             pictures.push(part);
             continue;
         }
+        if let Some(pending) = visual_pending_block(part, parts[ix + 1..].iter().copied(), streaming) {
+            flush(&mut out, &mut group, group_last);
+            out.extend(images_block(&mut pictures));
+            out.push(pending);
+            continue;
+        }
         if display_tool(part) && display_failed_block(part, parts[ix + 1..].iter().copied()).is_none() {
             continue;
         }
@@ -7775,8 +7781,10 @@ pub(crate) fn route_value(route: &Json) -> Value {
 /// and what it said between them, folded into one group where the first
 /// of it was, its line the tools' summary while it works and "Worked for
 /// 42s" once done; then the reply, the run of text it ends on, shown. While
-/// it streams there is no reply yet: everything rides the group. Inside the
-/// group, opened, the reply's ordinary blocks. Nil when it did no work.
+/// it streams there is no reply yet: everything rides the group. A text that
+/// leads straight to something shown (a visual, a picture, a page, a visual
+/// being built) is reply wherever it is, streaming too. Inside the group,
+/// opened, the reply's ordinary blocks. Nil when it did no work.
 fn compact_blocks(entry: &Json) -> Option<Value> {
     let parts = entry["parts"].as_array()?;
     let streaming = entry["status"].as_str() == Some("streaming");
@@ -7798,8 +7806,19 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
     };
     // (A display tool is no work: its output shows in the reply.)
     let worked_tool = |p: &Json| p["kind"].as_str() == Some("tool") && !display_tool(p) && !tool_search(p);
+    let building = |p: &Json| streaming && running_visual(p);
+    let shown = |p: &Json| matches!(p["kind"].as_str(), Some("visual" | "image")) || html_block(p).is_some() || building(p);
+    let leads_to_shown = |ix: usize| {
+        let empty = |p: &Json| matches!(p["kind"].as_str(), Some("text" | "reasoning")) && !said(p) && !thought(p);
+        parts[ix + 1..]
+            .iter()
+            .find(|p| !(display_tool(p) && !building(p)) && !tool_search(p) && !empty(p))
+            .is_some_and(shown)
+    };
     let is_work = |ix: usize, p: &Json| {
-        worked_tool(p) || thought(p) || (said(p) && reply_start.is_none_or(|start| ix < start))
+        worked_tool(p)
+            || thought(p)
+            || (said(p) && !leads_to_shown(ix) && reply_start.is_none_or(|start| ix < start))
     };
     let tools: Vec<&Json> = parts.iter().filter(|p| worked_tool(p) || thought(p)).collect();
     if tools.is_empty() {
@@ -7830,6 +7849,11 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
     for (ix, part) in parts.iter().enumerate() {
         if part["kind"].as_str() == Some("image") {
             pictures.push(part);
+            continue;
+        }
+        if let Some(pending) = visual_pending_block(part, &parts[ix + 1..], streaming) {
+            out.extend(images_block(&mut pictures));
+            out.push(pending);
             continue;
         }
         if display_tool(part) && display_failed_block(part, &parts[ix + 1..]).is_none() {
@@ -7931,6 +7955,23 @@ fn display_failed_block<'a>(part: &Json, later: impl IntoIterator<Item = &'a Jso
     ]))
 }
 
+fn running_visual(part: &Json) -> bool {
+    display_name(part) == Some("show_visual") && part["resolved"].as_bool() != Some(true)
+}
+
+/// (Nil once a visual follows it: the engine adds that before the call returns.)
+fn visual_pending_block<'a>(part: &Json, later: impl IntoIterator<Item = &'a Json>, streaming: bool) -> Option<Value> {
+    if !streaming || !running_visual(part) || later.into_iter().any(|p| p["kind"].as_str() == Some("visual")) {
+        return None;
+    }
+    let title = part["call"]["input"]["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
+    Some(Value::record([
+        ("id", Value::from(part["id"].as_str().unwrap_or_default())),
+        ("kind", Value::from("visual_pending")),
+        ("title", title.map_or(Value::Nil, Value::from)),
+    ]))
+}
+
 /// The pictures gathered (image parts in a row) as one ds/transcript block,
 /// `images`, keyed by the first: each its path on the chat's host and its
 /// name. Nil for none; the gathering is emptied.
@@ -7954,8 +7995,8 @@ fn images_block(pictures: &mut Vec<&Json>) -> Option<Value> {
 }
 
 /// A visual part as ds/transcript's block: its id (the visual's, which
-/// seeds it), its script's path and title, and its host's device when that
-/// isn't this one.
+/// seeds it), its script's path, title and caption, and its host's device
+/// when that isn't this one.
 fn visual_block(part: &Json) -> Value {
     let field = |k: &str| part[k].as_str().map_or(Value::Nil, Value::from);
     Value::record([
@@ -7963,6 +8004,7 @@ fn visual_block(part: &Json) -> Value {
         ("kind", Value::from("visual")),
         ("path", field("path")),
         ("title", field("title")),
+        ("caption", field("caption")),
         ("device", field("device")),
     ])
 }
@@ -11769,6 +11811,30 @@ mod tests {
         // line the tools' summary.
         let live = compact_blocks(&reply("streaming")).expect("it did work");
         assert_eq!(kinds(&live), vec![("work".into(), "work".into())]);
+        let visual = |id: &str| json!({ "id": id, "kind": "visual", "path": format!("/u/{id}-visual.luau"), "title": "Latency" });
+        let show = |id: &str, resolved: bool| {
+            json!({ "id": id, "kind": "tool", "isError": false, "resolved": resolved,
+                    "call": { "kind": "mcp", "server": "zeron", "tool": "show_visual", "input": { "title": "Hit rate" } } })
+        };
+        let shown = |status: &str, last: Vec<Json>| {
+            let mut parts = vec![tool("k1", "ls"), text("p1", "By day:"), show("s1", true), visual("v1"), text("p2", "And by TTL:")];
+            parts.extend(last);
+            json!({ "id": "a", "role": "assistant", "status": status, "durationMs": 5_000, "parts": parts })
+        };
+        let pair = |id: &str, kind: &str| (id.to_owned(), kind.to_owned());
+        let done = compact_blocks(&shown("complete", vec![show("s2", true), visual("v2"), text("p3", "Done.")])).unwrap();
+        assert_eq!(
+            kinds(&done),
+            vec![pair("work", "work"), pair("p1", "text"), pair("v1", "visual"), pair("p2", "text"), pair("v2", "visual"), pair("p3", "text")]
+        );
+        let Value::List(list) = &done else { unreachable!() };
+        assert_eq!(kinds(list[0].field("blocks").unwrap()), vec![pair("g:k1", "tools")], "the shown text is out of the fold");
+        let search = json!({ "id": "q1", "kind": "tool", "isError": false, "resolved": true, "call": { "kind": "unknown", "name": "ToolSearch", "input": {} } });
+        let live = compact_blocks(&shown("streaming", vec![search, show("s2", false)])).unwrap();
+        assert_eq!(
+            kinds(&live),
+            vec![pair("work", "work"), pair("p1", "text"), pair("v1", "visual"), pair("p2", "text"), pair("s2", "visual_pending")]
+        );
         // No work, no group.
         let plain = json!({ "id": "b", "role": "assistant", "status": "complete", "parts": [text("t", "Hi.")] });
         assert!(compact_blocks(&plain).is_none());
@@ -12023,13 +12089,14 @@ mod tests {
     fn a_visual_part_is_a_block_of_its_own_read_from_its_host() {
         let entry = json!({ "id": "a1", "role": "assistant", "status": "complete", "parts": [
             { "kind": "text", "id": "t1", "text": "Here it is:" },
-            { "kind": "visual", "id": "v:1", "path": "/u/v_1-visual.luau", "title": "Latency" },
+            { "kind": "visual", "id": "v:1", "path": "/u/v_1-visual.luau", "title": "Latency", "caption": "Source: metrics.csv, 7 days." },
         ]});
         let shown = blocks(&entry);
         let list = shown.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[1].field("kind"), Some(&Value::from("visual")));
         assert_eq!(list[1].field("id"), Some(&Value::from("v:1")));
+        assert_eq!(list[1].field("caption"), Some(&Value::from("Source: metrics.csv, 7 days.")));
         assert!(list[1].field("device").is_none_or(|d| *d == Value::Nil), "this device's: no device");
         // A chat on another device: its visuals are read from there.
         assert!(with_host(&entry, "c1", None).is_none());
@@ -12176,6 +12243,23 @@ mod tests {
         assert_eq!(shown.list()[0].field("tools").unwrap().list().len(), 2);
         let running = reply(vec![mcp("s1", "mcp__zeron__show_image", false, false)]);
         assert!(blocks(&running).list().is_empty());
+        let mut building = reply(vec![exec("x1"), mcp("s1", "show_visual", false, false)]);
+        building["status"] = json!("streaming");
+        building["parts"][1]["call"]["input"] = json!({ "title": "Latency" });
+        let list = blocks(&building);
+        let kinds: Vec<String> = list.list().iter().map(|b| crate::auth::text(b.field("kind").unwrap())).collect();
+        assert_eq!(kinds, ["tools", "visual_pending"]);
+        assert_eq!(list.list()[1].field("id"), Some(&Value::from("s1")));
+        assert_eq!(list.list()[1].field("title"), Some(&Value::from("Latency")));
+        let kinds: Vec<String> = compact_blocks(&building).unwrap().list().iter().map(|b| crate::auth::text(b.field("kind").unwrap())).collect();
+        assert_eq!(kinds, ["work", "visual_pending"]);
+        let mut arrived = building.clone();
+        arrived["parts"].as_array_mut().unwrap().push(json!({ "kind": "visual", "id": "v:1", "path": "/u/v_1-visual.luau", "title": "Latency" }));
+        let kinds: Vec<String> = blocks(&arrived).list().iter().map(|b| crate::auth::text(b.field("kind").unwrap())).collect();
+        assert_eq!(kinds, ["tools", "visual"]);
+        let mut stopped = building.clone();
+        stopped["status"] = json!("complete");
+        assert_eq!(blocks(&stopped).list().len(), 1, "a stopped reply builds nothing");
         let message = message(&entry, None).unwrap();
         assert_eq!(message.field("tools").unwrap().list().len(), 2, "the message's tools leave it out");
         // Failed: a quiet line with why, where it was.
@@ -12227,6 +12311,8 @@ mod tests {
         // Compact: the picture in the reply, not the work.
         let compact = compact_blocks(&entry).unwrap();
         assert_eq!(kinds(&compact), ["work", "images"]);
+        let led = compact_blocks(&reply(vec![exec("x1"), text("t1", "Here:"), mcp("s1", false), image("i1", "a.png"), text("t2", "Done.")])).unwrap();
+        assert_eq!(kinds(&led), ["work", "text", "images", "text"], "the words leading to it stay with it");
         // Failed: which tool, and why as said (ds/reply_picture keeps what's plain).
         let failed = blocks(&reply(vec![mcp("s1", true), text("t1", "Sorry.")]));
         assert_eq!(kinds(&failed), ["display_failed", "text"]);

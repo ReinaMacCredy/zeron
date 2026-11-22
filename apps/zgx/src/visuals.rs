@@ -22,6 +22,8 @@
 //!   visuals.event { id, h, arg? }                          (`ui.action`)
 //!       a control's handler with its value (nil, a string, a boolean, a
 //!       number, `{ x, y }`), then the view rendered again.
+//!   visuals.reset id                                      (`ui.action`)
+//!       starts it over from its script, its state dropped.
 //!   visuals.draw { id, h, w, ht, t, px?, py?, down? }     (`ui.call_sync`)
 //!       a canvas's drawing at a size and time: `{ cmds, pointer }` (or
 //!       `{ error }`), each command `{ k = "s" | "f" | "t", … }`.
@@ -238,6 +240,20 @@ impl Entry {
         self.runtime.as_mut().ok_or_else(|| "not running".into())
     }
 
+    fn reset(&mut self, id: &str) {
+        if self.load != Load::Ready {
+            return;
+        }
+        let (source, assets) = (std::mem::take(&mut self.source), std::mem::take(&mut self.assets));
+        self.runtime = None;
+        self.error = None;
+        self.scenes.clear();
+        self.shaders.clear();
+        self.start(id, source, assets);
+        // (The same tree as before draws again too: what ds/visual holds of its own goes.)
+        self.rev += 1;
+    }
+
     /// A control's handler, then the view again.
     fn event(&mut self, handler: u32, arg: zv::HandlerArg) {
         self.keep_awake = true;
@@ -403,6 +419,13 @@ pub fn register(host: &ScriptHost) {
             })
             .unwrap_or(false);
         if changed {
+            v.publish();
+        }
+    });
+    let v = visuals.clone();
+    host.action("visuals.reset", move |arg| {
+        let id = crate::auth::text(&arg);
+        if v.with(&id, |e| e.reset(&id)).is_some() {
             v.publish();
         }
     });

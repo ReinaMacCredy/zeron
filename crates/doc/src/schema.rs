@@ -194,6 +194,8 @@ struct DocPartJson {
     /// The agent's own reviewer's verdict on the call (additive; Auto).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     review: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caption: Option<String>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -213,11 +215,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             ..Default::default()
         },
         // The script path and title ride `path` and `name`.
-        MessagePart::Visual { id, path, title } => DocPartJson {
+        MessagePart::Visual { id, path, title, caption } => DocPartJson {
             id: id.clone(),
             kind: "visual".into(),
             path: Some(path.clone()),
             name: Some(title.clone()),
+            caption: caption.clone(),
             ..Default::default()
         },
         MessagePart::Text { id, text } => DocPartJson {
@@ -381,6 +384,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 id: p.id,
                 path,
                 title: p.name.unwrap_or_default(),
+                caption: p.caption,
             },
             None => MessagePart::Error {
                 id: p.id,
@@ -2155,6 +2159,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(review) = &doc_part.review {
         map.insert("review", loro_value_from_json(review))?;
     }
+    if let Some(caption) = &doc_part.caption {
+        map.insert("caption", caption.as_str())?;
+    }
     Ok(())
 }
 
@@ -2662,6 +2669,7 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
         ("path", &doc_part.path),
         ("name", &doc_part.name),
         ("mimeType", &doc_part.mime_type),
+        ("caption", &doc_part.caption),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -3560,6 +3568,7 @@ mod tests {
                 id: "v:1".into(),
                 path: "/uploads/v-1-visual.luau".into(),
                 title: "Latency by region".into(),
+                caption: Some("Source: metrics.csv, 7 days.".into()),
             },
         );
         writer.sync(&parts).unwrap();

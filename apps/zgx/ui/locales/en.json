@@ -1282,7 +1282,11 @@
       "loading": "Loading {title}…",
       "unavailable": "{title} couldn't be shown",
       "stopped": "The visual stopped",
-      "copy_error": "Copy error"
+      "copy_error": "Copy error",
+      "reset": "Reset",
+      "data_table": "Data table",
+      "building": "Building {title}…",
+      "building_untitled": "Building visual…"
     },
     "links": {
       "open": "Open",
@@ -1295,6 +1299,15 @@
       "reveal": "Reveal in Finder",
       "copied_link": "Link copied",
       "link_not_ready": "This chat's link isn't ready yet"
+    },
+    "file_card": {
+      "open_in_panel": "Open in Files panel",
+      "gone": "No longer on this machine",
+      "detail": "{kind}, {size}",
+      "more_lines": "{n, plural, one {# more line} other {# more lines}}",
+      "more_in_panel": "More in the Files panel",
+      "text": "Text",
+      "file": "File"
     },
     "emoji_picker": {
       "search": "Search emoji",

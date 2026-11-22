@@ -1046,6 +1046,8 @@ struct PublishVisualParams {
     chat_id: String,
     title: String,
     script: String,
+    #[serde(default)]
+    caption: Option<String>,
     /// Files the script uses, base64 by name.
     #[serde(default)]
     assets: std::collections::BTreeMap<String, String>,
@@ -8959,6 +8961,11 @@ impl RpcService for EngineRpc {
                 if title.is_empty() {
                     return Err(RpcError::BadParams("title is empty".into()));
                 }
+                let caption: Option<String> = p
+                    .caption
+                    .as_deref()
+                    .map(|c| c.trim().chars().take(zeron_proto::VISUAL_MAX_CAPTION_CHARS).collect())
+                    .filter(|c: &String| !c.is_empty());
                 if p.script.trim().is_empty() || p.script.len() > zeron_proto::VISUAL_MAX_BYTES {
                     return Err(RpcError::BadParams(format!(
                         "script must be 1 to {} bytes",
@@ -9006,6 +9013,7 @@ impl RpcService for EngineRpc {
                     id: id.clone(),
                     path: path.clone(),
                     title: title.clone(),
+                    caption,
                 };
                 if !self.sessions.inject_event(&p.chat_id, event) {
                     self.uploads.remove_visual(&id);

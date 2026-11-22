@@ -1083,7 +1083,25 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
-			return Visual { id = b.id, path = b.path, source = b.source, title = b.title, device = b.device }
+			return Visual { id = b.id, path = b.path, source = b.source, title = b.title, caption = (b :: any).caption, device = b.device }
+		end
+		if (b :: any).kind == "visual_pending" then
+			local title = b.title
+			return status.looping({
+				class = "visual-pending",
+				w_full = true,
+				ui.text {
+					if title and title ~= ""
+						then locale.s("ds.visual.building", { title = title })
+						else locale.s("ds.visual.building_untitled"),
+					literal = true,
+					text_size = "$zeron.visual.text.sm.size",
+					line_height = "$zeron.visual.text.sm.line",
+					color = "$text.tertiary",
+				},
+			}, function(el)
+				return anime.animate(el, { opacity = { 1, 0.45 }, duration = 600, ease = "inOutSine", loop = true, alternate = true })
+			end, 1200)
 		end
 		-- Pictures an agent showed: one alone, or several on a tray, among
 		-- the reply's pictures in the lightbox. More arriving while it works

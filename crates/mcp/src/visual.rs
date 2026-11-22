@@ -13,10 +13,12 @@ use zeron_proto::{
 pub const TOOL: &str = "show_visual";
 
 pub const DESCRIPTION: &str = "Show an interactive native visual (chart, table, dashboard, diagram, \
-simulation, 3D scene, shader) inline above your final reply; call it before the reply, which adds only \
-what the visual doesn't say. An image file goes to show_image instead. The script is sandboxed Luau \
-that returns a view function of ui.* nodes; Zeron runs it first and returns the first error with its \
-line. Read the ui API and style rules once with the docs tool (action read, id show_visual).";
+simulation, 3D scene, shader) in place in your reply: write the paragraph that leads to it, call this, \
+then go on writing. A reply may hold several; its text adds only what a visual doesn't say. Zeron draws \
+the frame, the title and the caption around it. An image file goes to show_image instead. The script is \
+sandboxed Luau that returns a view function of ui.* nodes; Zeron runs it first and returns the first \
+error with its line. Read the ui API and style rules once with the docs tool (action read, id \
+show_visual).";
 
 pub const REFERENCE: &str = "\
 # show_visual
@@ -30,7 +32,6 @@ local s = ui.state { metric = \"p95\" }\n\
 local data = { { region = \"us-east\", p95 = 182, p99 = 240 }, { region = \"eu-west\", p95 = 140, p99 = 210 } }\n\
 return function()\n\
   return ui.column { gap = 16,\n\
-    ui.text { \"Latency by region\", size = \"lg\", weight = 600 },\n\
     ui.tabs { options = { \"p95\", \"p99\" }, value = s.metric, on_change = function(v) s.metric = v end },\n\
     ui.chart { type = \"bar\", height = 220, unit = \"ms\",\n\
       x = ui.map(data, function(d) return d.region end),\n\
@@ -142,10 +143,11 @@ or draw it where it takes no layout space (inside a ui.canvas with g.pointer, or
 Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's hover readout \
 never changes the chart's height.\n\
 \n\
-Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. A visual is part \
-of the reply, not a widget, so lay content directly on the chat with type, spacing, and alignment: no \
+Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. Zeron draws a \
+hairline frame, the title and the caption around every visual, so a script draws no frame of its own \
+and does not repeat the title: lay content directly inside with type, spacing, and alignment, with no \
 cards, tiles, boxed panels, banners, or canvas backgrounds. Stats are a row of plain ui.stat figures; \
-a chart is a plain heading, then the chart; separate sections with gap or one ui.rule. Text renders \
+a chart among several takes a plain heading; separate sections with gap or one ui.rule. Text renders \
 in Zeron's interface font at the reader's text size: body for most text, sm and xs for labels and \
 notes, lg and xl for headings, 2xl for a headline figure. The width is the reply column (about 720px, \
 as narrow as 360px), so lay out fluidly with grow, wrap, and grid, and give charts, canvases, and \
@@ -160,6 +162,7 @@ pub fn tool() -> Value {
             "properties": {
                 "script": { "type": "string", "description": "Setup at the top level, ending with `return function() return ui.column { ... } end`." },
                 "title": { "type": "string", "description": "Short name for the visual." },
+                "caption": { "type": "string", "description": "One line under the visual: the source, the units, or what is estimated. At most 300 characters." },
                 "assets": {
                     "type": "object",
                     "additionalProperties": { "type": "string" },
@@ -175,9 +178,10 @@ pub fn tool() -> Value {
 
 pub const IMAGE_TOOL: &str = "show_image";
 
-const IMAGE_DESCRIPTION: &str = "Show an image file (screenshot, rendered chart, photo) inline above \
-your final reply; call it before the reply, once per image in display order, and don't describe the image \
-there. PNG, JPEG, WebP or GIF, up to 10 MB and 4096 px a side; Zeron keeps a copy.";
+const IMAGE_DESCRIPTION: &str = "Show an image file (screenshot, rendered chart, photo) in place in \
+your reply: write the paragraph that leads to it, call this, then go on writing; once per image in \
+display order, and the text doesn't describe the image. PNG, JPEG, WebP or GIF, up to 10 MB and 4096 px \
+a side; Zeron keeps a copy.";
 
 pub fn image_tool() -> Value {
     json!({

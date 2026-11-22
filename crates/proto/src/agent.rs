@@ -1464,6 +1464,7 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 9] = [
 /// script Zeron runs in a sandbox and renders natively.
 pub const VISUAL_MAX_BYTES: usize = 256 * 1024;
 pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
+pub const VISUAL_MAX_CAPTION_CHARS: usize = 300;
 /// Files a visual may ship with (models, textures, environment maps).
 pub const VISUAL_MAX_ASSETS: usize = 16;
 pub const VISUAL_MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
@@ -1832,6 +1833,8 @@ pub enum AgentEvent {
         id: String,
         path: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
     },
     ReasoningDelta {
         text: String,

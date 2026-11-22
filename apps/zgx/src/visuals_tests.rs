@@ -44,7 +44,7 @@ fn every_node_type_draws_with_the_design_system() {
         "#visual-dashboard >> \"Smoothing window\"",
         "#visual-dashboard >> role:switch",
         "#visual-dashboard >> role:switch \"Show table\"",
-        "#visual-dashboard >> role:button \"Reset\"",
+        "#visual-dashboard >> .visual-column >> role:button \"Reset\"",
         // Bars, a grid, a rule, a line with a gap, a scatter.
         "#visual-charts >> \"Where the build's time goes\"",
         "#visual-charts >> .visual-grid",
@@ -70,6 +70,9 @@ fn every_node_type_draws_with_the_design_system() {
     assert!(!has(&mut app, "~\"time budget\""), "{}", app.tree());
     // Every chart's plot: the dashboard's area, the bars, a line, a scatter.
     assert!(has(&mut app, ".chart-plot[4]") && !has(&mut app, ".chart-plot[5]"), "{}", app.tree());
+    assert!(has(&mut app, "#visual-dashboard >> .visual-head >> \"API latency\""), "{}", app.tree());
+    assert!(has(&mut app, "#visual-dashboard >> .visual-reset"), "{}", app.tree());
+    assert!(!has(&mut app, "#visual-scene >> .visual-reset"), "a scene with nothing to set has no Reset:\n{}", app.tree());
 }
 
 #[test]
@@ -83,6 +86,15 @@ fn controls_reach_the_script_and_its_view_follows() {
     app.click("#visual-dashboard >> role:radio \"30d\"");
     app.wait_until(|app| app.find(".data-table >> \"210\"").is_some());
     assert!(has(&mut app, ".data-table >> \"210\"") && !has(&mut app, ".data-table >> \"182\""), "30d's Monday p95:\n{}", app.tree());
+    app.click("#visual-dashboard >> .visual-data-toggle");
+    app.wait_until(|app| app.find(".visual-chart-data >> .data-table >> ~\"210\"").is_some());
+    assert!(has(&mut app, ".visual-chart-data >> .data-table >> \"Mon\""), "{}", app.tree());
+    app.click("#visual-dashboard >> .visual-reset");
+    app.wait_until(|app| app.find(".data-table").is_none());
+    assert!(!has(&mut app, ".data-table"), "Reset leaves no table open:\n{}", app.tree());
+    app.click("#visual-dashboard >> role:switch \"Show table\"");
+    app.wait_until(|app| app.find(".data-table >> \"Mon\"").is_some());
+    assert!(has(&mut app, ".data-table >> \"182\""), "7d again after Reset:\n{}", app.tree());
 }
 
 #[test]

@@ -1462,7 +1462,7 @@ fn visual_rows_take_the_height_their_worker_measures() {
         entries: vec![Arc::new(SessionMessageEntry {
             id: "a1".into(),
             role: MessageRole::Assistant,
-            parts: vec![MessagePart::Visual { id: "v1".into(), path: "up/v1-visual.luau".into(), title: "Chart".into() }],
+            parts: vec![MessagePart::Visual { id: "v1".into(), path: "up/v1-visual.luau".into(), title: "Chart".into(), caption: None }],
             created_at: 0,
             device_id: String::new(),
             status: Some(MessageStatus::Complete),

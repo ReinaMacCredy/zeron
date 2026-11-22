@@ -29,7 +29,7 @@
 -- picture that can't be shown does (its message only behind a secondary
 -- click, Copy error); the transcript around it carries on.
 --
---   Visual { id = "v:…", path = "/…/v_…-visual.luau", title = "Latency", device = nil }
+--   Visual { id = "v:…", path = "/…/v_…-visual.luau", title = "Latency", caption = nil, device = nil }
 --   (`source` in place of `path`: a fixture's script, run as is.)
 
 local Button = require("@self/button")
@@ -52,6 +52,7 @@ export type Props = {
 	id: string,
 	path: string?,
 	title: string?,
+	caption: string?,
 	device: string?,
 	source: string?,
 }
@@ -65,6 +66,36 @@ local FRAME = 33
 -- What can be built at a size of its own in a row; the rest fill its spare
 -- width there (the shipping app's "fluid" nodes).
 local FLUID = { slider = true, chart = true, canvas = true, scene = true, shader = true, table = true, rule = true }
+
+local CONTROLS = {
+	button = true,
+	tabs = true,
+	toggle = true,
+	slider = true,
+	input = true,
+	select = true,
+	disclosure = true,
+	quiz = true,
+}
+
+local function has_control(n: any): boolean
+	if CONTROLS[n.k] or n.click ~= nil then
+		return true
+	end
+	for _, child in n.children or {} do
+		if has_control(child) then
+			return true
+		end
+	end
+	for _, row in n.rows or {} do
+		for _, cell in row do
+			if has_control(cell) then
+				return true
+			end
+		end
+	end
+	return false
+end
 
 local function raw(n: number?, why: string): any
 	return if n == nil then nil else ui.raw(n, why)
@@ -365,6 +396,28 @@ local function problem(message: () -> string, stopped: boolean?): Node
 			},
 		}
 	end, { w_full = true })
+end
+
+local function ghost(props: { class: string, label: string, icon: Node, on_click: () -> () }): Node
+	return ui.button {
+		class = props.class,
+		label = props.label,
+		h = 24,
+		px = ui.raw(7, "the frame's quiet buttons, as the design's"),
+		gap = "$space.1",
+		items = "center",
+		shrink = 0,
+		rounded = ui.raw(7, "the frame's quiet buttons, as the design's"),
+		bg = "#00000000",
+		color = "$text.tertiary",
+		text_size = "$font.size.xs",
+		hover = { bg = "$hover", color = "$text.primary" },
+		active = { bg = "$pressed" },
+		focus = { border = 0 },
+		on_click = props.on_click,
+		props.icon,
+		ui.text { props.label, literal = true },
+	}
 end
 
 -- ---- canvases -------------------------------------------------------------------
@@ -766,6 +819,115 @@ local Surface = ui.component(function(props: { n: any, ctx: Ctx }): Node
 	}
 end)
 
+local function cell_text(value: () -> string, align: string?): Node
+	return ui.text {
+		value,
+		literal = true,
+		wrap = true,
+		min_w = 0,
+		align = align,
+		text_size = "$zeron.visual.text.sm.size",
+		line_height = "$zeron.visual.text.sm.line",
+		color = "$text.primary",
+	}
+end
+
+local function chart_table(get: () -> any): Node
+	local first = get() or {}
+	local series = first.series or {}
+	local function num(v: any, fmt: any): string
+		return if type(v) == "number" then ink.format(v, fmt) else "–"
+	end
+	if first.type == "scatter" then
+		local points: { { number } } = {}
+		for s, one in series do
+			for i = 1, #(one.points or {}), 2 do
+				table.insert(points, { s, i })
+			end
+		end
+		return DataTable {
+			columns = { { label = "" }, { label = "x", align = "end" }, { label = "y", align = "end" } },
+			rows = #points,
+			cell = function(r: number, c: number): Node
+				local s, i = points[r][1], points[r][2]
+				return cell_text(function(): string
+					local now = get() or {}
+					local one = (now.series or {})[s] or {}
+					local pts = one.points or {}
+					if c == 1 then
+						return one.name or ""
+					end
+					return if c == 2 then num(pts[i], now.xfmt) else num(pts[i + 1], now.fmt)
+				end, if c == 1 then nil else "right")
+			end,
+		}
+	end
+	local columns: { any } = { { label = "" } }
+	for _, one in series do
+		table.insert(columns, { label = one.name or "", align = "end" })
+	end
+	return DataTable {
+		columns = columns,
+		rows = #(first.x or {}),
+		cell = function(r: number, c: number): Node
+			return cell_text(function(): string
+				local now = get() or {}
+				if c == 1 then
+					return (now.x or {})[r] or ""
+				end
+				local one = (now.series or {})[c - 1] or {}
+				return num((one.values or {})[r], now.fmt)
+			end, if c == 1 then nil else "right")
+		end,
+	}
+end
+
+local ChartData = ui.component(function(props: { get: () -> any }): Node
+	local open = ui.use_state(false)
+	return ui.column {
+		class = "visual-chart-data",
+		w_full = true,
+		min_w = 0,
+		items = "start",
+		ghost {
+			class = "visual-data-toggle",
+			label = locale.s("ds.visual.data_table"),
+			icon = ui.div {
+				shrink = 0,
+				rotate = function(): number
+					return if open:get() then 90 else 0
+				end,
+				Icon { name = "chevron-right", size = 13 },
+			},
+			on_click = function()
+				open:toggle()
+			end,
+		},
+		ui.presence(function(): string
+			local now = props.get()
+			if not open:get() or not now then
+				return ""
+			end
+			-- (Rows and columns are fixed as a table is made: another count, another table.)
+			local points = 0
+			for _, one in now.series or {} do
+				points += #(one.points or {})
+			end
+			return `{now.type}:{#(now.x or {})}:{#(now.series or {})}:{points}`
+		end, function(key: string): Node
+			if key == "" then
+				return ui.div {}
+			end
+			return ui.column {
+				w_full = true,
+				min_w = 0,
+				mt = ui.raw(6, "the table under its button, as the design's"),
+				chart_table(props.get),
+			}
+		end, { w_full = true }),
+	}
+end)
+
 -- ---- layout -------------------------------------------------------------------
 
 local ITEMS = { start = "start", center = "center", ["end"] = "end" }
@@ -909,7 +1071,9 @@ build = function(n: any, ctx: Ctx, parent: string): Node
 		return ui.column(place({
 			w_full = parent ~= "row",
 			min_w = 0,
+			gap = "$space.2",
 			Chart { data = get, height = n.h, label = ctx.title() },
+			ChartData { get = get },
 		}, n, parent))
 	elseif k == "canvas" then
 		return ui.column(place({ w_full = parent ~= "row", min_w = 0, Canvas { n = n, ctx = ctx } }, n, parent))
@@ -1061,57 +1225,121 @@ return ui.component(function(props: Props): Node
 		end
 		return drew:get()
 	end
+	local resets = ui.use_state(0)
+	local resettable = ui.computed(function(): boolean
+		local s = snap:get()
+		return s.state == "ready" and s.tree ~= nil and has_control(s.tree)
+	end)
+	local caption = props.caption or ""
 	return ui.column {
 		class = "visual",
 		role = "group",
 		label = title(),
 		w_full = true,
-		gap = "$space.3",
-		ui.presence(function(): string
-			return shape:get()
-		end, function(key: string): Node
-			if key == "loading" then
-				return ui.row {
-					class = "visual-loading",
-					items = "center",
-					gap = "$space.2",
-					h = "$zeron.visual.text.sm.line",
-					status.Spinner { size = 12, ink = "$text.tertiary" },
-					ui.text {
-						function(): string
-							return locale.s("ds.visual.loading", { title = title() })
-						end,
-						literal = true,
-						text_size = "$zeron.visual.text.sm.size",
-						line_height = "$zeron.visual.text.sm.line",
-						color = "$text.tertiary",
-					},
+		border = 1,
+		border_color = "$border",
+		rounded = ui.raw(12, "the visual's frame, as the design's"),
+		pt = ui.raw(11, "the visual's frame, as the design's"),
+		px = ui.raw(14, "the visual's frame, as the design's"),
+		pb = ui.raw(12, "the visual's frame, as the design's"),
+		ui.row {
+			class = "visual-head",
+			w_full = true,
+			min_h = 24,
+			mb = ui.raw(10, "the visual's frame, as the design's"),
+			items = "center",
+			gap = "$space.3",
+			ui.text {
+				title,
+				literal = true,
+				truncate = true,
+				grow = 1,
+				min_w = 0,
+				text_size = "$zeron.visual.text.sm.size",
+				line_height = "$zeron.visual.text.sm.line",
+				weight = "$font.weight.medium",
+				color = "$text.primary",
+			},
+			ui.show(
+				function(): boolean
+					return resettable:get()
+				end,
+				ghost {
+					class = "visual-reset",
+					label = locale.s("ds.visual.reset"),
+					icon = Icon { name = "refresh", size = 13 },
+					on_click = function()
+						pcall(ui.invoke, "visuals.reset", id)
+						drew:set("")
+						resets:set(resets:peek() + 1)
+					end,
 				}
-			end
-			if key == "failed" then
+			),
+		},
+		ui.column {
+			w_full = true,
+			min_w = 0,
+			gap = "$space.3",
+			ui.presence(function(): string
+				local s = shape:get()
+				return if s == "loading" or s == "failed" then s else `{s} #{resets:get()}`
+			end, function(key: string): Node
+				if key == "loading" then
+					return ui.row {
+						class = "visual-loading",
+						items = "center",
+						gap = "$space.2",
+						h = "$zeron.visual.text.sm.line",
+						status.Spinner { size = 12, ink = "$text.tertiary" },
+						ui.text {
+							function(): string
+								return locale.s("ds.visual.loading", { title = title() })
+							end,
+							literal = true,
+							text_size = "$zeron.visual.text.sm.size",
+							line_height = "$zeron.visual.text.sm.line",
+							color = "$text.tertiary",
+						},
+					}
+				end
+				if key == "failed" then
+					return problem(function(): string
+						return snap:get().error or ""
+					end)
+				end
+				local tree = snap:peek().tree
+				if not tree then
+					return ui.div {}
+				end
+				-- (A tree this can't draw stays in its place, said so: the
+				-- transcript round it goes on.)
+				local ok, built = pcall(build, tree, ctx, "root")
+				if ok then
+					return built
+				end
 				return problem(function(): string
-					return snap:get().error or ""
+					return tostring(built)
 				end)
-			end
-			local tree = snap:peek().tree
-			if not tree then
-				return ui.div {}
-			end
-			-- (A tree this can't draw stays in its place, said so: the
-			-- transcript round it goes on.)
-			local ok, built = pcall(build, tree, ctx, "root")
-			if ok then
-				return built
-			end
-			return problem(function(): string
-				return tostring(built)
-			end)
-		end, { w_full = true }),
-		ui.show(
-			function(): boolean
-				return error() ~= "" and shape:get() ~= "failed"
-			end,
-			problem(error, true)
-		),
+			end, { w_full = true }),
+			ui.show(
+				function(): boolean
+					return error() ~= "" and shape:get() ~= "failed"
+				end,
+				problem(error, true)
+			),
+		},
+		if caption ~= ""
+			then ui.text {
+				caption,
+				class = "visual-caption",
+				literal = true,
+				wrap = true,
+				min_w = 0,
+				mt = ui.raw(10, "the visual's frame, as the design's"),
+				text_size = "$zeron.visual.text.xs.size",
+				line_height = ui.raw(17, "the caption's line, as the design's"),
+				color = "$text.tertiary",
+			}
+			else nil,
 	}
 end)
