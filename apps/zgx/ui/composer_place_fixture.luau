@@ -83,7 +83,17 @@ local HARNESSES: { ds.Harness } = { { id = "claude", label = "Claude", mark = "c
 local EFFORT = { { value = "medium", label = "Medium" }, { value = "high", label = "High" } }
 local MODELS: { ds.Model } = {
 	{ value = "opus", label = "Opus 5.5", harness = "claude" },
-	{ value = "sonnet", label = "Claude Sonnet 4.5", harness = "claude", efforts = EFFORT, effort = "high" },
+	{
+		value = "sonnet",
+		label = "Claude Sonnet 4.5",
+		harness = "claude",
+		efforts = EFFORT,
+		effort = "high",
+		options = {
+			{ id = "contextWindow", label = "Context Window", default = "1m", choices = { { id = "200k", label = "200K" }, { id = "1m", label = "1M" } } },
+			{ id = "autoCompact", label = "Auto-compact", default = "auto", choices = { { id = "auto", label = "Auto" }, { id = "300k", label = "300K" }, { id = "400k", label = "400K" }, { id = "600k", label = "600K" }, { id = "800k", label = "800K" } } },
+		},
+	},
 }
 local PROJECTS: { Composer.Project } = {
 	{ value = "zeron", label = "zeron", hue = "violet" },
@@ -199,6 +209,7 @@ return ui.column {
 			plan = ui.state("test_place_plan", false),
 			model = ui.state("test_place_model", "opus" :: string?),
 			effort = ui.state("test_place_effort", "high" :: string?),
+			options = ui.state("test_place_options", {} :: { [string]: string }),
 			harnesses = HARNESSES,
 			models = MODELS,
 			project = ui.state("test_place_project", "zeron" :: string?),

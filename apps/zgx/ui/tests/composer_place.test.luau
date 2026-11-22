@@ -167,6 +167,50 @@ test("composer place: the footer's chips are one height, the ring one of them", 
 	expect(w).to_be(6 + 16 + 5 + pct + 6)
 end)
 
+test("composer place: ⇧↑ ⇧↓ in an empty draft step the context a stop, the ring saying its size", function()
+	local app = mounted()
+	app:set_state("test_place_model", "sonnet")
+	app:set_state("test_place_options", { autoCompact = "800k" })
+	rested(app)
+	local function picks(): { [string]: string }
+		return app:state("test_place_options") or {}
+	end
+	local function says(text: string): boolean
+		return app:has(`#composer-context-percent >> ~"{text}"`)
+	end
+	-- (The roll run out, about 750 ms, the size still held, 1400.)
+	local function rolled()
+		app:frames(60)
+	end
+	app:click("role:textbox")
+	app:key("shift+ArrowUp")
+	rolled()
+	expect(picks().autoCompact).to_be(nil)
+	expect(says("408K / 1M")).to_be(true)
+	app:key("shift+ArrowUp")
+	rolled()
+	expect(picks().autoCompact).to_be(nil)
+	expect(says("408K / 1M")).to_be(true)
+	for _ = 1, 5 do
+		app:key("shift+ArrowDown")
+		app:frames(4)
+	end
+	rolled()
+	expect(picks().contextWindow).to_be("200k")
+	expect(says("408K / 200K")).to_be(true)
+	app:key("shift+ArrowUp")
+	settle(app)
+	expect(picks().contextWindow).to_be(nil)
+	expect(picks().autoCompact).to_be("300k")
+	app:frames(150)
+	expect(says("41%")).to_be(true)
+	app:set_state("test_place_draft", "two\nlines")
+	settle(app)
+	app:key("shift+ArrowUp")
+	settle(app)
+	expect(picks().autoCompact).to_be("300k")
+end)
+
 -- A hover card is framed once (ds/hover_card): zgx's layer hugs the card
 -- exactly (its box the card's), and one frame paints in it. A card that
 -- painted its own shadow, or a second frame round it, shows as a dark rim
