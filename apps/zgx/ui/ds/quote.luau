@@ -61,6 +61,10 @@ function M.where(q: Quote): string
 	return if q.from then `{q.who}, {q.from}` else q.who
 end
 
+function M.same(a: Quote, b: Quote): boolean
+	return a.text == b.text and a.who == b.who and a.from == b.from
+end
+
 -- The quote's line in the draft.
 function M.line(q: Quote): string
 	return `> {q.who}: {M.excerpt(q.text)}`
