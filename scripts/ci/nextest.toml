@@ -1,17 +1,6 @@
 # cargo-nextest settings for CI (pass with --config-file).
 #
-# A test is timing-sensitive and fails now and then when nextest runs many tests
-# at once (the old `cargo test` runs were serial per binary). nextest reports a
-# pass-on-retry as FLAKY, so it stays visible in the log. Remove an override once
-# its test is fixed.
-
-# zeron-harness `opencode::mcp_injection_tests::mcp_injection_reaches_isolated_server_processes`
-# starts `node` fixture scripts and `binary_version` gives each `--version` probe 2 s;
-# on a loaded 4-core runner the probe occasionally times out ("cannot determine
-# opencode version for MCP configuration").
-[[profile.default.overrides]]
-filter = 'package(zeron-harness) & test(mcp_injection_reaches_isolated_server_processes)'
-retries = 2
+# No test is retried: one that fails now and then is fixed, not run again.
 
 # preview `discovery` tests bind the fixed port 7331 and serialize with a mutex,
 # which does nothing when every test is its own process (nextest): one at a time.
