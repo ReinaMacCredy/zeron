@@ -199,6 +199,15 @@ fn main() {
                                 std::thread::sleep(Duration::from_millis(10));
                             }
                         }
+                        if text == "hold" {
+                            // A turn that lasts until it is aborted.
+                            for _ in 0..6_000 {
+                                if abort.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                        }
                         if text == "retry" {
                             message("", "error");
                             emit(json!({"type":"agent_end","willRetry":true}));
