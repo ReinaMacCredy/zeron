@@ -404,11 +404,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The message ids of the prompts queued ahead of command `id`.
-fn sends_before(commands: &[SessionCommandEntry], id: &str) -> HashSet<String> {
-    let at = commands.iter().position(|c| c.id == id).unwrap_or(0);
+/// The message ids of the prompts `entry`'s device queued ahead of it:
+/// the ones its sender had certainly seen.
+fn sends_before(commands: &[SessionCommandEntry], entry: &SessionCommandEntry) -> HashSet<String> {
+    let at = commands.iter().position(|c| c.id == entry.id).unwrap_or(0);
     commands[..at]
         .iter()
+        .filter(|c| c.issued_by == entry.issued_by)
         .filter_map(|c| match &c.payload {
             SessionCommandPayload::Run { message_id, .. } => Some(message_id.clone()),
             SessionCommandPayload::Steer { message_id, .. } => {
@@ -7161,10 +7163,11 @@ impl DocHost {
             let current_turn_id = messages.last().map(|m| m.id.clone());
             // A Stop names the last message its sender saw. The turn it is
             // aimed at is over only once a prompt sent after it has landed:
-            // the turn's own reply and the sends queued ahead of the Stop
-            // (it cancels those) land after that message too, and reading
-            // them as a new turn dropped the Stop.
-            let covered = sends_before(&commands, &entry.id);
+            // the turn's own reply and the sends its device queued ahead of
+            // the Stop (it cancels those) land after that message too, and
+            // reading them as a new turn dropped the Stop. Another device's
+            // prompt is a turn the sender may never have seen.
+            let covered = sends_before(&commands, &entry);
             let turn_is_past = |turn_id: &str| {
                 messages
                     .iter()
@@ -8531,6 +8534,55 @@ fn threshold_checkpoint_due(row_bytes: u64, row_count: u64, snapshot_bytes: u64)
     let byte_bound = (snapshot_bytes / 16).clamp(BASE_ROW_BYTES, MAX_ROW_BYTES);
     let row_bound = (snapshot_bytes / (64 * 1024)).clamp(BASE_ROWS, MAX_ROWS);
     row_bytes > byte_bound || row_count > row_bound
+}
+
+#[cfg(test)]
+mod sends_before_tests {
+    use super::*;
+
+    fn command(id: &str, device: &str, payload: SessionCommandPayload) -> SessionCommandEntry {
+        SessionCommandEntry {
+            id: id.into(),
+            payload,
+            issued_by: device.into(),
+            issued_at: 0,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            computer_generation: None,
+        }
+    }
+
+    fn steer(id: &str, device: &str) -> SessionCommandEntry {
+        let payload = SessionCommandPayload::Steer {
+            prompt: "go on".into(),
+            message_id: Some(format!("m-{id}")),
+        };
+        command(id, device, payload)
+    }
+
+    /// A Stop covers the sends its own device queued ahead of it. Another
+    /// device's send starts a turn the Stop's sender may never have seen,
+    /// and one queued after the Stop is not its to cancel.
+    #[test]
+    fn a_stop_covers_only_its_own_devices_earlier_sends() {
+        let stop = command(
+            "stop",
+            "phone",
+            SessionCommandPayload::Interrupt { teardown: false },
+        );
+        let commands = [
+            steer("a", "phone"),
+            steer("b", "desk"),
+            stop.clone(),
+            steer("c", "phone"),
+        ];
+        assert_eq!(
+            sends_before(&commands, &stop),
+            HashSet::from(["m-a".to_string()])
+        );
+    }
 }
 
 #[cfg(test)]
