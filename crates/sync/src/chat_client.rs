@@ -567,6 +567,12 @@ struct Flags {
     socketless: std::sync::atomic::AtomicBool,
     /// The room says ops were relayed that no checkpoint holds.
     room_relay_dirty: std::sync::atomic::AtomicBool,
+    /// Sessions joined so far.
+    joins: std::sync::atomic::AtomicU64,
+    /// One more than `joins` was at the latest redial request (0: none yet). A
+    /// request asks for a socket newer than the one it saw, so a session that
+    /// joins after it is its answer, however late the request is read.
+    redial_asked: std::sync::atomic::AtomicU64,
 }
 
 /// Dials that must fail, with HTTPS working, before this counts as a network
@@ -946,6 +952,9 @@ impl ChatClient {
 
     /// Escalation: tear the session down and dial a fresh socket.
     pub fn redial(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let joins = self.flags.joins.load(SeqCst);
+        self.flags.redial_asked.fetch_max(joins + 1, SeqCst);
         let _ = self.redial.try_send(());
     }
 
@@ -1281,7 +1290,7 @@ impl Actor {
         mut pipe: BinPipe,
         ready: &mut Option<oneshot::Sender<Result<(), SyncError>>>,
     ) -> SessionEnd {
-        use std::sync::atomic::Ordering::Relaxed;
+        use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 
         // ── hello / state ───────────────────────────────────────────────────
         {
@@ -1405,6 +1414,7 @@ impl Actor {
             "chat2 joined"
         );
         self.flags.connected.store(true, Relaxed);
+        let joined = self.flags.joins.fetch_add(1, SeqCst) + 1;
         if ready.is_none() {
             self.flags.rejoins.fetch_add(1, Relaxed);
         }
@@ -1799,8 +1809,13 @@ impl Actor {
                     return SessionEnd::Reconnect;
                 }
                 _ = self.redial_rx.recv() => {
-                    tracing::info!("chat2: redial requested");
-                    return SessionEnd::Reconnect;
+                    // Asked while this session was still dialing or joining (a chat
+                    // that comes on screen as its room connects): this is the fresh
+                    // socket it asked for.
+                    if self.flags.redial_asked.load(SeqCst) > joined {
+                        tracing::info!("chat2: redial requested");
+                        return SessionEnd::Reconnect;
+                    }
                 }
                 // Transient (quota) rejection: probe with the HEAD batch on
                 // a short clock (see `Shared::quota_blocked`); acks re-arm
