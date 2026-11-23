@@ -153,6 +153,7 @@ struct Inner {
     device_id: String,
     listings: Mutex<HashMap<PathBuf, Vec<Worktree>>>,
     refreshing: Mutex<HashMap<PathBuf, bool>>,
+    refreshed: tokio::sync::Notify,
     shell_starts: Mutex<HashMap<String, Vec<Worktree>>>,
     base_watches: Mutex<HashMap<PathBuf, Vec<FsWatch>>>,
     turn_diff: std::sync::OnceLock<CheckoutDiffSync>,
@@ -167,6 +168,7 @@ impl WorkTrees {
                 device_id: device_id.to_string(),
                 listings: Mutex::new(HashMap::new()),
                 refreshing: Mutex::new(HashMap::new()),
+                refreshed: tokio::sync::Notify::new(),
                 shell_starts: Mutex::new(HashMap::new()),
                 base_watches: Mutex::new(HashMap::new()),
                 turn_diff: std::sync::OnceLock::new(),
@@ -404,15 +406,44 @@ impl WorkTrees {
         }
     }
 
+    /// Returns once a pass that began after the call has recorded its result.
     async fn refresh_repo(&self, main: &Path) {
-        {
+        let joined = {
             let mut refreshing = lock(&self.inner.refreshing);
-            if let Some(again) = refreshing.get_mut(main) {
-                *again = true;
-                return;
+            match refreshing.get_mut(main) {
+                Some(again) => {
+                    *again = true;
+                    true
+                }
+                None => {
+                    refreshing.insert(main.to_path_buf(), false);
+                    false
+                }
             }
-            refreshing.insert(main.to_path_buf(), false);
+        };
+        if joined {
+            // The caller already refreshing runs one more pass for this call.
+            loop {
+                let done = self.inner.refreshed.notified();
+                tokio::pin!(done);
+                done.as_mut().enable();
+                if !lock(&self.inner.refreshing).contains_key(main) {
+                    return;
+                }
+                done.await;
+            }
         }
+        // Also when this future is dropped mid-pass, or the joined callers would wait forever.
+        struct Done<'a>(&'a Inner, &'a Path, bool);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                if !self.2 {
+                    lock(&self.0.refreshing).remove(self.1);
+                }
+                self.0.refreshed.notify_waiters();
+            }
+        }
+        let mut done = Done(&self.inner, main, false);
         loop {
             if let Err(error) = self.refresh_pass(main).await {
                 tracing::debug!(repo = %main.display(), %error, "work trees: refresh failed");
@@ -423,6 +454,7 @@ impl WorkTrees {
                 continue;
             }
             refreshing.remove(main);
+            done.2 = true;
             break;
         }
     }
