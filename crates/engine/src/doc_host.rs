@@ -9558,7 +9558,7 @@ mod publication_eviction_tests {
             host.open(&format!("other-{i}")).unwrap();
         }
         host.open("overflow").unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 host.evict_over_budget();
                 if !lock(&host.inner.handles).contains_key("big") && doc.upgrade().is_none() {

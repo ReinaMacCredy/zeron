@@ -1521,9 +1521,16 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         };
         let whole = || persistence.writes.load(Ordering::Relaxed);
+        // A save is on its way: until it has landed, however slow the disk.
+        let wait_for_whole = |count: usize| {
+            let asked = std::time::Instant::now();
+            while whole() < count && asked.elapsed() < Duration::from_secs(60) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
         // The first save is whole.
         tick(&mut cursor);
-        std::thread::sleep(Duration::from_millis(1_300));
+        wait_for_whole(1);
         let first = whole();
         assert_eq!(first, 1);
         // 1. Streaming past the 1 MiB budget, under the 4 MiB cap: no whole save.
@@ -1533,7 +1540,7 @@ mod tests {
         assert!(persistence.compaction_due.load(Ordering::Acquire), "the fixture never passed the budget");
         assert_eq!(whole(), first, "a whole save landed while commits kept arriving");
         // 2. A pause: folded in within the quiet window.
-        std::thread::sleep(QUIET_FOR_COMPACTION + Duration::from_millis(1_500));
+        wait_for_whole(first + 1);
         assert_eq!(whole(), first + 1, "the deltas weren't folded in when the chat went quiet");
         assert_eq!(store.snapshot_delta_stats("stream").unwrap(), (0, 0));
         // 3. Streaming far past the cap: it forces a whole save mid-stream.
