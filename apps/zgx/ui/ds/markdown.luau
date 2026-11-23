@@ -56,6 +56,7 @@ local locale = require("@self/locale")
 local look = require("@self/look")
 local References = require("@self/references")
 local FileCard = require("@self/file_card")
+local PythonRun = require("@self/python_run")
 
 -- A link's context menu entry (ds/links, ds/context_menu's).
 export type LinkEntry = Links.Entry
@@ -253,7 +254,7 @@ local function veil_pieces(fading: { VeilChunk }, from: number, to: number, piec
 end
 
 -- (`tasks`: each task item's place among them, from the latest parse.)
-export type RunCode = { can: () -> boolean, run: (text: string) -> () }
+export type RunCode = { can: () -> boolean, run: (text: string) -> (), python: PythonRun.Runner? }
 
 type Ctx = {
 	veil: Veil?,
@@ -1227,7 +1228,8 @@ end
 -- terminal) and Copy over its lines, one quiet panel.
 -- (`class` and `provide`: what plugins place it by, and read where they
 -- do; `block` gives them.)
-local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil?, render: (() -> Node)?, run: RunCode? }): Node
+local CodeBlock = ui.component(function(props: { lang: string, text: string, class: string?, provide: { [string]: any }?, find: CodeFind?, veil: CodeVeil?, render: (() -> Node)?, run: RunCode?, live: (() -> boolean)? }): Node
+	local python = if props.run and PythonRun.runs(props.lang) then props.run.python else nil
 	local copied = ui.use_state(false)
 	local rendered = ui.use_state(props.render ~= nil)
 	-- (A find shows the source, where its matches are highlighted.)
@@ -1297,7 +1299,9 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				tooltip = locale.s("ds.markdown.fit_content"),
 				rounded = ui.raw(control.nest("$radius.xl", 1, 5), "concentric with the code block, as Copy"),
 			}),
-			if props.run and run_text(props.lang, props.text) ~= nil
+			if python
+				then PythonRun.Controls(python, props.text, props.live)
+				elseif props.run and run_text(props.lang, props.text) ~= nil
 				then ui.show(props.run.can, ui.button {
 					id = "md-code-run",
 					label = locale.t("ds.markdown.run_code"),
@@ -1363,6 +1367,7 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 				code_text(text, props.lang, nil, props.find, props.veil),
 			}
 		end, { w_full = true, min_w = 0 }),
+		if python then PythonRun.Output(python, props.text) else nil,
 	}
 end)
 
@@ -1765,6 +1770,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				find = find,
 				veil = code_veil,
 				run = if ctx then ctx.run_code else nil,
+				live = if ctx then ctx.live else nil,
 				class = if lang ~= "" then `md-code lang-{lang}` else "md-code",
 				render = if lang == "markdown" or lang == "md"
 					then function(): Node

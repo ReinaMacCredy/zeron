@@ -812,6 +812,20 @@
       "run_code": "Run in terminal",
       "run": "Run"
     },
+    "python_run": {
+      "run": "Run Python",
+      "stop": "Stop Python",
+      "stop_label": "Stop",
+      "clear": "Clear result",
+      "running": "Running…",
+      "done": "Done in {time}, exit {code}",
+      "stopped": "Stopped",
+      "timed_out": "Timed out after 10 s",
+      "failed": "Couldn't run: {reason}",
+      "cut": "(Output cut at 64 KB.)",
+      "figure": "Figure {n}, from plt.show()",
+      "sandbox": "Sandbox: no network, reads only system files, Python and this chat's folder, writes only to a scratch folder, the script is stopped after 10 s"
+    },
     "mermaid": {
       "show_source": "Show source",
       "show_diagram": "Show diagram",

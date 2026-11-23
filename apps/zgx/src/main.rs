@@ -70,6 +70,8 @@ mod mermaid;
 mod pdf;
 #[cfg(target_os = "macos")]
 mod tex;
+#[cfg(target_os = "macos")]
+mod python_run;
 mod plugins;
 mod previews;
 mod projects;
@@ -935,6 +937,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         visuals::install(cx, &host);
         // Agent pages in a transcript (src/html_pages.rs).
         html_pages::install(&host);
+        #[cfg(target_os = "macos")]
+        python_run::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
         // Settings → Device hub and a chat's Device tab (src/device.rs).

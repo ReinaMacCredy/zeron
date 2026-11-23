@@ -812,6 +812,20 @@
       "run_code": "在终端中运行",
       "run": "运行"
     },
+    "python_run": {
+      "run": "运行 Python",
+      "stop": "停止 Python",
+      "stop_label": "停止",
+      "clear": "清除结果",
+      "running": "正在运行…",
+      "done": "{time} 后完成，退出码 {code}",
+      "stopped": "已停止",
+      "timed_out": "10 秒后超时",
+      "failed": "无法运行：{reason}",
+      "cut": "（输出在 64 KB 处截断。）",
+      "figure": "图 {n}，来自 plt.show()",
+      "sandbox": "沙盒：无网络，只读取系统文件、Python 和此聊天的文件夹，只写入临时文件夹，脚本在 10 秒后被停止"
+    },
     "mermaid": {
       "show_source": "显示源代码",
       "show_diagram": "显示图表",
