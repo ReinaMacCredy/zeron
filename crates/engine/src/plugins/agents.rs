@@ -1292,7 +1292,12 @@ impl Agents {
                 "The project's path must be an existing absolute directory",
             ));
         }
-        let path = std::fs::canonicalize(path)
+        // Windows' `\\?\` verbatim form differs from the paths spaces and chats store.
+        #[cfg(windows)]
+        let path = dunce::canonicalize(path);
+        #[cfg(not(windows))]
+        let path = std::fs::canonicalize(path);
+        let path = path
             .map_err(|why| Refused::new(reason::BAD_CALL, format!("Cannot resolve the project's directory: {why}")))?;
         let path = path.to_str()
             .ok_or_else(|| Refused::new(reason::BAD_CALL, "The project's path must be valid text"))?
