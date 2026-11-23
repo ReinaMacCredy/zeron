@@ -823,6 +823,15 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         MessagePart::Text { text, .. } => assert_eq!(text, "partial output"),
         other => panic!("unexpected part {other:?}"),
     }
+    // The Stop resolves once the turn is down, after the stamp it leaves.
+    wait_for(
+        || {
+            command_status(&core, "cmd-int-1")
+                .is_some_and(|(s, _)| s != SessionCommandStatus::Pending)
+        },
+        "interrupt resolved",
+    )
+    .await;
     assert_eq!(
         command_status(&core, "cmd-int-1"),
         Some((SessionCommandStatus::Applied, None))
