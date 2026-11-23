@@ -114,9 +114,19 @@ jobs:
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
             --git "$GIT" --rev "$REV" zgx-script --bin zgx --features inspect,i18n --root ~/zgx-cli
       # Built apart from the runs, so a slow or failed build shows as that.
+      # Ghostty's Zig build downloads its packages from deps.files.ghostty.org,
+      # which now and then resets a connection. What it has fetched stays in the
+      # zgx-ghostty cache, so the next build goes on from there. Only the build
+      # is tried again, never a test.
       - name: Build apps/zgx tests
         working-directory: apps/zgx
-        run: cargo test --locked --no-run --bin zeron-zgx --test '*'
+        run: |
+          for attempt in 1 2 3; do
+            cargo test --locked --no-run --bin zeron-zgx --test '*' && exit 0
+            echo "::warning::Building the apps/zgx tests failed (attempt $attempt of 3)"
+            sleep 30
+          done
+          exit 1
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx integration tests
