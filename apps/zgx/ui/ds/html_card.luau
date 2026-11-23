@@ -22,6 +22,9 @@ export type Pages = {
 	open_external: (path: string) -> (),
 	open_in_zeron: (path: string) -> (),
 	resolve: (target: string, root: string?) -> any,
+	tray: ((card: string) -> { n: number, total: number, open: boolean }?)?,
+	hold_tray: ((card: string) -> ())?,
+	toggle_tray: ((card: string) -> ())?,
 }
 
 local MIN_H, MAX_H = 80, 2000
@@ -164,8 +167,9 @@ local function word(v: any, most: number): string?
 	if type(v) ~= "string" then
 		return nil
 	end
-	local s = string.gsub((string.gsub(v, "%c", " ")), "%s+", " ")
-	s = string.match(s, "^%s*(.-)%s*$") or ""
+	-- ASCII only: %c and %s follow the C locale, and under a UTF-8 one they match bytes inside letters.
+	local s = string.gsub((string.gsub(v, "[%z\1-\31\127]", " ")), " +", " ")
+	s = string.match(s, "^ ?(.-) ?$") or ""
 	if #s > most then
 		local cut = most
 		while cut > 0 and (string.byte(s, cut + 1) or 0) >= 0x80 and (string.byte(s, cut + 1) or 0) < 0xC0 do
@@ -178,7 +182,7 @@ end
 
 local function code_of(v: any): string?
 	local c = word(v, 32)
-	return if c and c ~= "" and not string.find(c, "%s") then c else nil
+	return if c and c ~= "" and not string.find(c, " ", 1, true) then c else nil
 end
 
 local function groups_of(list: any, options: boolean): { any }
@@ -319,12 +323,113 @@ local function closed_tag(key: string): Node
 	}
 end
 
+local function tray_chip(key: string, pages: Pages?): Node
+	local now = ui.computed(function(): any
+		return if pages and pages.tray then pages.tray(key) else nil
+	end)
+	local function tray(): { n: number, total: number, open: boolean }?
+		return now:get()
+	end
+	local function words(): string
+		local t = tray()
+		return if t then locale.s("ds.html_card.picked", { n = t.n, total = t.total }) else ""
+	end
+	local function open(): boolean
+		local t = tray()
+		return t ~= nil and t.open
+	end
+	return ui.show(function(): boolean
+		return tray() ~= nil
+	end, ui.button {
+		id = `html-card-picks-{key}`,
+		label = words,
+		expanded = open,
+		h = raw(22, "the mockup's picked chip"),
+		px = raw(8, "the mockup's picked chip"),
+		gap = raw(6, "the mockup's picked chip"),
+		shrink = 0,
+		items = "center",
+		rounded = raw(11, "the mockup's picked chip"),
+		border = 1,
+		border_color = function(): string
+			return if open() then "$border.strong" else "$border"
+		end,
+		bg = function(): string
+			return if open() then "$hover" else "#00000000"
+		end,
+		hover = { bg = "$hover", border_color = "$border.strong" },
+		focus_on_press = false,
+		on_press = function()
+			if pages and pages.hold_tray then
+				pages.hold_tray(key)
+			end
+		end,
+		on_click = function()
+			if pages and pages.toggle_tray then
+				pages.toggle_tray(key)
+			end
+		end,
+		ui.div { w = 6, h = 6, shrink = 0, rounded = "$radius.full", bg = function(): any
+			return raw(picks.ink() :: any, "the pick colour")
+		end },
+		ui.text { words, wrap = false, text_size = "$font.size.xs", color = "$text.primary" },
+		ui.div {
+			rotate = function(): number
+				return if open() then 180 else 0
+			end,
+			Icon { name = "alt-arrow-down", size = 11, color = "$text.tertiary" },
+		},
+	})
+end
+
 local function title_text(words: any): Node
 	return ui.text { words, literal = true, grow = 1, min_w = 0, truncate = true, text_size = "$font.size.sm", color = "$text.secondary" }
 end
 
+local function signed(value: any, main_frame: any, nonce: string?): boolean
+	return main_frame == true and type(value) == "table" and value.kind == "zeron.page" and type(nonce) == "string" and nonce ~= "" and value.nonce == nonce
+end
+
+local function selected_text(v: any): string
+	local t = if type(v) == "table" then v.text else nil
+	return if type(t) == "string" and #t <= 16000 and string.find(t, "[^ \t\r\n]") then t else ""
+end
+
+local function line_in(el: any, l: any): any
+	if type(l) ~= "table" then
+		return nil
+	end
+	for i = 1, 4 do
+		local v = l[i]
+		if type(v) ~= "number" or v ~= v or math.abs(v) > 1e6 then
+			return nil
+		end
+	end
+	return { x = el.x + l[1], y = el.y + l[2], w = l[3], h = l[4] }
+end
+
+-- What a page says is selected in it, its lines in the window's own coordinates; nil for none.
+local function selection(page_ref: any, v: any): any
+	local el = page_ref:peek()
+	local text = selected_text(v)
+	if text == "" or not el or el.x == nil or el.y == nil then
+		return nil
+	end
+	local top, bottom = line_in(el, v.top), line_in(el, v.bottom)
+	return if top and bottom then { text = text, top = top, bottom = bottom } else nil
+end
+
 local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 	local view = ui.state(`html_sheet_view:{props.key}`, "live")
+	local picked = ui.use_state("")
+	local function heard(value: any, origin: any, main_frame: any)
+		if signed(value, main_frame, e.picks) and value.select ~= nil then
+			picked:set(selected_text(value.select))
+		end
+		if props.sheet_heard then
+			props.sheet_heard(value, origin, main_frame)
+		end
+	end
 	local function size(): any
 		local s = (ui :: any).window.size:get()
 		return s
@@ -364,6 +469,24 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 					border_sides = { 0, 0, 1, 0 },
 					border_color = "$border",
 					ui.text { props.title, literal = true, grow = 1, min_w = 0, truncate = true, text_size = "$font.size.md", color = "$text.primary" },
+					ui.show(function(): boolean
+						return props.on_mention ~= nil and picked:get() ~= ""
+					end, ui.button {
+						id = "html-sheet-mention",
+						label = locale.t("ds.annotation.mention"),
+						h = 26,
+						px = "$space.2",
+						rounded = "$radius.md",
+						bg = "$hover",
+						color = "$text.primary",
+						focus = control.ring,
+						on_click = function()
+							props.on_mention(picked:peek(), props.title)
+							picked:set("")
+							open:set(false)
+						end,
+						ui.text { locale.t("ds.annotation.mention"), text_size = "$font.size.sm" },
+					}),
 					if live
 						then ui.button {
 							id = "html-sheet-open",
@@ -489,10 +612,11 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 							web = if live then nil else e.sheet,
 							src = if live then props.url else nil,
 							transparent = not live,
+							isolated = if live and e.boot then { e.boot } else nil,
 							w_full = true,
 							grow = 1,
 							min_h = 0,
-							on_message = props.sheet_heard,
+							on_message = heard,
 							on_navigate = props.sheet_navigated,
 							on_new_window = props.open_out or api.open_url,
 						},
@@ -517,10 +641,6 @@ local function retheme(web: any, has: string?): string
 		end
 	end
 	return now
-end
-
-local function signed(value: any, main_frame: any, nonce: string?): boolean
-	return main_frame == true and type(value) == "table" and value.kind == "zeron.page" and type(nonce) == "string" and nonce ~= "" and value.nonce == nonce
 end
 
 local function Page(props: any): Node
@@ -611,9 +731,16 @@ local function Page(props: any): Node
 			end
 		end
 	end
+	local page_ref = ui.ref()
+	local function take_select(value: any)
+		if props.on_select and type(value.select) == "table" then
+			props.on_select(selection(page_ref, value.select))
+		end
+	end
 	local function heard(value: any, _origin: any, main_frame: any)
 		if signed(value, main_frame, e.picks) then
 			take_pick(value)
+			take_select(value)
 			return
 		end
 		if not signed(value, main_frame, e.nonce) then
@@ -708,6 +835,7 @@ local function Page(props: any): Node
 			ui.show(function(): boolean
 				return sent().closed == true
 			end, closed_tag(key)),
+			tray_chip(key, pages),
 			header_button(`html-card-expand-{key}`, "expand-arrows", "ds.html_card.expand", function()
 				if e.loaded then
 					sheet:set(true)
@@ -723,15 +851,19 @@ local function Page(props: any): Node
 			if now == "loading" then
 				return ui.column { w_full = true, h = frame }
 			end
-			return api.view {
-				id = `html-page-{key}`,
-				label = props.title,
-				web = e.web,
+			return ui.column {
+				ref = page_ref,
 				w_full = true,
-				h = frame,
-				on_message = heard,
-				on_navigate = navigated(false),
-				on_new_window = open_out,
+				api.view {
+					id = `html-page-{key}`,
+					label = props.title,
+					web = e.web,
+					w_full = true,
+					h = frame,
+					on_message = heard,
+					on_navigate = navigated(false),
+					on_new_window = open_out,
+				},
 			}
 		end, { w_full = true }),
 		Sheet(sheet_props, sheet, e, false),
@@ -759,6 +891,7 @@ local function Live(props: any): Node
 	local reach = ui.use_state("checking")
 	local nonce = ui.use_state(0)
 	local sheet = ui.use_state(false)
+	local page_ref = ui.ref()
 	local function probe()
 		api.reach(props.url, function(up: boolean)
 			reach:set(if up then "up" else "down")
@@ -820,21 +953,31 @@ local function Live(props: any): Node
 			if string.sub(now, 1, 3) ~= "up:" or sheet:peek() then
 				return ui.column { w_full = true, h = height }
 			end
-			return api.view {
-				id = `html-page-{props.key}`,
-				label = live.label,
-				src = props.url,
+			return ui.column {
+				ref = page_ref,
 				w_full = true,
-				h = height,
-				on_error = function()
-					probe()
-				end,
-				on_new_window = function(url: string)
-					api.open_url(url)
-				end,
+				api.view {
+					id = `html-page-{props.key}`,
+					label = live.label,
+					src = props.url,
+					isolated = if live.boot then { live.boot } else nil,
+					w_full = true,
+					h = height,
+					on_message = function(value: any, _origin: any, main_frame: any)
+						if props.on_select and signed(value, main_frame, live.picks) and value.select ~= nil then
+							props.on_select(selection(page_ref, value.select))
+						end
+					end,
+					on_error = function()
+						probe()
+					end,
+					on_new_window = function(url: string)
+						api.open_url(url)
+					end,
+				},
 			}
 		end, { w_full = true }),
-		Sheet(props, sheet, {}, true),
+		Sheet(props, sheet, { picks = live.picks, boot = live.boot }, true),
 	}
 end
 

@@ -68,6 +68,10 @@ export type Props = {
 	editor: ((bubble: { w: number, h: number }) -> Node)?,
 	-- Rows steered as one (src/chat.rs `said`): each its own bubble, with what it carried.
 	steered: { { text: string, attachments: { Attachment }? } }?,
+	from: string?,
+	label: string?,
+	-- Words someone else chose (an agent's option label): drawn as they are, never as markdown.
+	plain: boolean?,
 	-- It lands in a transcript on its own (ds/transcript): what came with it rises after this long, its words a beat later.
 	rise: number?,
 }
@@ -531,6 +535,9 @@ local One = ui.component(function(props: Props): Node
 						end
 						return tostring(n)
 					end, function(): Node
+						if props.plain then
+							return ui.text { props.text, literal = true, wrap = true, min_w = 0, text_size = "$font.size.md", line_height = "$font.line.md", color = "$text.primary" }
+						end
 						return Markdown { text = words_now, breaks = true, open = open, link_menu = props.link_menu, chat_mark = props.chat_mark, attachment_icon = attachment_icon, invocations = true, find = props.find, wash = props.wash, attached = attached_by_name(props.attachments) }
 					end, { w_full = true }),
 				},
@@ -574,6 +581,33 @@ local One = ui.component(function(props: Props): Node
 			),
 		}
 	end
+	local function from_visual(node: Node?): Node?
+		local from = props.from
+		local said = props.label or (if from and from ~= "" then locale.s("ds.user_message.from_visual", { title = from }) else nil)
+		if not node or not said then
+			return node
+		end
+		return ui.column {
+			w_full = true,
+			items = "end",
+			gap = ui.raw(4, "the label over its bubble, as the design's"),
+			ui.row {
+				class = "user-from",
+				selectable = false,
+				items = "center",
+				gap = ui.raw(5, "the label's icon and words, as the design's"),
+				mr = ui.raw(6, "the label in from the bubble's edge, as the design's"),
+				Icon { name = "lucide-undo-2", size = 12, color = "$text.tertiary" },
+				ui.text {
+					said,
+					literal = true,
+					text_size = "$font.size.xs",
+					color = "$text.tertiary",
+				},
+			},
+			node,
+		}
+	end
 	local function risen(node: Node?, beat: number): Node?
 		local after = props.rise
 		if not node or not after then
@@ -604,7 +638,7 @@ local One = ui.component(function(props: Props): Node
 			then ui.row { selectable = false, max_w = "80%", flex_wrap = true, justify = "end", gap = ui.raw(6, "Zeron's message badges"), badges }
 			else nil, RISE_WORDS),
 		risen(if #chosen > 0 then HtmlPicks.Sent { chips = chosen } else nil, RISE_WORDS),
-		risen(if props.text ~= "" and props.editing and props.editor
+		risen(from_visual(if props.text ~= "" and props.editing and props.editor
 			then ui.column {
 				w_full = true,
 				items = "end",
@@ -615,7 +649,7 @@ local One = ui.component(function(props: Props): Node
 				end),
 			}
 			elseif props.text == "" then nil
-			else words(), RISE_WORDS),
+			else words()), RISE_WORDS),
 	}
 end)
 

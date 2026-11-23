@@ -672,6 +672,7 @@ impl SessionHandle {
             .map(|a| zc::UserInputAnswer {
                 question_id: a.question_id,
                 labels: a.labels,
+                note: None,
             })
             .collect();
         Ok(self.inner.respond_input(&request_id, answers)?)

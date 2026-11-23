@@ -942,7 +942,8 @@ local function Composer(): Node
 
 	-- A queued message being edited in the composer: which, and the draft
 	-- it set aside (put back when the edit ends).
-	local editing = ui.state("chat_editing", nil :: { item: string, aside: string, aside_cargo: { any }? }?)
+	local editing = ui.state("chat_editing", nil :: { item: string, chat: string?, aside: string, aside_cargo: { any }? }?)
+	local parked = ui.shared("chat.composer.edits", {} :: { [string]: any })
 	local edits = Asks.queue_edits {
 		id = function(): string?
 			return session_id:peek()
@@ -966,20 +967,30 @@ local function Composer(): Node
 		end,
 	}
 	local end_edit = edits.finish
-	-- Moving to another chat: an edit under way is left as it was (its
-	-- displaced draft back in place), then the draft shown is put away
-	-- under the chat left and the next chat's own comes out (shared.show),
-	-- as Zeron's composer swaps drafts on navigation.
+	-- Moving to another chat: the draft shown is put away under the chat
+	-- left and the next chat's own comes out (shared.show), as Zeron's
+	-- composer swaps drafts on navigation. An edit under way goes with its
+	-- chat (its words in that draft, the host holding the message), and is
+	-- under way again as that chat shows.
 	-- (Only a real move: a reload, the same chat shown, keeps the edit.)
 	ui.effect(function()
 		local key = session_id:get() or route.draft:get()
-		if shared.showing() == key then
+		local was = shared.showing()
+		if was == key then
 			return
 		end
-		if editing:peek() then
-			end_edit("cancel")
-		end
-		shared.show(key)
+		ui.batch(function()
+			local all = table.clone(parked:peek())
+			all[was] = editing:peek()
+			local back = all[key]
+			all[key] = nil
+			parked:set(all)
+			shared.show(key)
+			editing:set(back)
+			if back then
+				TRAY:set("queue")
+			end
+		end)
 	end)
 
 	-- Arriving on a chat (another session or a new chat shown: a sidebar or
@@ -2058,6 +2069,15 @@ local function Composer(): Node
 			on_paste_text = cargo_props.on_paste_text,
 			on_open_pasted = cargo_props.on_open_pasted,
 			on_attach = cargo_props.on_attach,
+			attach_items = function(): { any }
+				local chat = session_id:peek()
+				if not chat or not Pills.plan_hidden(chat) then
+					return {}
+				end
+				return { { label = ui.t("ds.pills.mission.show"):get(), icon = "checklist", on_click = function()
+					Pills.show_plan(chat)
+				end } }
+			end,
 			-- (A drop on the pill: the chat's overlay goes with it.)
 			on_files = cargo_props.on_files,
 			on_paste_image = cargo_props.on_paste_image,

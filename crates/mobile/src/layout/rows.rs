@@ -689,7 +689,7 @@ impl RowBuilder {
                             });
                             rows.push(Placed { core, gap });
                         }
-                        MessagePart::Visual { id, path, title } => {
+                        MessagePart::Visual { id, path, title, .. } => {
                             let gap = gap_for(&rows, false);
                             let slot = self
                                 .visual_slots

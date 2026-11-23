@@ -618,6 +618,9 @@ fn picker_questions() -> Vec<UserInputQuestion> {
             multi_select: false,
             kind: None,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         },
         UserInputQuestion {
             note: None,
@@ -636,6 +639,9 @@ fn picker_questions() -> Vec<UserInputQuestion> {
             multi_select: true,
             kind: None,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         },
     ]
 }
@@ -658,6 +664,9 @@ fn shelf_questions() -> Vec<UserInputQuestion> {
         multiline: false,
         approval: false,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     }]
 }
 
@@ -722,6 +731,9 @@ fn approval(
                         multi_select: false,
                         kind: None,
                         action: None,
+                        details: Vec::new(),
+                        allow_note: false,
+                        quick: false,
                     }],
                     resolved: false,
                     answers: None,
@@ -945,6 +957,7 @@ fn visuals(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 id: visual.id.clone(),
                 path: visual.path.clone(),
                 title: visual.title.clone(),
+                caption: None,
             });
         }
         return vec![
@@ -1086,12 +1099,16 @@ fn input(
             prefill: None,
             multiline: false,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         }],
         resolved: answer.is_some(),
         answers: answer.map(|label| {
             vec![UserInputAnswer {
                 question_id: question_id.into(),
                 labels: vec![label.into()],
+                note: None,
             }]
         }),
         asked_at_ms: None,
@@ -1890,6 +1907,9 @@ pub(crate) fn asking() -> Vec<Step> {
             multi_select: false,
             kind: None,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         }]),
     ]
 }

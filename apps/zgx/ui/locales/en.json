@@ -700,6 +700,7 @@
       "expand": "Expand",
       "more": "+{n}",
       "attach": "Attach",
+      "attach_files": "Attach files",
       "stop_dictating": "Stop dictating",
       "dictate": "Dictate",
       "queue_message": "Queue message",
@@ -721,7 +722,8 @@
         "plan": "Describe the goal. The agent writes a plan and changes nothing.",
         "plan_asks": "Describe the goal. The agent writes a plan and waits for your OK.",
         "mission": "Describe the goal. The agent writes a plan and waits for your OK.",
-        "mission_runs": "Describe the goal. The agent plans it and runs the steps on threads."
+        "mission_runs": "Describe the goal. The agent plans it and runs the steps on threads.",
+        "inline_answer": "Or type an answer"
       },
       "message": "Message",
       "branch": {
@@ -795,7 +797,10 @@
         "size_steps": "up to {n} steps",
         "size_no_limit": "no limit",
         "size_next": "next size"
-      }
+      },
+      "question_above": "1 question waiting above",
+      "request_changes": "Request changes",
+      "changes_need_words": "Type what to change, then press Request changes."
     },
     "markdown": {
       "fit_content": "Fit content",
@@ -806,6 +811,20 @@
       "done": "Done",
       "run_code": "Run in terminal",
       "run": "Run"
+    },
+    "python_run": {
+      "run": "Run Python",
+      "stop": "Stop Python",
+      "stop_label": "Stop",
+      "clear": "Clear result",
+      "running": "Running…",
+      "done": "Done in {time}, exit {code}",
+      "stopped": "Stopped",
+      "timed_out": "Timed out after 10 s",
+      "failed": "Couldn't run: {reason}",
+      "cut": "(Output cut at 64 KB.)",
+      "figure": "Figure {n}, from plt.show()",
+      "sandbox": "Sandbox: no network, reads only system files, Python and this chat's folder, writes only to a scratch folder, the script is stopped after 10 s"
     },
     "mermaid": {
       "show_source": "Show source",
@@ -921,7 +940,8 @@
       "selected_numbered": "{n}. Selected text",
       "selected": "Selected text",
       "user_comment": "User comment: {comment}",
-      "steered": "Steered together"
+      "steered": "Steered together",
+      "from_visual": "From {title}"
     },
     "reply_picture": {
       "not_a_picture": "Not a picture this can show",
@@ -1282,11 +1302,46 @@
       "loading": "Loading {title}…",
       "unavailable": "{title} couldn't be shown",
       "stopped": "The visual stopped",
-      "copy_error": "Copy error"
+      "copy_error": "Copy error",
+      "reset": "Reset",
+      "data_table": "Data table",
+      "building": "Building {title}…",
+      "building_untitled": "Building visual…",
+      "send": "Send to the agent",
+      "sent": "Sent",
+      "send_waits": "Answer the agent's question first: that wasn't sent."
+    },
+    "quiz": {
+      "question": "Question {i}/{n}",
+      "previous": "Previous question",
+      "next_question": "Next question",
+      "hint": "Hint",
+      "check": "Check",
+      "correct": "Correct",
+      "not_quite": "Not quite",
+      "not_all": "Not all of them: see the marks above",
+      "next": "Next",
+      "to_unanswered": "To the unanswered question",
+      "see_results": "See results",
+      "back_to_results": "Back to results",
+      "results": "Results",
+      "correct_count": "correct",
+      "score": "score",
+      "you_chose": "You chose: {choices}",
+      "try_again": "Try again",
+      "explain": "Explain questions {list}",
+      "harder": "5 harder questions",
+      "asked": "Sent to the agent",
+      "choose_one": "Choose one answer.",
+      "choose_all": "Choose every correct answer.",
+      "answer": "Your answer",
+      "send": "Send to the agent",
+      "sent": "Sent"
     },
     "links": {
       "open": "Open",
       "open_in_panel": "Open in browser panel",
+      "open_in_side_panel": "Open in side panel",
       "open_outside": "Open in default browser",
       "copy_link": "Copy link",
       "copy_address": "Copy address",
@@ -1294,6 +1349,15 @@
       "reveal": "Reveal in Finder",
       "copied_link": "Link copied",
       "link_not_ready": "This chat's link isn't ready yet"
+    },
+    "file_card": {
+      "open_in_panel": "Open in Files panel",
+      "gone": "No longer on this machine",
+      "detail": "{kind}, {size}",
+      "more_lines": "{n, plural, one {# more line} other {# more lines}}",
+      "more_in_panel": "More in the Files panel",
+      "text": "Text",
+      "file": "File"
     },
     "emoji_picker": {
       "search": "Search emoji",
@@ -1459,7 +1523,9 @@
         "quiet": "{title} quiet {n}m",
         "background": "{title} waits on a background command",
         "running": "{n} running",
-        "finished": "Finished"
+        "finished": "Finished",
+        "hide": "Hide plan",
+        "show": "Show Plan"
       }
     },
     "profiles": {
@@ -1637,13 +1703,17 @@
       "mention": "Mention"
     },
     "html_picks": {
-      "close": "Close",
-      "pill": "{title} · {n, plural, one {# group to pick} other {# groups to pick}}",
-      "left": "{n, plural, one {# group to pick} other {# groups to pick}}",
+      "pill": "{title} · {n, plural, one {# group left} other {# groups left}}",
+      "left": "{n, plural, one {# group left} other {# groups left}}",
       "sent": "Picked options",
-      "close_page": "Close page",
-      "pill_edit": "{title} · change picks",
-      "left_edit": "change picks"
+      "pill_done": "{title} · all picked",
+      "left_done": "all picked",
+      "collapse": "Collapse",
+      "change": "Change",
+      "not_picked": "not picked",
+      "hint": "Click outside, press Esc or type to collapse.",
+      "hint_done": "All picked. Press Enter in the composer to send, or type a note.",
+      "skip_page": "Skip this page"
     },
     "html_card": {
       "closed": "Closed",
@@ -1653,6 +1723,7 @@
       "count_partly_sent_chosen": "{n}/{total} sent · {chosen} chosen",
       "count_all": "All {total} chosen",
       "count_chosen": "{n}/{total} chosen",
+      "picked": "{n}/{total} picked",
       "open_in_browser": "Open in browser",
       "live": "Live",
       "source": "Source",
@@ -1754,6 +1825,17 @@
         "title": "Its root file isn't there",
         "body": "Its % !TEX root line names {root}, which doesn't exist."
       }
+    },
+    "ask_card": {
+      "waiting": "Waiting for you",
+      "recommended": "Recommended",
+      "note": "Add a note (optional)",
+      "choose_one": "Choose one option.",
+      "choose_many": "Choose one or more.",
+      "send": "Send choice",
+      "sending": "Sending…",
+      "quick_reply": "Quick reply",
+      "failed": "Your answer didn't go. Try again."
     }
   },
   "settings": {

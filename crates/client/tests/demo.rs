@@ -527,6 +527,7 @@ fn zeron_proto_answer(question_id: &str, label: &str) -> zeron_client::UserInput
     zeron_client::UserInputAnswer {
         question_id: question_id.into(),
         labels: vec![label.into()],
+        note: None,
     }
 }
 

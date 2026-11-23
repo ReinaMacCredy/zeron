@@ -792,7 +792,110 @@ end
 stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
-stub.answer = function() end
+local INLINE: { [string]: any } = {
+	q9 = {
+		header = "Build",
+		text = "How should the TTL change go in?",
+		note = true,
+		inline = true,
+		options = {
+			{ value = "Config only", label = "Config only", detail = "Change the TTL in config/cache.toml, nothing else." },
+			{ value = "Config and an alert", label = "Config and an alert", detail = "Alert when the cache hit rate drops under 80%.", recommended = true },
+			{ value = "Adaptive TTL", label = "Adaptive TTL", detail = "Most flexible, but adds a new dependency." },
+		},
+	},
+	q10 = {
+		header = "Next",
+		text = "What next?",
+		quick = true,
+		inline = true,
+		options = {
+			{ value = "Open a PR", label = "Open a PR" },
+			{ value = "Rerun the bench", label = "Rerun the bench" },
+			{ value = "Stop here", label = "Stop here" },
+		},
+	},
+}
+local function inline_block(request: string, answered: { [string]: any }?): any
+	local q = INLINE[request]
+	if not answered then
+		return { id = `in-{request}`, kind = "line", line = "input", outcome = "pending", title = q.header, request = request, question = q }
+	end
+	local block = { id = `in-{request}`, kind = "line", line = "input", outcome = "answered", text = `{q.header} → {answered.shown}`, answers = { { label = q.header, answer = answered.shown, skipped = false } } }
+	if q.quick then
+		block.quick = true
+		block.reply = answered.reply
+	end
+	return block
+end
+local function land_inline(request: string, values: { string }, words: string?)
+	local reply = if #values > 0 then table.concat(values, ", ") else (words or "")
+	local shown = if #values == 0 then `“{reply}”` elseif words and words ~= "" then `{reply} “{words}”` else reply
+	for i, m in store.messages:peek() do
+		if m.id == `inline-{request}` then
+			store.messages:set_key({ i, "blocks", 2 }, inline_block(request, { shown = shown, reply = reply }))
+		end
+	end
+	if opened then
+		publish(opened, { ask = ui.null })
+	end
+end
+-- `test_answer_held`: an inline answer stays on its way until it's let go.
+local answer_held = ui.state("test_answer_held", false)
+local held_answers: { () -> () } = {}
+ui.effect(function()
+	if not answer_held:get() then
+		local go = held_answers
+		held_answers = {}
+		for _, f in go do
+			f()
+		end
+	end
+end)
+stub.answer = function(id: string, request: string, answer: any?): any
+	note(`answer:{id}:{request}`)
+	local a = answer or {}
+	note(`answered:{id}:{request}:{table.concat(a.values or {}, "+")}:{a.note or ""}:{a.text or ""}`)
+	if not INLINE[request] then
+		return settled(nil)
+	end
+	local function land()
+		land_inline(request, a.values or {}, if a.note and a.note ~= "" then a.note else a.text)
+	end
+	if answer_held:peek() then
+		table.insert(held_answers, land)
+		return { after = function() end }
+	end
+	land()
+	return settled(nil)
+end
+stub.request_changes = function(id: string, request: string, text: string): any
+	note(`request_changes:{id}:{request}:{text}`)
+	publish(id, { ask = ui.null })
+	return settled(nil)
+end
+for request in INLINE do
+	ui.command {
+		id = `ask_inline_{request}`,
+		title = `The agent asks {request} in its reply`,
+		run = function()
+			if not opened then
+				return
+			end
+			publish(opened, { ask = { request = request, kind = "question", question = INLINE[request] } })
+			store.messages:push {
+				id = `inline-{request}`,
+				role = "assistant",
+				text = "Before I change it, one thing to settle.",
+				model = "Opus",
+				blocks = {
+					{ id = "t1", kind = "text", text = "Before I change it, one thing to settle." },
+					inline_block(request),
+				},
+			}
+		end,
+	}
+end
 -- A queued message sent on (steered in): noted; `steer_fails` makes the
 -- next one not go.
 local STEER_FAILS = ui.state("fixture_steer_fails", false)
@@ -876,9 +979,12 @@ local QUEUED_FILES = {
 }
 -- (`q2`'s words as the host keeps them: a test may give it a mention.)
 local queued_words = ui.state("test_queued_words", "Queued with files")
+-- The edit each chat holds, as the host keeps its lease: finishing one it doesn't hold is refused.
+local leases: { [string]: string } = {}
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
+	leases[id] = item
 	local s = table.clone(META[id] or {})
 	local q = table.clone(s.queue or {})
 	local words = "Queued words"
@@ -904,6 +1010,10 @@ stub.queue_finish = function(id: string, item: string, action: string, text: str
 		files = `:files={table.concat(names, ",")}`
 	end
 	note(`queue_finish:{id}:{item}:{action}:{text or ""}{files}`)
+	if leases[id] ~= item then
+		return { after = function(_self: any, _ok: any, err: (any) -> ()) err({ message = "missing" }) end }
+	end
+	leases[id] = nil
 	local was = "Queued words"
 	for _, row in (META[id] or {}).queue or {} do
 		if row.id == item then
@@ -1625,6 +1735,23 @@ ui.command {
 				},
 			})
 		end
+	end,
+}
+
+ui.command {
+	id = "visual_sends",
+	title = "A visual sends the person's message",
+	run = function()
+		local RowProps = require("@app/screens/chat/row_props")
+		local went = RowProps.visual_send(opened, store.session:peek(), "Explain the quiz questions I got wrong: 1, 3.", "Quick check")
+		note(`visual_send:{went}`)
+	end,
+}
+ui.command {
+	id = "visual_sent_lands",
+	title = "A message a visual sent, in the transcript",
+	run = function()
+		store.messages:push { id = "vsent", role = "user", text = "Explain the quiz questions I got wrong: 1, 3.", from_visual = "Quick check" }
 	end,
 }
 
@@ -2966,6 +3093,13 @@ files_stub.reveal = function(target: any, path: string): any
 	note(`reveal:{target.chat}:{target.root}:{path}`)
 	return settled(nil)
 end
+files_stub.read = function(_target: any, path: string): any
+	return settled({ path = path, text = '[package]\nname = "atlas"\n', size = 26, encoding = "utf8", truncated = false })
+end
+files_stub.list = function(_target: any, dir: string): any
+	local entries = if dir == "" then { { name = "Cargo.toml", path = "Cargo.toml", dir = false, kind = "file", size = 26, ignored = false, readonly = false } } else {}
+	return settled({ can_move = false, can_delete = false, truncated = false, entries = entries })
+end
 ui.command {
 	id = "link_turn",
 	title = "A turn with file links",
@@ -2982,7 +3116,7 @@ ui.command {
 		}
 		local reply = "The fix is in [the parser](src/parse.rs#L12) and [the host](/work/atlas/src/main.rs:40). "
 			.. "Not [this one](/etc/hosts.conf), nor [the docs](https://example.com/a.rs). "
-			.. "PR: **https://github.com/zeronsh/example/pull/1**."
+			.. "PR: **https://github.com/zeronsh/example/pull/1**.\n\nSee Cargo.toml\n\nversion 1.2"
 		store.messages:push {
 			id = "la1",
 			role = "assistant",

@@ -46,6 +46,7 @@ local opened_at = 0
 local Icon = require("@self/icon")
 local Markdown = require("@self/markdown")
 local UserMessage = require("@self/user_message")
+local AskCard = require("@self/ask_card")
 local Lightbox = require("@self/lightbox")
 local ReplyPicture = require("@self/reply_picture")
 local Visual = require("@self/visual")
@@ -222,10 +223,11 @@ export type Props = {
 	open_sender: ((chat: string, title: string) -> ())?,
 	-- Those links' context menus where they aren't the web's (ds/markdown's
 	-- `link_menu`).
-	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
+	link_menu: ((target: string, selected: boolean?) -> { Markdown.LinkEntry }?)?,
 	-- What a link is drawn as: one of the chat's files or its agent's
 	-- skills, as a chip (ds/markdown `link_chip`).
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
+	file_cards: Markdown.FileCards?,
 	-- A find over the conversation (screens/chat/find): its matches marked
 	-- in every message, the current one's message scrolled to and its block
 	-- into view. `current().row` is its message's place in `messages`.
@@ -238,6 +240,7 @@ export type Props = {
 	pages: HtmlCard.Pages?,
 	-- A secret card's answer: the secret, or nil to decline (a promise).
 	on_secret: ((request: string, secret: string?) -> any)?,
+	ask_card: { asked: (request: string) -> boolean, answer: (request: string, answer: any) -> any }?,
 	-- A computer card's answer (a promise); whether its first-use words show, and that one was allowed.
 	on_computer: ((request: string, question: string, answer: string) -> any)?,
 	computer_disclosure: (() -> boolean)?,
@@ -256,6 +259,7 @@ export type Props = {
 	file_link: ((target: string) -> boolean)?,
 	-- A shell block's Run: the chat's terminal (ds/markdown's `run_code`).
 	run_code: Markdown.RunCode?,
+	on_visual_send: ((text: string, title: string) -> boolean)?,
 	-- A review's findings, where the host put its `review` row (screens/chat/review's Block); without it the row is empty.
 	review_block: ((m: Message) -> Node)?,
 	over: ((t: Handle) -> Node)?,
@@ -833,16 +837,21 @@ type View = {
 	wash: (() -> string?)?,
 	working: any?,
 	pages: HtmlCard.Pages?,
+	page_selection: ((s: any?) -> ())?,
+	page_mention: ((text: string, who: string) -> ())?,
 	on_secret: ((request: string, secret: string?) -> any)?,
+	ask_card: { asked: (request: string) -> boolean, answer: (request: string, answer: any) -> any }?,
 	on_computer: ((request: string, question: string, answer: string) -> any)?,
 	computer_disclosure: (() -> boolean)?,
 	on_computer_approved: (() -> ())?,
 	on_computer_enable: (() -> ())?,
 	file_link: ((target: string) -> boolean)?,
+	file_cards: Markdown.FileCards?,
 	open_file: ((path: string) -> ())?,
 	file_opens: ((path: string) -> boolean)?,
 	on_sign_in: (() -> ())?,
 	run_code: Markdown.RunCode?,
+	on_visual_send: ((text: string, title: string) -> boolean)?,
 }
 
 -- A reply's thought being written, for its row (ds/activity's `thought`): the
@@ -1077,6 +1086,8 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				device = b.device,
 				source = b.source,
 				pages = if view then view.pages else nil,
+				on_select = if view then view.page_selection else nil,
+				on_mention = if view then view.page_mention else nil,
 			}
 		end
 		if b.kind == "html_files" then
@@ -1084,7 +1095,38 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
-			return Visual { id = b.id, path = b.path, source = b.source, title = b.title, device = b.device }
+			local send = if view then view.on_visual_send else nil
+			return Visual {
+				id = b.id,
+				path = b.path,
+				source = b.source,
+				title = b.title,
+				caption = (b :: any).caption,
+				device = b.device,
+				on_send = if send
+					then function(text: string): boolean
+						return send(text, b.title or "")
+					end
+					else nil,
+			}
+		end
+		if (b :: any).kind == "visual_pending" then
+			local title = b.title
+			return status.looping({
+				class = "visual-pending",
+				w_full = true,
+				ui.text {
+					if title and title ~= ""
+						then locale.s("ds.visual.building", { title = title })
+						else locale.s("ds.visual.building_untitled"),
+					literal = true,
+					text_size = "$zeron.visual.text.sm.size",
+					line_height = "$zeron.visual.text.sm.line",
+					color = "$text.tertiary",
+				},
+			}, function(el)
+				return anime.animate(el, { opacity = { 1, 0.45 }, duration = 600, ease = "inOutSine", loop = true, alternate = true })
+			end, 1200)
 		end
 		-- Pictures an agent showed: one alone, or several on a tray, among
 		-- the reply's pictures in the lightbox. More arriving while it works
@@ -1135,7 +1177,34 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				return brow:get().line or ""
 			end, function(line: string): Node
 				if line == "input" then
-					return Rows.Question { key = key, now = now_b, find = find }
+					local card = if view then view.ask_card else nil
+					return ui.presence(function(): string
+						local n = now_b()
+						if n.outcome == "pending" and n.question and n.request and card and card.asked(n.request) then
+							return `card:{n.request}`
+						elseif n.quick and n.reply then
+							return "quick"
+						end
+						return "row"
+					end, function(mode: string): Node
+						local n = now_b()
+						if string.sub(mode, 1, 5) == "card:" then
+							return AskCard.Card {
+								request = n.request,
+								question = n.question,
+								answer = function(a: any): any
+									return card.answer(n.request, a)
+								end,
+							}
+						elseif mode == "quick" then
+							return ui.column {
+								w_full = true,
+								pb = ui.raw(14, "a quick reply in the reply, as the design's"),
+								UserMessage { id = `quick-{key}`, text = n.reply, plain = true, label = locale.s("ds.ask_card.quick_reply") },
+							}
+						end
+						return Rows.Question { key = key, now = now_b, find = find }
+					end, { w_full = true, min_w = 0 })
 				elseif line == "secret" then
 					return Rows.Secret { key = key, now = now_b, find = find, on_answer = if view then view.on_secret else nil }
 				elseif line == "computer_consent" or line == "computer_foreground" then
@@ -1204,6 +1273,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			file_link = if view then view.file_link else nil,
 			link_menu = if view then view.link_menu else nil,
 			link_chip = if view then view.link_chip else nil,
+			file_cards = if view then view.file_cards else nil,
 			find = if view and view.find then view.find(`{m.id}:{b.id}`) else nil,
 			wash = if view then view.wash else nil,
 			group = `reply:{m.id}`,
@@ -1557,6 +1627,7 @@ local function reply(
 			file_link = if view then view.file_link else nil,
 			link_menu = if view then view.link_menu else nil,
 			link_chip = if view then view.link_chip else nil,
+			file_cards = if view then view.file_cards else nil,
 			find = if view and view.find then view.find(`{m.id}:r`) else nil,
 			wash = if view then view.wash else nil,
 			group = `reply:{m.id}`,
@@ -2868,11 +2939,44 @@ local function Transcript(props: Props): Node
 			end
 		end,
 	}
+	local from_page, page_at = false, 0
 	local function settle()
+		from_page = false
 		layer.settle(text_of)
 	end
+	local function page_selection(s: any?)
+		if s then
+			from_page, page_at = true, ui.now()
+			layer.offer(s)
+		elseif from_page then
+			from_page = false
+			layer.clear()
+		end
+	end
+	local function page_mention(text: string, who: string)
+		local notes = props.annotate
+		if notes and notes.mention then
+			notes.mention({ text = text, who = who })
+		end
+	end
+	local function selected_file(s: any): { any }
+		local link_menu = props.link_menu
+		local words = if link_menu and #s.text <= 1024 then string.match(s.text, "^[ \t\r\n`'\"(<%[]*(.-)[ \t\r\n`'\")>%].,;:]*$") else nil
+		if not link_menu or not words or words == "" or string.find(words, "[ \t\r\n]") then
+			return {}
+		end
+		return link_menu(words, true) or {}
+	end
 	local function offers(s: any): { any }
-		return layer.offers(s, text_of)
+		local out = layer.offers(s, text_of)
+		local file = selected_file(s)
+		if #file > 0 then
+			if #out > 0 then
+				table.insert(out, { separator = true })
+			end
+			table.move(file, 1, #file, #out + 1, out)
+		end
+		return out
 	end
 	-- Away from the end long enough to mean it: a moment's leaving isn't,
 	-- nor a send's glide (it steps off the end to rise to it again).
@@ -3833,6 +3937,7 @@ local function Transcript(props: Props): Node
 						UserMessage {
 							id = m.id,
 							text = m.text,
+							from = (m :: any).from_visual,
 							steered = m.steered,
 							chat_mark = chat_mark,
 							attachments = m.attachments,
@@ -3869,7 +3974,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered, branch_actions(m, state)),
 						waiting_line(state, props.on_retry, props.working, compaction_wait, wait_since_of, props.turn_state),
 					})
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, plan_lookup = if plan_call then plan_lookup else nil, plan_closed = if plan_call then plan_closed else nil, plan_ref = plan_ref, plan_place = function(step: string, ref: Ref, gone: boolean?)
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, file_cards = props.file_cards, open_subagent = props.on_open_subagent, threads = props.threads, plan_call = plan_call, plan = if plan_call then plan_card else nil, plan_lookup = if plan_call then plan_lookup else nil, plan_closed = if plan_call then plan_closed else nil, plan_ref = plan_ref, plan_place = function(step: string, ref: Ref, gone: boolean?)
 								if not gone then
 									step_refs[step] = ref
 								elseif step_refs[step] == ref then
@@ -3877,7 +3982,7 @@ local function Transcript(props: Props): Node
 								end
 							end, handback = function(step: string): Threads.Handback?
 							return handbacks:get()[step]
-						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, on_secret = props.on_secret, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code })),
+						end, plan_body = plan_body, plan_found = plan_found, find = find_for, working = props.working, wash = washed, pages = props.pages, page_selection = if props.annotate then page_selection else nil, page_mention = if props.annotate then page_mention else nil, on_secret = props.on_secret, ask_card = props.ask_card, on_computer = props.on_computer, computer_disclosure = props.computer_disclosure, on_computer_approved = props.on_computer_approved, on_computer_enable = props.on_computer_enable, file_link = props.file_link, open_file = tool_open, file_opens = tool_opens, on_sign_in = props.on_sign_in, actions = branch_actions(m, state), run_code = props.run_code, on_visual_send = props.on_visual_send })),
 				-- The wait for a compaction after the last row (the agent's,
 				-- once its turn ended): in the trailer's place.
 				ui.presence(function(): string?
@@ -4122,12 +4227,19 @@ local function Transcript(props: Props): Node
 				w_full = true,
 				h_full = true,
 				more = offers,
-				on_release = if props.annotate
-					then function()
-						-- (A turn on: the release ends the gesture first.)
-						ui.after(0, settle)
-					end
-					else nil,
+				on_release = function()
+					-- (A turn on: the release ends the gesture first.)
+					ui.after(0, function()
+						local s = SelectionMenu.read()
+						if s then
+							selected_file(s)
+						end
+						-- (A press in a page may be heard here too, after the page told its selection: that offer stays.)
+						if props.annotate and (s or not from_page or ui.now() - page_at > 400) then
+							settle()
+						end
+					end)
+				end,
 				if props.session
 					then ui.presence(function(): string
 						return (props.session :: State<string?>):get() or ""

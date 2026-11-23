@@ -121,3 +121,5 @@ Switch off **The cache is about to expire** and **The work changed**. Zeron then
 ## Long context for Claude
 
 For Claude models that support it, the model picker has a **Context** card. **Long context** switches between a 1M and a 200K window, and its slider sets when the chat compacts. Either change starts a new Claude process on your next message.
+
+With an empty composer, Shift+Up and Shift+Down step the same sizes without opening the picker: 200K, 300K, 400K, 600K, 800K and 1M. The context ring says the tokens in use and the new size for a moment, for example **592K / 1M**, in the warning color when the size is below what the chat holds. With text in the composer the keys select text as usual.

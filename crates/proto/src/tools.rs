@@ -200,7 +200,7 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             ),
             tool(
                 "html_render",
-                "Show a finished HTML page inline in this thread, above the reply.",
+                "Show a finished HTML page inline in this thread, in place in the reply.",
             ),
             tool(
                 "show_visual",

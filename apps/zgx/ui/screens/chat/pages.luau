@@ -207,7 +207,7 @@ local function chip_in(text: string, code: string, shown: string): string
 			return if text == "" then shown else `{text} {shown}`
 		end
 		local before, after = string.sub(text, s - 1, s - 1), string.sub(text, e + 1, e + 1)
-		if (before == "" or string.find(before, "^%s")) and (after == "" or string.find(after, "^%s")) then
+		if (before == "" or string.find(before, "^[ \t\r\n\f\v]")) and (after == "" or string.find(after, "^[ \t\r\n\f\v]")) then
 			return string.sub(text, 1, s - 1) .. shown .. string.sub(text, e + 1)
 		end
 		at = e + 1
@@ -250,6 +250,15 @@ function M.edited(chat: string, words: string, cards: { any }, except: string): 
 	return { text = text, cargo = cargo }
 end
 
+-- (The composer's field takes a pick's words a frame or so later: the draft's next change, that soon, is the pick's; any other is the person's typing.)
+local placing: { [string]: boolean } = {}
+
+function M.take_placed(key: string): boolean
+	local was = placing[key] == true
+	placing[key] = nil
+	return was
+end
+
 function M.place(key: string, card: string, title: string, p: any, sent: { list: { any }, locked: { [string]: boolean }, closed: boolean })
 	local group = p.group or ""
 	if sent.closed or (group ~= "" and sent.locked[group]) then
@@ -280,6 +289,10 @@ function M.place(key: string, card: string, title: string, p: any, sent: { list:
 			name = g.name
 		end
 	end
+	placing[key] = true
+	ui.after(200, function()
+		placing[key] = nil
+	end)
 	ui.batch(function()
 		if at then
 			local it = list[at]
@@ -300,12 +313,12 @@ function M.place(key: string, card: string, title: string, p: any, sent: { list:
 				shared.set_cargo_of(key, list)
 				swap_token(key, it.shown, nil)
 			end
-			return
+		else
+			local it = staged(key, card, title, p, name, locked)
+			table.insert(list, it)
+			shared.set_cargo_of(key, list)
+			shared.put_words(key, it.shown)
 		end
-		local it = staged(key, card, title, p, name, locked)
-		table.insert(list, it)
-		shared.set_cargo_of(key, list)
-		shared.put_words(key, it.shown)
 	end)
 end
 
@@ -326,7 +339,7 @@ function M.ready(chat: string, card: string, title: string, message: string, gro
 	M.shown:set(all)
 end
 
-local function left_of(chat: string, messages: { any }, picked: { any }): { { page: any, left: { any } } }
+local function left_of(chat: string, messages: { any }, picked: { any }, all: boolean?): { { page: any, left: { any } } }
 	messages = M.with_queue(chat, messages)
 	local here: { [string]: boolean } = {}
 	for _, m in messages do
@@ -348,7 +361,7 @@ local function left_of(chat: string, messages: { any }, picked: { any }): { { pa
 					table.insert(left, g)
 				end
 			end
-			if not sent.closed and #left > 0 then
+			if not sent.closed and (#left > 0 or all) then
 				table.insert(out, { page = e, left = left })
 			end
 		end
@@ -356,33 +369,36 @@ local function left_of(chat: string, messages: { any }, picked: { any }): { { pa
 	return out
 end
 
+M.tray = ui.state("chat_picks_tray", false)
+M.focus = ui.state("chat_picks_focus", nil :: string?)
+
 function M.waiting(chat: string?, messages: { any }): (any?, number)
 	if not chat then
 		return nil, 0
 	end
 	local picked = shared.cargo_of(chat)
-	local list = left_of(chat, messages, picked)
-	local last = list[#list]
-	if last then
-		return last.page, #last.left
+	local drafted: { [string]: boolean } = {}
+	for _, it in picked do
+		if it.kind == "pick" then
+			drafted[it.card] = true
+		end
 	end
-	-- Nothing left to pick, in a queued message's edit: its page still, to change a pick on.
-	local s = store.session:get()
-	local edited = false
-	for _, r in (if s and s.id == chat then s.queue else nil) or {} do
-		edited = edited or M.editing:get()[r.id] ~= nil
-	end
-	local found: any = nil
-	if edited then
-		for _, e in M.shown:get()[chat] or {} do
-			for _, it in picked do
-				if it.kind == "pick" and it.card == e.card then
-					found = e
-				end
+	local focus = M.focus:get()
+	local best: any = nil
+	for _, it in left_of(chat, messages, picked, true) do
+		if #it.left > 0 or drafted[it.page.card] then
+			if it.page.card == focus then
+				return it.page, #it.left
+			end
+			if not best or drafted[it.page.card] or not drafted[best.page.card] then
+				best = it
 			end
 		end
 	end
-	return found, 0
+	if best then
+		return best.page, #best.left
+	end
+	return nil, 0
 end
 
 -- (A page this message picks on says what it left in its own block.)
@@ -419,7 +435,55 @@ function M.pages(key: () -> string?, messages: State<{ any }>, session: () -> an
 		local s = session()
 		return { chat = if s then s.id else nil, device = if s then s.device else nil, root = if s then s.cwd else nil }
 	end
+	local function tray_shows(card: string): boolean
+		local k = key()
+		local e = if k and M.tray:get() then M.waiting(k, messages:get()) else nil
+		return e ~= nil and e.card == card
+	end
+	-- (Its press is outside the tray and closes it: the click after goes by what the tray showed then.)
+	local pressed: { card: string, open: boolean }? = nil
 	return {
+		tray = function(card: string): { n: number, total: number, open: boolean }?
+			local k = key()
+			local page: any = nil
+			for _, e in (if k then M.shown:get()[k] else nil) or {} do
+				if e.card == card then
+					page = e
+				end
+			end
+			if not k or not page then
+				return nil
+			end
+			local sent = M.sent_of(M.with_queue(k, messages:get()), page.title, page.message)
+			local chosen: { [string]: boolean } = {}
+			for _, it in shared.cargo_of(k) do
+				if it.kind == "pick" and it.card == card then
+					chosen[it.group or ""] = true
+				end
+			end
+			local n, locked = 0, 0
+			for _, g in page.groups do
+				n += if chosen[g.code] or sent.locked[g.code] then 1 else 0
+				locked += if sent.locked[g.code] then 1 else 0
+			end
+			if sent.closed or locked >= #page.groups then
+				return nil
+			end
+			return { n = n, total = #page.groups, open = tray_shows(card) }
+		end,
+		hold_tray = function(card: string)
+			pressed = { card = card, open = tray_shows(card) }
+		end,
+		toggle_tray = function(card: string)
+			local open = if pressed and pressed.card == card then pressed.open else tray_shows(card)
+			pressed = nil
+			if open then
+				M.tray:set(false)
+			else
+				M.focus:set(card)
+				M.tray:set(true)
+			end
+		end,
 		chosen = function(card: string): { any }
 			local k = key()
 			if not k then

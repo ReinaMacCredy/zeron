@@ -122,6 +122,9 @@ impl SecretRequests {
             multiline: false,
             approval: false,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         };
         let key = p
             .client_request_id

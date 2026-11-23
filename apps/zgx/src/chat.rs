@@ -909,6 +909,10 @@ struct View {
     /// Prompts not yet in the engine's transcript, by chat. They outlive
     /// the open view: a send can still be in flight while another chat shows.
     pending: RefCell<HashMap<String, Vec<Pending>>>,
+    /// The queued message each chat has in its composer to edit, by chat:
+    /// its lease, held while the composer has its text, whichever chat
+    /// shows meanwhile (the window's; a lane lets go of its chat's).
+    editing: RefCell<HashMap<String, Lease>>,
     /// Moves on every open: an older watch's frames are dropped.
     generation: Cell<u64>,
     /// A finished subagent's transcript, read whole from its uploaded blob
@@ -970,11 +974,12 @@ impl Pending {
             );
         }
         // (Its passages as chips, as the sent message shows them.)
-        let Said { words, quotes, picks, comments, badges, chats, steered } = said(&self.words);
+        let Said { words, from_visual, quotes, picks, comments, badges, chats, steered } = said(&self.words);
         Value::record([
             ("id", Value::from(self.id.as_str())),
             ("role", Value::from("user")),
             ("text", Value::from(words.as_str())),
+            ("from_visual", from_visual.as_deref().map_or(Value::Nil, Value::from)),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &badges, &chats)),
             ("steered", steered),
             ("waiting", Value::from(self.waiting)),
@@ -1232,9 +1237,6 @@ struct Open {
     /// The session as last published, to republish the transcript when its
     /// turn starts or ends (the prompt's working line follows it).
     session_seen: Json,
-    /// A queued message being edited here: its lease, held while the
-    /// composer has its text.
-    editing: Option<Lease>,
     /// A prompt went and its turn hasn't been seen starting: its entry lands first on a slow session row.
     awaiting_turn: std::cell::Cell<Option<std::time::Instant>>,
     watches: Vec<Watch>,
@@ -1293,6 +1295,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
+        editing: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
         predicts: true,
@@ -1622,9 +1625,12 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let v = pick(&args);
         async move { crate::plugins::preview::refuse("chat.queue_edit")?; v.begin_edit(args).await.map_err(String::from) }
     });
-    let pick = which.clone();
+    let (pick, main) = (which.clone(), view.clone());
     host.async_action("chat.queue_finish", move |args| {
+        let id = args.field("id").map(text).unwrap_or_default();
         let v = pick(&args);
+        // (An edit the window's composer put away is its view's, though a pane may have that chat open since.)
+        let v = if !v.editing.borrow().contains_key(&id) && main.editing.borrow().contains_key(&id) { main.clone() } else { v };
         async move { crate::plugins::preview::refuse("chat.queue_finish")?; v.finish_edit(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A project's branches, from git where it is (the shipping app's
@@ -1664,6 +1670,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
         rpc: RefCell::default(),
         open: RefCell::default(),
         pending: RefCell::default(),
+        editing: RefCell::default(),
         generation: Cell::new(0),
         snapshot: Cell::new(false),
         predicts: false,
@@ -3034,6 +3041,10 @@ impl View {
         if same {
             return;
         }
+        // (`predicts`: the window's own view. A lane's slot outlives its tab, so a lease kept there would hold its message for good.)
+        if !self.predicts {
+            self.editing.borrow_mut().clear();
+        }
         let chats = CHATS.with(Rc::clone);
         let was_snapshot = self.snapshot.replace(false);
         self.generation.set(self.generation.get() + 1);
@@ -3784,7 +3795,10 @@ impl View {
             let offline = chat_offline(no_connection, engine::get().unreachable());
             match open.as_ref() {
                 None => Value::Nil,
-                Some(open) => session_value(&chats, open, offline, self.sending(&open.id)),
+                Some(open) => {
+                    let editing = self.editing.borrow();
+                    session_value(&chats, open, offline, self.sending(&open.id), editing.get(&open.id).map(|e| e.item.as_str()))
+                }
             }
         };
         self.session.set(value);
@@ -4486,9 +4500,7 @@ impl View {
             lease: answer["leaseId"].as_str().unwrap_or_default().to_owned(),
             hash: answer["baseTextHash"].clone(),
         };
-        if let Some(open) = self.open.borrow_mut().as_mut().filter(|o| o.id == id) {
-            open.editing = Some(lease.clone());
-        }
+        self.editing.borrow_mut().insert(id.clone(), lease.clone());
         self.publish_session();
         self.keep_lease(id, lease, answer["expiresAtMs"].as_f64());
         // Its files too, as the composer's chips: already on the chat's
@@ -4517,12 +4529,7 @@ impl View {
                 let wait = expires.map_or(10_000., |at| ((at - now) / 2.).clamp(1_000., 30_000.));
                 zgx::timer::sleep(std::time::Duration::from_millis(wait as u64)).await;
                 let Some(me) = weak.upgrade() else { return };
-                let held = me
-                    .open
-                    .borrow()
-                    .as_ref()
-                    .and_then(|o| o.editing.as_ref())
-                    .is_some_and(|e| e.lease == lease.lease);
+                let held = me.editing.borrow().get(&chat).is_some_and(|e| e.lease == lease.lease);
                 if !held {
                     return;
                 }
@@ -4550,13 +4557,7 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let id = args.field("id").map(text).unwrap_or_default();
         let action = args.field("action").map(text).unwrap_or_else(|| "cancel".into());
-        let lease = self
-            .open
-            .borrow_mut()
-            .as_mut()
-            .filter(|o| o.id == id)
-            .and_then(|o| o.editing.take())
-            .ok_or("missing")?;
+        let lease = self.editing.borrow_mut().remove(&id).ok_or("missing")?;
         self.publish_session();
         let chat = chats.chat(&id).ok_or("missing")?;
         let mut params = json!({
@@ -4914,12 +4915,24 @@ fn steered_parts(text: &str) -> Option<Vec<&str>> {
 
 struct Said {
     words: String,
+    from_visual: Option<String>,
     quotes: Vec<(String, String)>,
     picks: Vec<Pick>,
     comments: Vec<(String, String)>,
     badges: Vec<Value>,
     chats: Vec<(String, String)>,
     steered: Value,
+}
+
+/// The line screens/chat/row_props puts after a message a visual sent, around its title.
+const VISUAL_LABEL: (&str, &str) = ("(Sent from \"", "\", not typed.)");
+
+fn split_visual_label(text: &str) -> (&str, Option<String>) {
+    let Some((body, last)) = text.trim_end().rsplit_once('\n') else { return (text, None) };
+    match last.trim().strip_prefix(VISUAL_LABEL.0).and_then(|rest| rest.strip_suffix(VISUAL_LABEL.1)) {
+        Some(title) => (body.trim_end(), Some(title.to_owned())),
+        None => (text, None),
+    }
 }
 
 fn said_once(text: &str) -> Said {
@@ -4930,13 +4943,16 @@ fn said_once(text: &str) -> Said {
     let (words, picks) = split_annotations(&words);
     let (words, chosen) = page_picks(&words);
     let badges = badges.into_iter().chain(chosen).collect();
-    Said { words, quotes, picks, comments, badges, chats, steered: Value::Nil }
+    Said { words, from_visual: None, quotes, picks, comments, badges, chats, steered: Value::Nil }
 }
 
 /// What a sent message says and carries; rows steered as one each keep theirs, in `steered`.
 fn said(text: &str) -> Said {
+    if let (words, Some(from)) = split_visual_label(text) {
+        return Said { words: words.to_owned(), from_visual: Some(from), quotes: vec![], picks: vec![], comments: vec![], badges: vec![], chats: vec![], steered: Value::Nil };
+    }
     let Some(parts) = steered_parts(text) else { return said_once(text) };
-    let mut all = Said { words: String::new(), quotes: vec![], picks: vec![], comments: vec![], badges: vec![], chats: vec![], steered: Value::Nil };
+    let mut all = Said { words: String::new(), from_visual: None, quotes: vec![], picks: vec![], comments: vec![], badges: vec![], chats: vec![], steered: Value::Nil };
     let mut bubbles = Vec::new();
     let mut words = Vec::new();
     for (i, part) in parts.iter().enumerate() {
@@ -5757,7 +5773,13 @@ fn merged_config(config: &Json, args: &Value) -> Json {
     // The model's other options, picked whole: each option's choice by id
     // (one at its default is left out, as the shipping app leaves it);
     // Fast's own stays as it is (`fast` below sets it).
-    if let Some(Value::Map(picked)) = args.field("options") {
+    // (Every pick back at its default is Luau's `{}`, which arrives as an empty list.)
+    let picked = match args.field("options") {
+        Some(Value::Map(picked)) => Some(&picked[..]),
+        Some(Value::List(none)) if none.is_empty() => Some(&[][..]),
+        _ => None,
+    };
+    if let Some(picked) = picked {
         let mut next = serde_json::Map::new();
         if let Some((key, _, _)) = &fast_of_model
             && let Some(v) = c["modelOptions"].get(key)
@@ -7179,6 +7201,20 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if text.trim() == zeron_proto::RESUME_PROMPT {
                 return Some(with_fields(resumed_row(id), [("clock", clock)]));
             }
+            // A visual's words are its script's: shown as written, none of them read as a sender, a file or a chip.
+            if let (words, Some(from)) = split_visual_label(&text) {
+                return Some(Value::record([
+                    ("id", Value::from(id)),
+                    ("role", Value::from("user")),
+                    ("text", Value::from(words)),
+                    ("from_visual", Value::from(from.as_str())),
+                    ("attachments", Value::List(Rc::from([]))),
+                    ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
+                    ("created", Value::Num(created)),
+                    ("copy", copy_value(words)),
+                    ("clock", clock),
+                ]));
+            }
             // The shipping app's `wake_task_ids`, `step_handback_threads`.
             let wake = zeron_proto::transcript::wake_task_ids(&text);
             let steps = zeron_proto::transcript::step_handback_threads(&text);
@@ -7194,7 +7230,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // (An Appshot's context isn't what the person said: its picture
             // says which app instead.)
             let (words, shots) = crate::appshots::split_appshots(&words);
-            let Said { words, quotes, picks, comments, badges, chats, steered } = said(&words);
+            let Said { words, from_visual, quotes, picks, comments, badges, chats, steered } = said(&words);
             for p in entry["parts"].as_array().into_iter().flatten() {
                 if p["kind"].as_str() == Some("image")
                     && let Some(path) = p["path"].as_str()
@@ -7209,6 +7245,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("id", Value::from(id)),
                 ("role", Value::from("user")),
                 ("text", Value::from(words.as_str())),
+                ("from_visual", from_visual.as_deref().map_or(Value::Nil, Value::from)),
                 ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments, &badges, &chats), &shots)),
                 ("steered", steered),
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
@@ -7646,12 +7683,27 @@ fn line_block(part: &Json, streaming: bool) -> Option<Value> {
                 Value::record([("label", Value::from(line.label.as_str())), ("answer", Value::from(line.answer.as_str())), ("skipped", Value::Bool(line.skipped))])
             };
             let (outcome, text, lines) = match input_outcome(&questions, resolved, answers.as_deref()) {
-                InputOutcome::Pending => return block("input", vec![("title", Value::from(header.as_str())), ("outcome", Value::from("pending"))]),
+                InputOutcome::Pending => {
+                    let mut fields = vec![("title", Value::from(header.as_str())), ("outcome", Value::from("pending"))];
+                    let raw = part["questions"].as_array().map(Vec::as_slice).unwrap_or_default();
+                    if asks_inline(raw) && let Some(request) = part["requestId"].as_str() {
+                        fields.push(("request", Value::from(request)));
+                        fields.push(("question", question_value(&raw[0], 0, 1, true)));
+                    }
+                    return block("input", fields);
+                }
                 InputOutcome::Unrecorded => ("unrecorded", header, Vec::new()),
                 InputOutcome::Closed(line) => ("closed", said(&line), vec![row(&line)]),
                 InputOutcome::Answered(lines) => ("answered", lines.iter().map(said).collect::<Vec<_>>().join(" · "), lines.iter().map(row).collect()),
             };
-            block("input", vec![("text", Value::from(text.as_str())), ("outcome", Value::from(outcome)), ("answers", Value::List(lines.into()))])
+            let mut fields = vec![("text", Value::from(text.as_str())), ("outcome", Value::from(outcome)), ("answers", Value::List(lines.into()))];
+            let quick = matches!(questions.as_slice(), [q] if q.quick && !q.multi_select);
+            let reply = answers.as_deref().and_then(|a| a.first()).map(|a| a.labels.join(", ")).filter(|r| !r.trim().is_empty());
+            if quick && outcome == "answered" && let Some(reply) = reply {
+                fields.push(("quick", Value::Bool(true)));
+                fields.push(("reply", Value::from(reply.as_str())));
+            }
+            block("input", fields)
         }
         _ => None,
     }
@@ -7922,6 +7974,12 @@ fn blocks_of(parts: &[&Json], streaming: bool) -> Value {
             pictures.push(part);
             continue;
         }
+        if let Some(pending) = visual_pending_block(part, parts[ix + 1..].iter().copied(), streaming) {
+            flush(&mut out, &mut group, group_last);
+            out.extend(images_block(&mut pictures));
+            out.push(pending);
+            continue;
+        }
         if display_tool(part) && display_failed_block(part, parts[ix + 1..].iter().copied()).is_none() {
             continue;
         }
@@ -8094,8 +8152,10 @@ pub(crate) fn route_value(route: &Json) -> Value {
 /// and what it said between them, folded into one group where the first
 /// of it was, its line the tools' summary while it works and "Worked for
 /// 42s" once done; then the reply, the run of text it ends on, shown. While
-/// it streams there is no reply yet: everything rides the group. Inside the
-/// group, opened, the reply's ordinary blocks. Nil when it did no work.
+/// it streams there is no reply yet: everything rides the group. A text that
+/// leads straight to something shown (a visual, a picture, a page, a visual
+/// being built) is reply wherever it is, streaming too. Inside the group,
+/// opened, the reply's ordinary blocks. Nil when it did no work.
 fn compact_blocks(entry: &Json) -> Option<Value> {
     let parts = entry["parts"].as_array()?;
     let streaming = entry["status"].as_str() == Some("streaming");
@@ -8117,8 +8177,19 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
     };
     // (A display tool is no work: its output shows in the reply.)
     let worked_tool = |p: &Json| p["kind"].as_str() == Some("tool") && !display_tool(p) && !tool_search(p);
+    let building = |p: &Json| streaming && running_visual(p);
+    let shown = |p: &Json| matches!(p["kind"].as_str(), Some("visual" | "image")) || html_block(p).is_some() || building(p);
+    let leads_to_shown = |ix: usize| {
+        let empty = |p: &Json| matches!(p["kind"].as_str(), Some("text" | "reasoning")) && !said(p) && !thought(p);
+        parts[ix + 1..]
+            .iter()
+            .find(|p| !(display_tool(p) && !building(p)) && !tool_search(p) && !empty(p))
+            .is_some_and(shown)
+    };
     let is_work = |ix: usize, p: &Json| {
-        worked_tool(p) || thought(p) || (said(p) && reply_start.is_none_or(|start| ix < start))
+        worked_tool(p)
+            || thought(p)
+            || (said(p) && !leads_to_shown(ix) && reply_start.is_none_or(|start| ix < start))
     };
     let tools: Vec<&Json> = parts.iter().filter(|p| worked_tool(p) || thought(p)).collect();
     if tools.is_empty() {
@@ -8149,6 +8220,11 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
     for (ix, part) in parts.iter().enumerate() {
         if part["kind"].as_str() == Some("image") {
             pictures.push(part);
+            continue;
+        }
+        if let Some(pending) = visual_pending_block(part, &parts[ix + 1..], streaming) {
+            out.extend(images_block(&mut pictures));
+            out.push(pending);
             continue;
         }
         if display_tool(part) && display_failed_block(part, &parts[ix + 1..]).is_none() {
@@ -8250,6 +8326,23 @@ fn display_failed_block<'a>(part: &Json, later: impl IntoIterator<Item = &'a Jso
     ]))
 }
 
+fn running_visual(part: &Json) -> bool {
+    display_name(part) == Some("show_visual") && part["resolved"].as_bool() != Some(true)
+}
+
+/// (Nil once a visual follows it: the engine adds that before the call returns.)
+fn visual_pending_block<'a>(part: &Json, later: impl IntoIterator<Item = &'a Json>, streaming: bool) -> Option<Value> {
+    if !streaming || !running_visual(part) || later.into_iter().any(|p| p["kind"].as_str() == Some("visual")) {
+        return None;
+    }
+    let title = part["call"]["input"]["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
+    Some(Value::record([
+        ("id", Value::from(part["id"].as_str().unwrap_or_default())),
+        ("kind", Value::from("visual_pending")),
+        ("title", title.map_or(Value::Nil, Value::from)),
+    ]))
+}
+
 /// The pictures gathered (image parts in a row) as one ds/transcript block,
 /// `images`, keyed by the first: each its path on the chat's host and its
 /// name. Nil for none; the gathering is emptied.
@@ -8273,8 +8366,8 @@ fn images_block(pictures: &mut Vec<&Json>) -> Option<Value> {
 }
 
 /// A visual part as ds/transcript's block: its id (the visual's, which
-/// seeds it), its script's path and title, and its host's device when that
-/// isn't this one.
+/// seeds it), its script's path, title and caption, and its host's device
+/// when that isn't this one.
 fn visual_block(part: &Json) -> Value {
     let field = |k: &str| part[k].as_str().map_or(Value::Nil, Value::from);
     Value::record([
@@ -8282,6 +8375,7 @@ fn visual_block(part: &Json) -> Value {
         ("kind", Value::from("visual")),
         ("path", field("path")),
         ("title", field("title")),
+        ("caption", field("caption")),
         ("device", field("device")),
     ])
 }
@@ -9283,6 +9377,68 @@ fn approval_parts<'a>(words: &'a str, note: Option<&str>) -> (Option<&'a str>, O
     (command, Some(detail))
 }
 
+fn with_note(mut answers: Vec<Json>, note: &str) -> Vec<Json> {
+    for answer in &mut answers {
+        answer["note"] = json!(note);
+    }
+    answers
+}
+
+fn asks_inline(questions: &[Json]) -> bool {
+    match questions {
+        [q] => {
+            q["options"].as_array().is_some_and(|o| !o.is_empty())
+                && !is_approval(questions)
+                && q["approval"].as_bool() != Some(true)
+                && !is_secret(q)
+                && q["kind"]["type"].as_str().is_none()
+        }
+        _ => false,
+    }
+}
+
+fn question_value(q: &Json, page: usize, pages: usize, inline: bool) -> Value {
+    let details = q["details"].as_array();
+    let options: Vec<Value> = q["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+        .enumerate()
+        .map(|(i, o)| {
+            let detail = details.and_then(|d| d.get(i));
+            let mut fields = vec![("value", Value::from(o)), ("label", Value::from(o))];
+            if let Some(d) = detail.and_then(|d| d["description"].as_str()).filter(|d| !d.trim().is_empty()) {
+                fields.push(("detail", Value::from(d)));
+            }
+            if detail.is_some_and(|d| d["recommended"].as_bool() == Some(true)) {
+                fields.push(("recommended", Value::Bool(true)));
+            }
+            Value::record(fields)
+        })
+        .collect();
+    let mut question = vec![
+        ("text", Value::from(q["question"].as_str().unwrap_or_default())),
+        ("options", Value::List(options.into())),
+        ("multi", Value::Bool(q["multiSelect"].as_bool() == Some(true))),
+        ("page", Value::Num((page + 1) as f64)),
+        ("pages", Value::Num(pages as f64)),
+    ];
+    if let Some(h) = q["header"].as_str().filter(|h| !h.is_empty()) {
+        question.push(("header", Value::from(h)));
+    }
+    if q["allowNote"].as_bool() == Some(true) {
+        question.push(("note", Value::Bool(true)));
+    }
+    if q["quick"].as_bool() == Some(true) && q["multiSelect"].as_bool() != Some(true) {
+        question.push(("quick", Value::Bool(true)));
+    }
+    if inline {
+        question.push(("inline", Value::Bool(true)));
+    }
+    Value::record(question)
+}
+
 /// What the composer shows of a question: an approval (what it would do),
 /// or the page of questions not yet answered.
 fn is_secret(question: &Json) -> bool {
@@ -9344,27 +9500,10 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
             ),
         ]));
     }
-    let options: Vec<Value> = q["options"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Json::as_str)
-        .map(|o| Value::record([("value", Value::from(o)), ("label", Value::from(o))]))
-        .collect();
-    let mut question = vec![
-        ("text", Value::from(q["question"].as_str().unwrap_or_default())),
-        ("options", Value::List(options.into())),
-        ("multi", Value::Bool(q["multiSelect"].as_bool() == Some(true))),
-        ("page", Value::Num((page + 1) as f64)),
-        ("pages", Value::Num(questions.len() as f64)),
-    ];
-    if let Some(h) = q["header"].as_str().filter(|h| !h.is_empty()) {
-        question.push(("header", Value::from(h)));
-    }
     Some(Value::record([
         ("request", Value::from(request)),
         ("kind", Value::from("question")),
-        ("question", Value::record(question)),
+        ("question", question_value(q, page, questions.len(), asks_inline(questions))),
     ]))
 }
 
@@ -9373,7 +9512,7 @@ fn chat_offline(no_connection: bool, unreachable: bool) -> bool {
     no_connection && unreachable
 }
 
-fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Value {
+fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool, editing: Option<&str>) -> Value {
     let chat = chats.chat(&open.id);
     // Ready once its transcript has come (this device's copy, read first,
     // whatever its host's state): its rows show at once, and the chat itself
@@ -9441,7 +9580,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool, sending: bool) -> Va
             if let Some(from) = q["fromChatId"].as_str().filter(|f| !f.is_empty()) {
                 fields.push(("from", Value::from(from)));
             }
-            let mine = open.editing.as_ref().is_some_and(|e| q["id"].as_str() == Some(&e.item));
+            let mine = editing.is_some_and(|item| q["id"].as_str() == Some(item));
             if mine {
                 fields.push(("editing", Value::Bool(true)));
             }
@@ -10993,7 +11132,7 @@ mod tests {
             json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "pi", "model": "kimi-k3" } }),
         );
         let open = Open { id: "c".into(), ..Open::default() };
-        let label = |chats: &Chats| session_value(chats, &open, false, false).field("model_label").map(text);
+        let label = |chats: &Chats| session_value(chats, &open, false, false, None).field("model_label").map(text);
         assert_eq!(label(&chats).as_deref(), Some("kimi-k3"));
         chats.known_remotes.borrow_mut().insert(
             "laptop".into(),
@@ -11005,7 +11144,7 @@ mod tests {
             },
         );
         assert_eq!(label(&chats).as_deref(), Some("Kimi K3"));
-        let model = session_value(&chats, &open, false, false).field("model").map(text);
+        let model = session_value(&chats, &open, false, false, None).field("model").map(text);
         assert_eq!(model.as_deref(), Some("pi/kimi-k3"));
     }
 
@@ -11016,14 +11155,14 @@ mod tests {
     fn a_sessions_agent_is_its_recorded_harness() {
         let chats = Chats::default();
         let open = Open { id: "c".into(), ..Open::default() };
-        let agent = |chats: &Chats| session_value(chats, &open, false, false).field("agent").map(text).filter(|a| !a.is_empty());
+        let agent = |chats: &Chats| session_value(chats, &open, false, false, None).field("agent").map(text).filter(|a| !a.is_empty());
         assert_eq!(agent(&chats), None);
         chats.chats.borrow_mut().insert(
             "c".into(),
             json!({ "id": "c", "deviceId": "laptop", "config": { "harness": "codex" } }),
         );
         assert_eq!(agent(&chats).as_deref(), Some("codex"));
-        assert!(matches!(session_value(&chats, &open, false, false).field("model"), None | Some(Value::Nil)));
+        assert!(matches!(session_value(&chats, &open, false, false, None).field("model"), None | Some(Value::Nil)));
     }
 
     /// A new chat shows the agent and model it was sent with from its first
@@ -11035,7 +11174,7 @@ mod tests {
         let chats = Chats::default();
         let open = Open { id: "c".into(), ..Open::default() };
         chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "cloud": true }));
-        let field = |chats: &Chats, k: &str| session_value(chats, &open, false, false).field(k).map(text);
+        let field = |chats: &Chats, k: &str| session_value(chats, &open, false, false, None).field(k).map(text);
         assert_eq!(field(&chats, "harness").as_deref(), Some("claude-code"), "the stand-in, before");
         let sent = Value::record([("model", Value::from("grok/grok-4.7")), ("harness", Value::from("grok")), ("effort", Value::from("high"))]);
         chats.starts_with("c", merged_config(&Json::Null, &sent));
@@ -11646,6 +11785,45 @@ mod tests {
     }
 
     #[test]
+    fn a_choice_asked_alone_carries_its_card_into_the_reply_and_leaves_its_record() {
+        let reply = |parts: Json| json!({ "id": "a", "role": "assistant", "status": "streaming", "parts": parts });
+        let choice = json!({ "id": "q", "header": "Build", "question": "How?", "options": ["Config", "Alerts"], "allowNote": true,
+            "details": [{ "description": "Just the TTL." }, { "recommended": true }] });
+        let part = |questions: Json, resolved: bool, answers: Json| {
+            json!({ "kind": "input", "id": "r", "requestId": "r", "resolved": resolved, "questions": questions, "answers": answers })
+        };
+        let line = |p: Json| blocks(&reply(json!([p]))).list()[0].clone();
+        let pending = line(part(json!([choice]), false, Json::Null));
+        assert_eq!(pending.field("request"), Some(&Value::from("r")));
+        let card = pending.field("question").expect("the card's question");
+        assert_eq!(card.field("inline"), Some(&Value::Bool(true)));
+        assert_eq!(card.field("note"), Some(&Value::Bool(true)));
+        let options = card.field("options").unwrap().list();
+        assert_eq!(options[0].field("detail"), Some(&Value::from("Just the TTL.")));
+        assert_eq!(options[0].field("recommended"), None);
+        assert_eq!(options[1].field("recommended"), Some(&Value::Bool(true)));
+        let composer = composer_ask(std::iter::once(&reply(json!([part(json!([choice]), false, Json::Null)]))), |_| 0).unwrap();
+        assert_eq!(composer.field("question").and_then(|q| q.field("inline")), Some(&Value::Bool(true)));
+
+        let two = json!([choice, { "id": "q2", "header": "Scope", "question": "Where?", "options": ["Cart"] }]);
+        assert_eq!(line(part(two, false, Json::Null)).field("question"), None, "several questions stay the composer's");
+        let open = json!([{ "id": "q", "header": "Name", "question": "Call it?", "options": [] }]);
+        assert_eq!(line(part(open, false, Json::Null)).field("question"), None, "an open question stays the composer's");
+        let approval = json!([{ "id": "q", "header": "Approve command", "question": "Run `ls`?", "options": ["Yes", "No"], "approval": true }]);
+        assert_eq!(line(part(approval, false, Json::Null)).field("question"), None, "an approval never draws in the reply");
+        let permission = json!([{ "id": "q", "header": "Agent question", "question": "Edit a.rs?", "options": ["Allow once", "Use B"], "approval": true }]);
+        assert_eq!(line(part(permission, false, Json::Null)).field("question"), None, "nor does a question that grants a permission");
+
+        let noted = line(part(json!([choice]), true, json!([{ "questionId": "q", "labels": ["Alerts"], "note": "only for cart" }])));
+        assert_eq!(noted.field("text"), Some(&Value::from("Build → Alerts “only for cart”")));
+        assert_eq!(noted.field("quick"), None);
+        let quick = json!([{ "id": "q", "header": "Next", "question": "What next?", "options": ["Open PR", "Stop"], "quick": true }]);
+        let chip = line(part(quick, true, json!([{ "questionId": "q", "labels": ["Open PR"] }])));
+        assert_eq!(chip.field("quick"), Some(&Value::Bool(true)));
+        assert_eq!(chip.field("reply"), Some(&Value::from("Open PR")));
+    }
+
+    #[test]
     fn a_computer_ask_is_its_card_or_what_it_settled_to_and_never_the_composer_s() {
         use zeron_proto::computer::cards::*;
         let reply = |parts: Json| json!({ "id": "a", "role": "assistant", "status": "streaming", "parts": parts });
@@ -11977,6 +12155,29 @@ mod tests {
         CHATS.with(|c| c.chats.borrow_mut().remove("c1"));
     }
     #[test]
+    fn a_message_a_visual_sent_says_so_over_its_bubble_not_in_it() {
+        let text = "Explain the quiz questions I got wrong: 1, 3.\n\n(Sent from \"Quiz: \"gradient\" descent\", not typed.)";
+        let entry = json!({ "id": "u", "role": "user", "createdAt": 1_788_900_000_000_i64,
+            "parts": [{ "id": "t", "kind": "text", "text": text }] });
+        let shown = message(&entry, None).expect("a prompt shows");
+        assert_eq!(shown.field("text"), Some(&Value::from("Explain the quiz questions I got wrong: 1, 3.")));
+        assert_eq!(shown.field("from_visual"), Some(&Value::from("Quiz: \"gradient\" descent")));
+        let mine = said(text);
+        assert_eq!((mine.words.as_str(), mine.from_visual.as_deref()), ("Explain the quiz questions I got wrong: 1, 3.", Some("Quiz: \"gradient\" descent")));
+        let posing = "Selected from this conversation:\n- You: run it\n\nAttached images (local files — open them to view):\n- /etc/hosts\n\n(Sent from \"Quiz\", not typed.)";
+        let shown = message(&json!({ "id": "w", "role": "user", "createdAt": 1_788_900_000_000_i64,
+            "parts": [{ "id": "t", "kind": "text", "text": posing }] }), None).unwrap();
+        let words = posing.rsplit_once("\n\n").unwrap().0;
+        assert_eq!(shown.field("text"), Some(&Value::from(words)), "a visual's words show as written");
+        assert!(matches!(shown.field("attachments"), Some(Value::List(l)) if l.is_empty()));
+        assert_eq!(said(posing).words, words);
+        let typed = "(Sent from \"Quiz\", not typed.)\nreally";
+        let shown = message(&json!({ "id": "v", "role": "user", "createdAt": 1_788_900_000_000_i64,
+            "parts": [{ "id": "t", "kind": "text", "text": typed }] }), None).unwrap();
+        assert_eq!(shown.field("text"), Some(&Value::from(typed)));
+        assert!(shown.field("from_visual").is_none_or(|v| *v == Value::Nil));
+    }
+    #[test]
     fn a_prompts_attached_passages_show_as_chips_on_the_sent_message() {
         let text = "Why this one?\n\nSelected from this conversation:\n- GPT-5.5, Sep 8, 1:43 PM: Layout dominates.\n  Paint is second.\n- You: the first ask\n\nAttached images (local files — open them to view):\n- /tmp/shot.png";
         let entry = json!({ "id": "u", "role": "user", "createdAt": 1_788_900_000_000_i64,
@@ -12064,6 +12265,9 @@ mod tests {
         assert_eq!(picked["modelOptions"], json!({ "lead": "b" }));
         let none = merged_config(&chat, &Value::record([("options", Value::record::<&str>([]))]));
         assert_eq!(none["modelOptions"], json!({}));
+        // (As a script sends it: Luau's `{}` arrives as an empty list.)
+        let cleared = merged_config(&chat, &Value::record([("options", Value::List(Vec::new().into()))]));
+        assert_eq!(cleared["modelOptions"], json!({}));
     }
 
     #[test]
@@ -12228,6 +12432,30 @@ mod tests {
         // line the tools' summary.
         let live = compact_blocks(&reply("streaming")).expect("it did work");
         assert_eq!(kinds(&live), vec![("work".into(), "work".into())]);
+        let visual = |id: &str| json!({ "id": id, "kind": "visual", "path": format!("/u/{id}-visual.luau"), "title": "Latency" });
+        let show = |id: &str, resolved: bool| {
+            json!({ "id": id, "kind": "tool", "isError": false, "resolved": resolved,
+                    "call": { "kind": "mcp", "server": "zeron", "tool": "show_visual", "input": { "title": "Hit rate" } } })
+        };
+        let shown = |status: &str, last: Vec<Json>| {
+            let mut parts = vec![tool("k1", "ls"), text("p1", "By day:"), show("s1", true), visual("v1"), text("p2", "And by TTL:")];
+            parts.extend(last);
+            json!({ "id": "a", "role": "assistant", "status": status, "durationMs": 5_000, "parts": parts })
+        };
+        let pair = |id: &str, kind: &str| (id.to_owned(), kind.to_owned());
+        let done = compact_blocks(&shown("complete", vec![show("s2", true), visual("v2"), text("p3", "Done.")])).unwrap();
+        assert_eq!(
+            kinds(&done),
+            vec![pair("work", "work"), pair("p1", "text"), pair("v1", "visual"), pair("p2", "text"), pair("v2", "visual"), pair("p3", "text")]
+        );
+        let Value::List(list) = &done else { unreachable!() };
+        assert_eq!(kinds(list[0].field("blocks").unwrap()), vec![pair("g:k1", "tools")], "the shown text is out of the fold");
+        let search = json!({ "id": "q1", "kind": "tool", "isError": false, "resolved": true, "call": { "kind": "unknown", "name": "ToolSearch", "input": {} } });
+        let live = compact_blocks(&shown("streaming", vec![search, show("s2", false)])).unwrap();
+        assert_eq!(
+            kinds(&live),
+            vec![pair("work", "work"), pair("p1", "text"), pair("v1", "visual"), pair("p2", "text"), pair("s2", "visual_pending")]
+        );
         // No work, no group.
         let plain = json!({ "id": "b", "role": "assistant", "status": "complete", "parts": [text("t", "Hi.")] });
         assert!(compact_blocks(&plain).is_none());
@@ -12482,13 +12710,14 @@ mod tests {
     fn a_visual_part_is_a_block_of_its_own_read_from_its_host() {
         let entry = json!({ "id": "a1", "role": "assistant", "status": "complete", "parts": [
             { "kind": "text", "id": "t1", "text": "Here it is:" },
-            { "kind": "visual", "id": "v:1", "path": "/u/v_1-visual.luau", "title": "Latency" },
+            { "kind": "visual", "id": "v:1", "path": "/u/v_1-visual.luau", "title": "Latency", "caption": "Source: metrics.csv, 7 days." },
         ]});
         let shown = blocks(&entry);
         let list = shown.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[1].field("kind"), Some(&Value::from("visual")));
         assert_eq!(list[1].field("id"), Some(&Value::from("v:1")));
+        assert_eq!(list[1].field("caption"), Some(&Value::from("Source: metrics.csv, 7 days.")));
         assert!(list[1].field("device").is_none_or(|d| *d == Value::Nil), "this device's: no device");
         // A chat on another device: its visuals are read from there.
         assert!(with_host(&entry, "c1", None).is_none());
@@ -12635,6 +12864,23 @@ mod tests {
         assert_eq!(shown.list()[0].field("tools").unwrap().list().len(), 2);
         let running = reply(vec![mcp("s1", "mcp__zeron__show_image", false, false)]);
         assert!(blocks(&running).list().is_empty());
+        let mut building = reply(vec![exec("x1"), mcp("s1", "show_visual", false, false)]);
+        building["status"] = json!("streaming");
+        building["parts"][1]["call"]["input"] = json!({ "title": "Latency" });
+        let list = blocks(&building);
+        let kinds: Vec<String> = list.list().iter().map(|b| crate::auth::text(b.field("kind").unwrap())).collect();
+        assert_eq!(kinds, ["tools", "visual_pending"]);
+        assert_eq!(list.list()[1].field("id"), Some(&Value::from("s1")));
+        assert_eq!(list.list()[1].field("title"), Some(&Value::from("Latency")));
+        let kinds: Vec<String> = compact_blocks(&building).unwrap().list().iter().map(|b| crate::auth::text(b.field("kind").unwrap())).collect();
+        assert_eq!(kinds, ["work", "visual_pending"]);
+        let mut arrived = building.clone();
+        arrived["parts"].as_array_mut().unwrap().push(json!({ "kind": "visual", "id": "v:1", "path": "/u/v_1-visual.luau", "title": "Latency" }));
+        let kinds: Vec<String> = blocks(&arrived).list().iter().map(|b| crate::auth::text(b.field("kind").unwrap())).collect();
+        assert_eq!(kinds, ["tools", "visual"]);
+        let mut stopped = building.clone();
+        stopped["status"] = json!("complete");
+        assert_eq!(blocks(&stopped).list().len(), 1, "a stopped reply builds nothing");
         let message = message(&entry, None).unwrap();
         assert_eq!(message.field("tools").unwrap().list().len(), 2, "the message's tools leave it out");
         // Failed: a quiet line with why, where it was.
@@ -12686,6 +12932,8 @@ mod tests {
         // Compact: the picture in the reply, not the work.
         let compact = compact_blocks(&entry).unwrap();
         assert_eq!(kinds(&compact), ["work", "images"]);
+        let led = compact_blocks(&reply(vec![exec("x1"), text("t1", "Here:"), mcp("s1", false), image("i1", "a.png"), text("t2", "Done.")])).unwrap();
+        assert_eq!(kinds(&led), ["work", "text", "images", "text"], "the words leading to it stay with it");
         // Failed: which tool, and why as said (ds/reply_picture keeps what's plain).
         let failed = blocks(&reply(vec![mcp("s1", true), text("t1", "Sorry.")]));
         assert_eq!(kinds(&failed), ["display_failed", "text"]);
@@ -12758,7 +13006,7 @@ mod tests {
         let chats = Chats::default();
         chats.chats.borrow_mut().insert("c".to_owned(), json!({ "id": "c", "config": config("claude-code", json!({ "autoCompact": "400k" })) }));
         let open = Open { id: "c".to_owned(), context_usage: (Some(100_000.), Some(1_000_000.)), ..Open::default() };
-        let v = session_value(&chats, &open, false, false);
+        let v = session_value(&chats, &open, false, false, None);
         assert_eq!(v.field("context_window").and_then(Value::as_f64), Some(400_000.));
         assert_eq!(v.field("context").and_then(Value::as_f64), Some(0.25));
     }
@@ -12820,6 +13068,7 @@ mod tests {
                     rpc: RefCell::default(),
                     open: RefCell::default(),
                     pending: RefCell::default(),
+                    editing: RefCell::default(),
                     generation: Cell::new(0),
                     snapshot: Cell::new(false),
                     predicts: false,
@@ -12920,6 +13169,7 @@ mod tests {
                 rpc: RefCell::default(),
                 open: RefCell::default(),
                 pending: RefCell::default(),
+                editing: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
                 predicts: false,
@@ -13060,6 +13310,7 @@ mod tests {
                 rpc: RefCell::default(),
                 open: RefCell::new(Some(open)),
                 pending: RefCell::default(),
+                editing: RefCell::default(),
                 generation: Cell::new(0),
                 snapshot: Cell::new(false),
                 stats: app.host.shared("t.stats", Value::Nil),
@@ -13117,6 +13368,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "fork".into(), entries, heard: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -13189,6 +13441,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -13235,6 +13488,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -13328,6 +13582,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -13387,6 +13642,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             predicts: false,
@@ -13444,6 +13700,7 @@ mod tests {
             rpc: RefCell::default(),
             open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
             pending: RefCell::default(),
+            editing: RefCell::default(),
             generation: Cell::new(0),
             snapshot: Cell::new(false),
             stats: app.host.shared("t.stats", Value::Nil),
@@ -13504,7 +13761,7 @@ mod tests {
         use super::{Chats, Entry, Open, session_value, text};
         use serde_json::json;
         let chats = Chats::default();
-        let state = |chats: &Chats, open: &Open| session_value(chats, open, false, false).field("state").map(text).unwrap_or_default();
+        let state = |chats: &Chats, open: &Open| session_value(chats, open, false, false, None).field("state").map(text).unwrap_or_default();
         let rows = vec![Entry::new(json!({ "id": "u0", "role": "user", "parts": [] }))];
         let mut open = Open { id: "c".into(), ..Open::default() };
         assert_eq!(state(&chats, &open), "loading", "nothing come yet");

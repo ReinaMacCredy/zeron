@@ -90,6 +90,41 @@ pub(crate) fn is_zeron_computer_tool(name: &str) -> bool {
         .is_some_and(is_computer_tool_name)
 }
 
+pub(crate) fn question_options(
+    q: &serde_json::Value,
+) -> (Vec<String>, Vec<zeron_proto::UserInputOptionDetail>) {
+    let (options, details): (Vec<String>, Vec<zeron_proto::UserInputOptionDetail>) = q
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|op| match op {
+            serde_json::Value::String(s) => (s.clone(), Default::default()),
+            other => {
+                let label = other
+                    .get("label")
+                    .or_else(|| other.get("value"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .into();
+                let description = other
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_owned);
+                let detail = zeron_proto::UserInputOptionDetail {
+                    description,
+                    ..Default::default()
+                };
+                (label, detail)
+            }
+        })
+        .unzip();
+    (options, zeron_proto::UserInputOptionDetail::aligned(details))
+}
+
 pub(crate) fn is_computer_tool_name(name: &str) -> bool {
     name == "computer"
         || name.strip_prefix("computer_").is_some_and(|rest| {

@@ -225,6 +225,9 @@ fn question_chip_reads_what_was_answered() {
         approval: false,
         kind: None,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     };
     let chip = |questions: Vec<zeron_proto::UserInputQuestion>, resolved: bool, answers: Option<Vec<zeron_proto::UserInputAnswer>>| {
         let mut w = worker(390.0);
@@ -248,7 +251,7 @@ fn question_chip_reads_what_was_answered() {
         let row = frame.display(0).unwrap();
         (row.copy_text, row.height)
     };
-    let picked = |id: &str, label: &str| zeron_proto::UserInputAnswer { question_id: id.into(), labels: vec![label.into()] };
+    let picked = |id: &str, label: &str| zeron_proto::UserInputAnswer { question_id: id.into(), labels: vec![label.into()], note: None };
     assert_eq!(chip(vec![question("q", "Recherche")], true, None).0, "Answered a question");
     let (closed, one_line) = chip(vec![question("q", "Recherche")], true, Some(vec![]));
     assert_eq!(closed, "Recherche → Not answered");
@@ -915,6 +918,9 @@ fn consent_part(request_id: &str) -> MessagePart {
             multi_select: false,
             kind: Some(zeron_proto::UserInputKind::Consent { scope: zeron_proto::computer::ComputerConsentScope::Task, app: None, tool: None, params: None }), prefill: None, multiline: false, 
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         }],
         resolved: false,
         answers: None,
@@ -1362,6 +1368,9 @@ fn a_foreground_request_is_a_card_until_answered_then_its_outcome() {
             prefill: None,
             multiline: false,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         }],
         resolved,
         answers,
@@ -1379,7 +1388,7 @@ fn a_foreground_request_is_a_card_until_answered_then_its_outcome() {
         })
         .collect();
     assert_eq!(ids, ["computer-foreground-decline", "computer-foreground-allow"]);
-    let allowed = vec![zeron_proto::UserInputAnswer { question_id: "foreground".into(), labels: vec!["Allow for this turn".into()] }];
+    let allowed = vec![zeron_proto::UserInputAnswer { question_id: "foreground".into(), labels: vec!["Allow for this turn".into()], note: None }];
     let settled = frame_of(vec![message("m", Assistant, vec![part(Some(allowed), true)])], 390.0);
     assert_eq!(kinds(&settled), [RowKind::Chip]);
     assert_eq!(settled.display(0).unwrap().text, "You allowed Calculator to come to the front");
@@ -1465,7 +1474,7 @@ fn visual_rows_take_the_height_their_worker_measures() {
         entries: vec![Arc::new(SessionMessageEntry {
             id: "a1".into(),
             role: MessageRole::Assistant,
-            parts: vec![MessagePart::Visual { id: "v1".into(), path: "up/v1-visual.luau".into(), title: "Chart".into() }],
+            parts: vec![MessagePart::Visual { id: "v1".into(), path: "up/v1-visual.luau".into(), title: "Chart".into(), caption: None }],
             created_at: 0,
             device_id: String::new(),
             status: Some(MessageStatus::Complete),

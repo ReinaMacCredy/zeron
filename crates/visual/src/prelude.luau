@@ -32,6 +32,10 @@ for _, kind in
 		"toggle",
 		"slider",
 		"link",
+		"input",
+		"select",
+		"disclosure",
+		"quiz",
 	}
 do
 	ui[kind] = constructor(kind)
@@ -56,6 +60,30 @@ end
 -- handler, so plain assignment is enough.
 function ui.state(initial)
 	return initial or {}
+end
+
+-- The host saves `kept` and fills `stored` from the last run before setup.
+local kept, stored = {}, {}
+function ui.keep(name, initial)
+	if type(name) ~= "string" or name == "" then
+		error('ui.keep takes a name and a table: ui.keep("answers", { ... })', 2)
+	end
+	if initial ~= nil and type(initial) ~= "table" then
+		error(`ui.keep("{name}", ...) takes a table, not a {type(initial)}`, 2)
+	end
+	if kept[name] then
+		return kept[name]
+	end
+	local t = initial or {}
+	local saved = stored[name]
+	if type(saved) == "table" then
+		table.clear(t)
+		for k, v in saved do
+			t[k] = v
+		end
+	end
+	kept[name] = t
+	return t
 end
 
 -- A linear map from the domain [d0, d1] onto the range [r0, r1].
@@ -97,4 +125,4 @@ function ui.range(a, b, step)
 	return out
 end
 
-return ui
+return ui, kept, stored

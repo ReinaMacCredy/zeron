@@ -208,6 +208,9 @@ fn plain_question(id: &str) -> UserInputQuestion {
         prefill: None,
         multiline: false,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     }
 }
 
@@ -926,6 +929,7 @@ fn answer(rig: &Rig, id: &str, request_id: &str, label: &str) {
             answers: vec![UserInputAnswer {
                 question_id: "consent".into(),
                 labels: vec![label.into()],
+                note: None,
             }],
         },
         None,
@@ -1063,6 +1067,9 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         prefill: None,
         multiline: false,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     };
     let visible = UserInputQuestion {
         note: None,
@@ -1076,6 +1083,9 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         prefill: None,
         multiline: false,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     };
     let doc = rig.core.doc_host.open(CHAT).unwrap();
     for (id, question) in [("r-consent", consent), ("r-visible", visible)] {
@@ -1118,6 +1128,7 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
             answers: vec![UserInputAnswer {
                 question_id: "q1".into(),
                 labels: vec!["No".into()],
+                note: None,
             }],
         },
         None,
@@ -1599,6 +1610,9 @@ fn push_open_question(rig: &Rig, request_id: &str) {
                     prefill: None,
                     multiline: false,
                     action: None,
+                    details: Vec::new(),
+                    allow_note: false,
+                    quick: false,
                 }],
                 resolved: false,
                 answers: None,
@@ -1631,6 +1645,7 @@ async fn an_orphan_answer_that_flips_computer_waits_for_the_turn_end() {
             answers: vec![UserInputAnswer {
                 question_id: "q1".into(),
                 labels: vec!["No".into()],
+                note: None,
             }],
         },
         None,
@@ -1825,6 +1840,7 @@ async fn a_question_the_agent_withdrew_does_not_hold_awaiting_input() {
             vec![UserInputAnswer {
                 question_id: "kept".into(),
                 labels: vec!["Yes".into()],
+                note: None,
             }],
         )
         .unwrap();
@@ -1902,11 +1918,12 @@ async fn ask_user_parks_a_multi_select_card_and_returns_every_picked_label() {
             answers: vec![UserInputAnswer {
                 question_id: "layers".into(),
                 labels: vec!["UI".into(), "MCP".into()],
+                note: None,
             }],
         },
         None,
     );
-    let answers = asked.await.unwrap().unwrap();
+    let answers = asked.await.unwrap().unwrap().expect("answered in time");
     assert_eq!(answers[0].labels, vec!["UI".to_string(), "MCP".to_string()]);
 
     let unanswered = rig
@@ -1920,9 +1937,61 @@ async fn ask_user_parks_a_multi_select_card_and_returns_every_picked_label() {
         )
         .await
         .unwrap();
-    assert!(unanswered.is_empty());
-    wait_for(|| open().is_none(), "the timed-out card to settle").await;
+    assert_eq!(unanswered, None, "a lapse says the answer is still to come");
+    let open_one = |id: &str| {
+        rig.entries(CHAT).iter().flat_map(|e| e.parts.clone()).find_map(|part| match part {
+            MessagePart::Input { request_id, questions, resolved: false, .. } if questions[0].id == id => Some(request_id),
+            _ => None,
+        })
+    };
+    wait_for(|| open_one("late").is_some(), "the lapsed card to stay open").await;
+    let late = open_one("late").unwrap();
+    let answer = |request_id: String, question: &str| SessionCommandPayload::RespondInput {
+        request_id,
+        answers: vec![UserInputAnswer {
+            question_id: question.into(),
+            labels: vec!["Yes".into()],
+            note: Some("after lunch".into()),
+        }],
+    };
+    rig.command("late-answer", answer(late.clone(), "late"), None);
+    wait_for(|| open_one("late").is_none(), "the answer in the turn's tail to settle its card").await;
+    let held = || {
+        let queued = rig.core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap();
+        queued.iter().map(|q| q.text.clone()).chain(rig.seen().into_iter().map(|s| s.prompt)).any(|text| {
+            text.starts_with("Answering your earlier question:") && text.contains("late? — Yes (note: after lunch)")
+        })
+    };
+    wait_for(held, "the answer to wait for the turn as the next message").await;
+    rig.command("late-again", answer(late, "late"), None);
+    let status = |id: &str| {
+        rig.core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().into_iter().find(|c| c.id == id).map(|c| c.status)
+    };
+    wait_for(|| status("late-again") == Some(SessionCommandStatus::Rejected), "a second answer to be refused").await;
+
+    let rig = &rig;
+    let resumed = |with: &'static str| move || rig.seen().iter().any(|s| s.prompt.contains(with));
+    let lapse = |id: &'static str| {
+        let (sessions, secret) = (rig.core.sessions.clone(), secret.clone());
+        async move { sessions.ask_user(CHAT, &secret, vec![plain_question(id)], Duration::from_millis(50)).await.unwrap() }
+    };
+    rig.finish();
+    wait_for(resumed("late? — Yes (note: after lunch)"), "the held answer to start the next turn").await;
+
+    assert_eq!(lapse("later").await, None);
     rig.finish_turn().await;
+    assert!(open_one("later").is_some(), "the lapsed question stays open past its turn");
+    rig.command("later-answer", answer(open_one("later").unwrap(), "later"), None);
+    wait_for(resumed("later? — Yes (note: after lunch)"), "the later answer to resume the chat").await;
+
+    assert_eq!(lapse("last").await, None);
+    rig.finish_turn().await;
+    let last = open_one("last").expect("the lapsed question stays open while the chat is idle");
+    rig.core.doc_host.queue_message(CHAT, "something else", vec![]).unwrap();
+    wait_for(resumed("something else"), "a queued message to start a turn past the open question").await;
+    assert!(open_one("last").is_none(), "a turn starting past it closes the question");
+    rig.command("last-answer", answer(last, "last"), None);
+    wait_for(|| status("last-answer") == Some(SessionCommandStatus::Rejected), "an answer to the closed question to be refused").await;
     rig.core.shutdown().await;
 }
 
@@ -2062,6 +2131,7 @@ async fn request_secret_saves_a_private_file_and_the_value_stays_out_of_the_chat
             answers: vec![UserInputAnswer {
                 question_id: "secret".into(),
                 labels: vec!["typed on a phone".into()],
+                note: None,
             }],
         },
         None,

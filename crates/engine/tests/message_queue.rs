@@ -125,6 +125,9 @@ impl Harness for HeldHarness {
                 multi_select: false,
                 kind: None,
                 action: None,
+                details: Vec::new(),
+                allow_note: false,
+                quick: false,
             }])
         });
         let finish = self.finish.subscribe();

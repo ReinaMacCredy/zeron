@@ -2,7 +2,7 @@
 //! before what its [`AccessMode`] does not cover; every driver asks the same
 //! way — a yes/no question through [`crate::RunControls::request_input`] —
 //! so an approval reads alike whichever agent raised it.
-use zeron_proto::{AccessMode, ApprovalAction, UserInputAnswer, UserInputQuestion};
+use zeron_proto::{AccessMode, ApprovalAction, HarnessId, UserInputAnswer, UserInputQuestion};
 
 pub const ALLOW: &str = zeron_proto::APPROVAL_ALLOW;
 pub const DENY: &str = zeron_proto::APPROVAL_DENY;
@@ -40,6 +40,9 @@ pub fn question(header: impl Into<String>, question: impl Into<String>) -> UserI
         multiline: false,
         approval: true,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     }
 }
 
@@ -78,6 +81,7 @@ pub fn allow_all(questions: &[UserInputQuestion]) -> Vec<UserInputAnswer> {
         .map(|q| UserInputAnswer {
             question_id: q.id.clone(),
             labels: vec![ALLOW.into()],
+            note: None,
         })
         .collect()
 }
@@ -89,6 +93,7 @@ pub fn allow_all_by_auto(questions: &[UserInputQuestion]) -> Vec<UserInputAnswer
         .map(|q| UserInputAnswer {
             question_id: q.id.clone(),
             labels: vec![ALLOW.into(), zeron_proto::APPROVAL_BY_AUTO.into()],
+            note: None,
         })
         .collect()
 }
@@ -100,6 +105,27 @@ pub fn approved(question: &UserInputQuestion, answers: &[UserInputAnswer]) -> bo
     answers.iter().any(|a| {
         a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case(ALLOW))
     })
+}
+
+pub fn change_request<'a>(
+    question: &UserInputQuestion,
+    answers: &'a [UserInputAnswer],
+) -> Option<&'a str> {
+    if approved(question, answers) {
+        return None;
+    }
+    answers
+        .iter()
+        .find(|a| a.question_id == question.id)?
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+}
+
+/// The other drivers refuse bare, so the engine sends the person's words as their next message.
+pub fn carries_change_request(harness: HarnessId) -> bool {
+    harness == HarnessId::ClaudeCode
 }
 
 /// "`agent` wants to run `command`. Allow it?"
@@ -207,11 +233,23 @@ mod tests {
             vec![UserInputAnswer {
                 question_id: q.id.clone(),
                 labels: labels.iter().map(|l| l.to_string()).collect(),
+                note: None,
             }]
         };
         assert!(approved(&q, &answer(&["Yes"])));
         assert!(!approved(&q, &answer(&["No"])));
         assert!(!approved(&q, &answer(&["sure, go ahead"])));
         assert!(!approved(&q, &[]));
+        let change = |labels: &[&str], note: &str| {
+            let mut a = answer(labels);
+            a[0].note = Some(note.into());
+            a
+        };
+        assert!(!approved(&q, &change(&["No"], "run it on staging")));
+        assert_eq!(change_request(&q, &change(&["No"], " run it on staging ")), Some("run it on staging"));
+        assert_eq!(change_request(&q, &change(&["Yes"], "fine")), None);
+        assert_eq!(change_request(&q, &change(&["No"], "  ")), None);
+        assert_eq!(change_request(&q, &answer(&["No"])), None);
+        assert!(carries_change_request(HarnessId::ClaudeCode) && !carries_change_request(HarnessId::Codex));
     }
 }

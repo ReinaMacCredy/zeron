@@ -135,6 +135,8 @@ export type Props = {
 	close_with: State<number>?,
 	-- Bumped, the effort moves `by` stops along the slider, held at its ends (Zeron's ⌘− ⌘=).
 	step_with: State<{ n: number, by: number }>?,
+	step_context_with: State<{ n: number, by: number }>?,
+	on_context_step: ((label: string, moved: boolean) -> ())?,
 	-- Set to whether it is open (Dropdown's `showing`).
 	showing: State<boolean>?,
 	-- Set as it closes: whether from outside it (Dropdown's `outside`).
@@ -259,14 +261,6 @@ local function provider_found(q: string, label: string, provider: string): boole
 	end
 	return false
 end
--- Tokens as gpui's: 212K, 1.0M.
-local function short_tokens(n: number): string
-	if n >= 999500 then
-		return string.format("%.1fM", n / 1000000)
-	end
-	return `{math.floor((n + 500) / 1000)}K`
-end
-
 return ui.component(function(props: Props): Node
 	local function harness_list(): { Harness }
 		return read(props.harnesses) :: { Harness }
@@ -1409,6 +1403,55 @@ return ui.component(function(props: Props): Node
 		end
 		props.options:set(now)
 	end
+	local function name_of(id: string): string
+		local w = context_pair()
+		for _, c in if w then w.choices else {} do
+			if c.id == id then
+				return c.label
+			end
+		end
+		return string.upper(id)
+	end
+	local function stop_name(c: Choice): string
+		return if c.id == "auto" then name_of("1m") else c.label
+	end
+	local function context_at(window: Option, auto: Option): number
+		local at = 0
+		if chosen(window).id == "1m" then
+			for n, c in long_stops(auto) do
+				if c.id == chosen(auto).id then
+					at = n
+				end
+			end
+		end
+		return at
+	end
+	if props.step_context_with then
+		local asked = props.step_context_with
+		local seen = asked:peek().n
+		ui.effect(function()
+			local s = asked:get()
+			if s.n == seen then
+				return
+			end
+			seen = s.n
+			ui.after(0, function()
+				local w, a = context_pair()
+				if not (w and a) then
+					return
+				end
+				local list = long_stops(a)
+				local at = context_at(w, a)
+				local to = math.clamp(at + s.by, 0, #list)
+				if to ~= at then
+					set_context(w, a, if to == 0 then nil else list[to].id)
+				end
+				if props.on_context_step then
+					props.on_context_step(if to == 0 then name_of("200k") else stop_name(list[to]), to ~= at)
+				end
+			end)
+		end)
+	end
 	local function context_card(): Node
 		local function pair(): (Option, Option)
 			local w, a = context_pair()
@@ -1418,20 +1461,11 @@ return ui.component(function(props: Props): Node
 			local w = context_pair()
 			return w ~= nil and chosen(w).id == "1m"
 		end
-		local function name_of(id: string): string
-			local w = context_pair()
-			for _, c in if w then w.choices else {} do
-				if c.id == id then
-					return c.label
-				end
-			end
-			return string.upper(id)
-		end
 		local function long_levels(): { EffortSlider.Level }
 			local _, a = context_pair()
 			local out: { EffortSlider.Level } = {}
 			for _, c in if a then long_stops(a) else {} do
-				table.insert(out, { value = c.id, label = if c.id == "auto" then name_of("1m") else c.label })
+				table.insert(out, { value = c.id, label = stop_name(c) })
 			end
 			return out
 		end
@@ -1452,7 +1486,7 @@ return ui.component(function(props: Props): Node
 			if window > 200000 and a then
 				at = math.min(sizes[chosen(a).id] or window, window)
 			end
-			return short_tokens(at - HEADROOM)
+			return context_usage.short_tokens(at - HEADROOM)
 		end
 		-- The warning: more in use than the smaller window holds.
 		local function warning(): string?
@@ -1461,9 +1495,9 @@ return ui.component(function(props: Props): Node
 				return nil
 			end
 			if long_on() then
-				return locale.s("ds.model_picker.context_switching", { size = short_tokens(200000), in_use = short_tokens(n) })
+				return locale.s("ds.model_picker.context_switching", { size = context_usage.short_tokens(200000), in_use = context_usage.short_tokens(n) })
 			end
-			return locale.s("ds.model_picker.context_selected", { in_use = short_tokens(n) })
+			return locale.s("ds.model_picker.context_selected", { in_use = context_usage.short_tokens(n) })
 		end
 		return ui.column {
 			id = "model-picker-context",
@@ -2336,15 +2370,7 @@ return ui.component(function(props: Props): Node
 					local w, a = context_pair()
 					if w and a then
 						local list = long_stops(a)
-						local i = 0
-						if chosen(w).id == "1m" then
-							for n, c in list do
-								if c.id == chosen(a).id then
-									i = n
-								end
-							end
-						end
-						i = math.clamp(i + (if key == "ArrowLeft" then -1 else 1), 0, #list)
+						local i = math.clamp(context_at(w, a) + (if key == "ArrowLeft" then -1 else 1), 0, #list)
 						set_context(w, a, if i == 0 then nil else list[i].id)
 					end
 				end

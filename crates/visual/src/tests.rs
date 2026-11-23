@@ -312,6 +312,149 @@ fn check_exercises_every_control_and_reports_where_it_broke() {
 }
 
 #[test]
+fn inputs_selects_disclosures_and_quizzes_validate_with_reasons() {
+    let quiz = |questions: &str| format!("return ui.quiz {{ questions = {{ {questions} }} }}");
+    let one = |kind: &str, options: &str| format!("{{ kind = \"{kind}\", question = \"Q?\", options = {{ {options} }} }}");
+    let right = "{ text = \"yes\", correct = true }";
+    let wrong = "{ text = \"no\" }";
+    let many = |n: usize| (0..n).map(|i| if i == 0 { right.to_owned() } else { wrong.to_owned() }).collect::<Vec<_>>().join(", ");
+    for (script, needle) in [
+        (quiz(""), "takes 1 to 20 questions"),
+        (quiz(&vec![one("single", &many(2)); 21].join(", ")), "takes 1 to 20 questions"),
+        (quiz(&one("single", right)), "question 1 takes 2 to 8 options"),
+        (quiz(&one("single", &many(9))), "question 1 takes 2 to 8 options"),
+        (quiz(&one("truefalse", &many(3))), "exactly 2 options"),
+        (quiz(&one("single", &format!("{right}, {right}"))), "exactly one option with correct"),
+        (quiz(&one("truefalse", &format!("{wrong}, {wrong}"))), "exactly one option with correct"),
+        (quiz(&one("multi", &format!("{wrong}, {wrong}"))), "at least one option correct"),
+        (quiz(&one("essay", &many(2))), "kind 'essay'"),
+        (format!("return ui.quiz {{ questions = {{ {} }}, timer = 30 }}", one("single", &many(2))), "has no 'timer'"),
+        (
+            format!("return ui.quiz {{ questions = {{ {} }}, open = {{ question = \"/computer-use now\" }} }}", one("single", &many(2))),
+            "can't start with '/'",
+        ),
+        (r#"return ui.button { label = "Go" }"#.into(), "needs on_click"),
+        (r#"return ui.button { label = "Go", send = true }"#.into(), "a string"),
+        (r#"return ui.button { label = "Go", send = "/compact" }"#.into(), "can't start with '/'"),
+        (r#"return ui.button { label = "Go", send = "read [x](zeron-chat:abc)" }"#.into(), "zeron-chat:"),
+        (format!("return ui.button {{ label = \"Go\", send = \"{}\" }}", "x".repeat(2001)), "over 2000 characters"),
+        (r#"return ui.input { value = "x" }"#.into(), "needs on_change, on_submit, or send"),
+        (r#"return ui.input { send = true, color = "accent" }"#.into(), "has no 'color'"),
+        (r#"return ui.select { on_change = function() end }"#.into(), "needs options"),
+        (r#"return ui.select { options = { "a" } }"#.into(), "needs on_change"),
+        (r#"return ui.disclosure { open = true }"#.into(), "needs label"),
+    ] {
+        let err = Visual::load(&script, 1).and_then(|mut v| v.render()).unwrap_err();
+        assert!(err.message.contains(needle), "{script}: {}", err.message);
+    }
+
+    let mut visual = Visual::load(
+        r#"
+        return ui.column {
+          ui.input { label = "Name", placeholder = "Ada", send = "Who is this?" },
+          ui.select { options = { "a", { label = "Bee", value = "b" } }, value = "b", on_change = function() end },
+          ui.disclosure { label = "More", ui.text "inside" },
+          ui.button { label = "Ask", send = "Explain the second chart." },
+          ui.quiz {
+            questions = {
+              { kind = "multi", question = "Which?", hint = "Two", options = { { text = "A", correct = true, why = "yes" }, { text = "B", correct = true }, { text = "C" } } },
+              { kind = "truefalse", question = "True?", options = { { text = "True", correct = true }, { text = "False" } } },
+            },
+            open = { question = "Why does it diverge?", placeholder = "A sentence" },
+          },
+        }
+        "#,
+        1,
+    )
+    .unwrap();
+    let tree = visual.render().unwrap();
+    let kids: Vec<&Node> = children(&tree).collect();
+    assert!(matches!(&kids[0].kind, NodeKind::Input(i) if i.send.as_deref() == Some("Who is this?") && i.label.as_deref() == Some("Name")));
+    assert!(matches!(&kids[1].kind, NodeKind::Select { options, value, .. } if options[1].label == "Bee" && value == "b"));
+    assert_eq!(text_of(kids[2]), "inside", "a disclosure's children are its own");
+    assert!(matches!(&kids[3].kind, NodeKind::Button { on_click: None, send: Some(text), .. } if text == "Explain the second chart."));
+    let NodeKind::Quiz(quiz) = &kids[4].kind else { panic!("{:?}", kids[4]) };
+    assert_eq!(quiz.questions[0].kind, QuizKind::Multi);
+    assert_eq!(quiz.questions[0].options.iter().filter(|o| o.correct).count(), 2);
+    assert_eq!(quiz.questions[1].kind, QuizKind::TrueFalse);
+    assert_eq!(quiz.open.as_ref().map(|o| o.question.as_str()), Some("Why does it diverge?"));
+}
+
+#[test]
+fn kept_state_outlives_the_run_that_made_it() {
+    let script = r#"
+        local s = ui.keep("answers", { picked = {}, done = false })
+        return function()
+          return ui.button { label = tostring(#s.picked), on_click = function()
+            table.insert(s.picked, "b")
+            s.done = true
+            s.note = "two \"words\""
+          end }
+        end
+    "#;
+    let mut visual = Visual::load(script, 1).unwrap();
+    let tree = visual.render().unwrap();
+    let NodeKind::Button { on_click: Some(click), .. } = tree.kind else { panic!() };
+    visual.call(click, HandlerArg::None).unwrap();
+    let json = visual.kept_json().unwrap().expect("something kept");
+    assert_eq!(json, r#"{"answers":{"done":true,"note":"two \"words\"","picked":["b"]}}"#);
+    let kept = vec![(
+        "answers".to_owned(),
+        Kept::Map(vec![
+            ("done".into(), Kept::Bool(true)),
+            ("picked".into(), Kept::List(vec![Kept::Text("b".into())])),
+        ]),
+    )];
+    let mut again = Visual::load_keeping(script, 1, &kept).unwrap();
+    let tree = again.render().unwrap();
+    assert!(matches!(&tree.kind, NodeKind::Button { label, .. } if label == "1"), "{tree:?}");
+    assert_eq!(Visual::load("return ui.text 'x'", 1).unwrap().kept_json().unwrap(), None);
+
+    for (setup, needle) in [
+        ("local s = ui.keep('k', {}) s.f = function() end", "holds a function"),
+        ("local s = ui.keep('k', {}) s.big = string.rep('x', 17000)", "over 16 KB"),
+        ("local s = ui.keep('k', {}) s[1] = 1 s.x = 2", "keys that aren't names"),
+        ("local s = ui.keep('k', {}) s.me = s", "nests too deeply"),
+        ("local s = ui.keep('k', 5)", "takes a table"),
+    ] {
+        let err = Visual::load(&format!("{setup} return ui.text 'x'"), 1).and_then(|v| v.kept_json().map(|_| ())).unwrap_err();
+        assert!(err.message.contains(needle), "{setup}: {}", err.message);
+    }
+}
+
+#[test]
+fn check_exercises_inputs_selects_and_disclosures() {
+    let report = check(
+        r#"
+        local s = ui.state { q = "", pick = "a", open = false }
+        return function()
+          return ui.column {
+            ui.input { value = s.q, on_change = function(v) s.q = v end, on_submit = function(v) s.q = v end },
+            ui.select { options = { "a", "b" }, value = s.pick, on_change = function(v) s.pick = v end },
+            ui.disclosure { label = "More", open = s.open, on_toggle = function(o) s.open = o end, ui.text "x" },
+            ui.button { label = "Ask", send = "Tell me more." },
+          }
+        end
+        "#,
+        1,
+    )
+    .unwrap();
+    assert_eq!(report.interactions, 6, "typed and cleared, Enter, both options, the disclosure");
+
+    for (body, needle) in [
+        ("ui.input { on_change = function(v) local n = #v * nil end }", "after typing \"12\" in an input:"),
+        ("ui.input { label = \"Size\", on_change = function(v) s.n = tonumber(v) * 2 end }", "after typing \"\" in 'Size':"),
+        ("ui.input { send = true, on_submit = function(v) error('no') end }", "after pressing Enter in an input:"),
+        ("ui.select { options = { \"a\", \"b\" }, on_change = function(v) assert(v == \"a\") end }", "after choosing 'b':"),
+        ("ui.disclosure { label = \"More\", on_toggle = function() s.f = function() end end }", "after opening 'More': ui.keep(\"k\") holds a function"),
+    ] {
+        let script = format!("local s = ui.keep('k', {{}}) return function() return ui.column {{ {body} }} end");
+        let err = check(&script, 1).unwrap_err();
+        assert!(err.message.starts_with(needle), "{body}: {}", err.message);
+    }
+}
+
+#[test]
 fn ticks_are_round() {
     assert_eq!(
         nice_ticks(0.0, 100.0, 5),

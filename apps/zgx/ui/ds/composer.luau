@@ -56,6 +56,7 @@ local Compaction = require("@self/compaction")
 local limit_notice = require("@self/composer_limit")
 local composer_surface = require("@self/composer_surface")
 local ask = require("@self/composer_ask")
+local AskCard = require("@self/ask_card")
 local mentions = require("@self/composer_mentions")
 local references = require("@self/references")
 local locale = require("@self/locale")
@@ -116,6 +117,7 @@ export type Fixed = {
 	cloud: boolean?,
 	reach: string?,
 }
+export type AttachItem = { label: string, icon: Icon.Name?, on_click: () -> () }
 export type Props = {
 	value: State<string>,
 	placeholder: (string | Message)?,
@@ -217,6 +219,7 @@ export type Props = {
 	-- dictation): true if it did something with it.
 	on_escape: (() -> boolean)?,
 	on_attach: (() -> ())?,
+	attach_items: (() -> { AttachItem })?,
 	-- Its menus open below it (a composer with room under it: a new
 	-- session's, floating mid-page); by default, above (one at the window's
 	-- foot). A function follows where the composer is (one travelling
@@ -285,7 +288,7 @@ export type Props = {
 	on_close_question: (() -> ())?,
 	approval: State<ask.Approval?>?,
 	on_approve: ((scope: "once" | "always") -> ())?,
-	on_deny: (() -> ())?,
+	on_deny: ((change: { text: string, focus: () -> (), keep: () -> () }?) -> ())?,
 	-- Whether an approval can be given for good ("Always allow"); by
 	-- default, yes. An agent that only asks each time hides it.
 	can_always: (boolean | () -> boolean)?,
@@ -432,6 +435,7 @@ local CHIP_H, CHIP_RADIUS = 24, "$radius.lg"
 local LIFT = "$zeron.space.hair"
 type Folded = { level: number, access_at: { [string]: number }, model_at: { [string]: number }? }
 local FOOTER_SIDES, FOOTER_GAP = 20, 4
+local SIZED_MS = 1400
 -- With cargo or a question over the draft, the draft keeps the strip's
 -- `below` over it (the theme's; read as the composer is built) rather than
 -- the open text box's own top.
@@ -1795,27 +1799,6 @@ return ui.component(function(props: Props): Node
 		end))
 	end
 
-	-- +, as a secondary button: a fill of its own, so it reads as a control
-	-- beside the draft (the microphone stays ghost). Dictating, it is the
-	-- way out.
-	local attach = ui.show(dictating, Button {
-		tone = "secondary",
-		shape = "pill",
-		size = "sm",
-		icon = true,
-		label = locale.t("ds.composer.cancel_dictation"),
-		on_click = on_cancel_dictation,
-		Icon { name = "close", size = 16 },
-	}, Button {
-		tone = "secondary",
-		shape = "pill",
-		size = "sm",
-		icon = true,
-		label = locale.t("ds.composer.attach"),
-		disabled = disabled,
-		on_click = props.on_attach,
-		Icon { name = "plus", size = 18 },
-	})
 	-- Up from the footer: the composer sits at the window's foot, so the
 	-- menu opens (and opens out, browsing) upward from a still bottom edge,
 	-- never flipping across the chip as it grows. With room below
@@ -1827,6 +1810,64 @@ return ui.component(function(props: Props): Node
 		local on = if type(below) == "function" then below() else below == true
 		return if on then "bottom" else "top"
 	end
+	-- +, as a secondary button: a fill of its own, so it reads as a control
+	-- beside the draft (the microphone stays ghost). Dictating, it is the
+	-- way out.
+	local attach_open = ui.use_state(false)
+	local attach_lit = ui.use_state(0)
+	local attach_extra: { AttachItem } = {}
+	local function attach_item(i: number, label: any, icon: Icon.Name?, run: (() -> ())?, els: { any }): Node
+		return ui.menu_item(Menu.lights(Menu.look {
+			label = label,
+			on_click = function()
+				if run then
+					run()
+				end
+			end,
+			if icon then Menu.glyph(icon) else Menu.glyph_space(),
+			FadeText { label, grow = 1, text_size = "$font.size.md", color = "$text.primary" },
+		}, i, attach_lit, els))
+	end
+	local attach = ui.show(dictating, Button {
+		tone = "secondary",
+		shape = "pill",
+		size = "sm",
+		icon = true,
+		label = locale.t("ds.composer.cancel_dictation"),
+		on_click = on_cancel_dictation,
+		Icon { name = "close", size = 16 },
+	}, ui.menu(Menu.panel {
+		open = attach_open,
+		anchor = Button {
+			tone = "secondary",
+			shape = "pill",
+			size = "sm",
+			icon = true,
+			label = locale.t("ds.composer.attach"),
+			disabled = disabled,
+			on_click = function()
+				attach_extra = if props.attach_items then props.attach_items() else {}
+				if #attach_extra == 0 then
+					if props.on_attach then
+						props.on_attach()
+					end
+					return
+				end
+				attach_open:set(true)
+			end,
+			Icon { name = "plus", size = 18 },
+		},
+		placement = { side = side(), align = "start", offset = 8 },
+		w = 220,
+		build = function(): Node
+			local els: { any } = {}
+			local rows: { Node } = { attach_item(1, locale.t("ds.composer.attach_files"), "paperclip", props.on_attach, els) }
+			for i, it in attach_extra do
+				table.insert(rows, attach_item(i + 1, it.label, it.icon, it.on_click, els))
+			end
+			return ui.column { w_full = true, p = "$space.1", gap = "$zeron.list.gap", rows }
+		end,
+	}))
 	-- The footer folds a step at a time as it runs short of room, the
 	-- fullest that fits: 0, all of it; 1, the model's name shortened (its
 	-- effort always whole: ds/model_picker's chip); 2, the access mode
@@ -2000,6 +2041,19 @@ return ui.component(function(props: Props): Node
 	end
 
 	local picker_open = props.model_open or ui.use_state(false)
+	local step_context = ui.use_state({ n = 0, by = 0 })
+	local sized = ui.use_state(nil :: context_usage.Sized?)
+	local sizes = 0
+	local function context_stepped(label: string, moved: boolean)
+		sizes += 1
+		local mine = sizes
+		sized:set({ label = label, n = mine, held = not moved })
+		ui.after(SIZED_MS, function()
+			if sizes == mine then
+				sized:set(nil)
+			end
+		end)
+	end
 	local picker_outside = ui.use_state(false)
 	local picker_was = picker_open:peek()
 	ui.effect(function()
@@ -2063,6 +2117,8 @@ return ui.component(function(props: Props): Node
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			step_with = props.step_effort,
+			step_context_with = step_context,
+			on_context_step = context_stepped,
 			close_with = props.model_close,
 			showing = picker_open,
 			outside = picker_outside,
@@ -2321,6 +2377,57 @@ return ui.component(function(props: Props): Node
 			},
 		})
 	end
+	local function request_changes()
+		if not props.on_deny then
+			return
+		end
+		local words = value:peek()
+		local function focus()
+			local el = field:peek()
+			if el then
+				el:focus()
+			end
+		end
+		if string.find(words, "%S") then
+			value:set("")
+		end
+		(props.on_deny :: any)({
+			text = words,
+			focus = focus,
+			keep = function()
+				value:set(words)
+			end,
+		})
+	end
+	local function waiting_above(): Node
+		return ui.row {
+			w_full = true,
+			px = "$space.3",
+			pt = "$space.2",
+			ui.button {
+				class = "composer-ask-above",
+				label = locale.t("ds.composer.question_above"),
+				h = 24,
+				px = ui.raw(7, "a quiet button, as the design's"),
+				gap = "$space.1",
+				items = "center",
+				rounded = ui.raw(7, "a quiet button, as the design's"),
+				bg = "#00000000",
+				color = "$text.tertiary",
+				text_size = "$font.size.xs",
+				hover = { bg = "$hover", color = "$text.primary" },
+				focus_on_press = false,
+				on_click = function()
+					local q = question()
+					if not (q and q.request and AskCard.reveal(q.request)) then
+						(require :: any)("@self/transcript").latest()
+					end
+				end,
+				Icon { name = "alt-arrow-up", size = 13 },
+				ui.text { locale.t("ds.composer.question_above") },
+			},
+		}
+	end
 	-- A question's way through: Back (from the second page), then Submit
 	-- (or Next, with pages to come), dimmed until something is picked or
 	-- typed. An approval's: Deny, Always allow, Allow.
@@ -2360,7 +2467,17 @@ return ui.component(function(props: Props): Node
 				hook = false,
 				gap = "$space.2",
 				items = "center",
-				Button { locale.t("ds.composer.deny"), size = "sm", tone = "ghost", on_click = props.on_deny },
+				Button {
+					locale.t("ds.composer.deny"),
+					size = "sm",
+					tone = "ghost",
+					on_click = function()
+						if props.on_deny then
+							props.on_deny()
+						end
+					end,
+				},
+				Button { locale.t("ds.composer.request_changes"), size = "sm", tone = "secondary", on_click = request_changes },
 				ui.show(
 					function(): boolean
 						local always = props.can_always
@@ -2840,7 +2957,9 @@ return ui.component(function(props: Props): Node
 		}),
 		ui.presence(function(): string?
 			local q = question()
-			if q then
+			if q and q.inline then
+				return "above"
+			elseif q then
 				-- A new question (or its next page) is built afresh.
 				return `question:{q.text}:{q.page or 1}:{if q.multi then 1 else 0}`
 			elseif approval() then
@@ -2853,6 +2972,9 @@ return ui.component(function(props: Props): Node
 			local kind = string.match(key, "^(%a+)")
 			if kind == "mini" then
 				return mini_strip()
+			end
+			if kind == "above" then
+				return waiting_above()
 			end
 			if kind == "question" then
 				local q = question() :: ask.Question
@@ -2936,7 +3058,10 @@ return ui.component(function(props: Props): Node
 		return if #text < #p and string.sub(p, 1, #text) == text then p else nil
 	end
 	local function placeholder(): string
-		if question() then
+		local q = question()
+		if q and q.inline then
+			return locale.s("ds.composer.placeholder.inline_answer")
+		elseif q then
 			return locale.s(if picked() > 0 then "ds.composer.placeholder.answer_picked" else "ds.composer.placeholder.answer")
 		elseif approval() then
 			return locale.s("ds.composer.placeholder.instead")
@@ -3323,6 +3448,10 @@ return ui.component(function(props: Props): Node
 					if unit and unit.keys(e) then
 						return true
 					end
+					if (e.key == "ArrowUp" or e.key == "ArrowDown") and e.shift and not e.cmd and not e.alt and not e.ctrl and not has_text() then
+						step_context:set({ n = step_context:peek().n + 1, by = if e.key == "ArrowUp" then 1 else -1 })
+						return true
+					end
 					if e.key == "Tab" and e.alt and not e.cmd and not e.ctrl and mission_on() then
 						step_size(if e.shift then -1 else 1)
 						return true
@@ -3335,7 +3464,7 @@ return ui.component(function(props: Props): Node
 						return true
 					end
 					local q = question()
-					if q then
+					if q and not q.inline then
 						local d = string.match(e.key, "^(%d)$")
 						if d and not has_text() and not e.cmd and not e.ctrl and not e.alt then
 							local o = q.options[tonumber(d) :: number]
@@ -3832,6 +3961,7 @@ return ui.component(function(props: Props): Node
 						plan = plan,
 						compaction = readout,
 						side = side,
+						sized = sized,
 					}
 					elseif props.context then ring(props.context)
 					else nil,

@@ -3642,6 +3642,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                 let id = field(["id", "questionId", "question_id"]);
                 if id.is_empty() { format!("q{ix}") } else { id }
             };
+            let (options, details) = crate::question_options(q);
             let question = UserInputQuestion {
                 approval: false,
                 note: None,
@@ -3655,22 +3656,7 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                     }
                 },
                 question: field(["question", "prompt", "text"]),
-                options: q
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|a| a.as_slice())
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|op| match op {
-                        Value::String(s) => s.clone(),
-                        other => other
-                            .get("label")
-                            .or_else(|| other.get("value"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .into(),
-                    })
-                    .collect(),
+                options,
                 prefill: None,
                 multiline: false,
                 multi_select: ["multiSelect", "multi_select"]
@@ -3679,6 +3665,9 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
                     .unwrap_or(false),
                 kind: None,
                 action: None,
+                details,
+                allow_note: false,
+                quick: false,
             };
             (wire_id, question)
         })

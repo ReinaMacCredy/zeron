@@ -7750,7 +7750,11 @@ impl DocHost {
                 request_id,
                 answers,
             } => {
+                let change = sessions.change_request_to_send(chat_id, request_id, answers);
                 if sessions.respond_input(chat_id, request_id, answers.clone())? {
+                    if let Some(change) = change {
+                        self.queue_message_after_turn(chat_id, &change, Vec::new())?;
+                    }
                     return Ok((SessionCommandStatus::Applied, None));
                 }
                 // No live resolver. Only a request id the doc shows as an
@@ -7777,6 +7781,21 @@ impl DocHost {
                         })
                 });
                 let Some(questions) = questions else {
+                    // An `ask_user` that stopped waiting, answered while its turn still runs.
+                    if let Some(questions) = sessions.answer_lapsed(chat_id, request_id, answers) {
+                        if answers.is_empty() {
+                            return Ok((
+                                SessionCommandStatus::Applied,
+                                Some("closed unanswered".into()),
+                            ));
+                        }
+                        let prompt = respond_input_prompt(&questions, answers);
+                        self.hold_for_turn_end(chat_id, &prompt, None, entry.computer_generation)?;
+                        return Ok((
+                            SessionCommandStatus::Applied,
+                            Some("held until the turn ends".into()),
+                        ));
+                    }
                     return Ok((
                         SessionCommandStatus::Rejected,
                         Some("no pending input request".into()),
@@ -8242,6 +8261,14 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        if let Ok(handle) = self.open_local(chat_id) {
+            for request_id in open_questions(&handle) {
+                if let Err(err) = handle.doc.resolve_input(&request_id, Some(&[]), now_ms()) {
+                    tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
+                        "open question close failed");
+                }
+            }
+        }
         self.restore_removed_worktree(sessions, chat_id, &request.cwd)
             .await;
         let work_tree = self
@@ -8577,6 +8604,36 @@ mod threshold_checkpoint_tests {
     }
 }
 
+/// The questions the newest settled reply left open (an `ask_user` lapse, a run that died):
+/// the app answers only the newest reply's, so a turn starting past them closes them.
+fn open_questions(handle: &ChatDocHandle) -> Vec<String> {
+    let Ok(entries) = handle.doc.read_entries_shared() else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.role == MessageRole::Assistant)
+        .filter(|e| e.status != Some(MessageStatus::Streaming))
+        .map(|e| {
+            e.parts
+                .iter()
+                .filter_map(|p| match p {
+                    MessagePart::Input {
+                        request_id,
+                        questions,
+                        resolved: false,
+                        ..
+                    } if !questions.iter().any(|q| q.is_computer() || q.is_secret()) => {
+                        Some(request_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The resumed-turn prompt for answers to a question whose run died: each
 /// answer paired with its question text so the reattached conversation reads
 /// naturally. Pure.
@@ -8586,7 +8643,10 @@ pub fn respond_input_prompt(
 ) -> String {
     let mut lines = vec!["Answering your earlier question:".to_string()];
     for answer in answers {
-        let picked = answer.labels.join(", ");
+        let mut picked = answer.labels.join(", ");
+        if let Some(note) = answer.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+            picked = format!("{picked} (note: {note})");
+        }
         let question = questions
             .iter()
             .find(|q| q.id == answer.question_id)

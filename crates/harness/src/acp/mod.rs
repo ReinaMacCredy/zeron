@@ -5268,7 +5268,9 @@ fn handle_server_request_live(
         })
         .collect();
     let question = UserInputQuestion {
-        approval: false,
+        approval: options
+            .iter()
+            .any(|o| !is_user_question(std::slice::from_ref(o))),
         note: None,
         id: new_message_id(),
         header: "Agent question".into(),
@@ -5284,6 +5286,9 @@ fn handle_server_request_live(
         multi_select: false,
         kind: None,
         action: None,
+        details: Vec::new(),
+        allow_note: false,
+        quick: false,
     };
     let request_input = std::sync::Arc::clone(request_input);
     questions.spawn(client.clone(), id, async move {

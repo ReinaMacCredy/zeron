@@ -126,6 +126,7 @@ impl SecretAnswer {
             .send(vec![UserInputAnswer {
                 question_id: SECRET_QUESTION_ID.to_owned(),
                 labels: vec![status.to_owned()],
+                note: None,
             }])
             .is_ok();
         let status = if delivered {
@@ -138,6 +139,7 @@ impl SecretAnswer {
             answers: Some(vec![UserInputAnswer {
                 question_id: SECRET_QUESTION_ID.to_owned(),
                 labels: vec![status.to_owned()],
+                note: None,
             }]),
         });
         delivered
@@ -436,6 +438,8 @@ struct RunHandle {
     grants: Arc<Mutex<Vec<ApprovalAction>>>,
     /// Requests the Auto check allowed, recorded as asked and answered.
     auto_answered: Arc<Mutex<HashSet<String>>>,
+    /// `ask_user` questions whose call gave up waiting: open past the turn, for an answer that resumes the chat.
+    lapsed_inputs: Arc<Mutex<HashMap<String, Vec<UserInputQuestion>>>>,
     /// Steers accepted into the mailbox but not yet confirmed by a `Steered`
     /// event — the at-least-once ledger. A run can die with accepted steers
     /// still in its mailbox (idle reaper vs. a routed send; a mid-turn error
@@ -837,6 +841,7 @@ impl RunSetup {
                 allowance,
                 grants,
                 auto_answered,
+                lapsed_inputs: Arc::default(),
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 computer: RunComputer::new(),
@@ -4624,18 +4629,64 @@ impl SessionsEngine {
         run_secret: &str,
         questions: Vec<UserInputQuestion>,
         wait: std::time::Duration,
-    ) -> Result<Vec<UserInputAnswer>, String> {
+    ) -> Result<Option<Vec<UserInputAnswer>>, String> {
         self.computer_run(chat_id, run_secret)
             .ok_or_else(|| "This chat has no live run to ask in.".to_owned())?;
         let request_id = new_id();
         let answers = self.raise_input(chat_id, &request_id, questions)?;
         match tokio::time::timeout(wait, answers).await {
-            Ok(answers) => Ok(answers.unwrap_or_default()),
-            Err(_) => {
-                self.settle_input(chat_id, &request_id);
-                Ok(Vec::new())
-            }
+            Ok(answers) => Ok(Some(answers.unwrap_or_default())),
+            Err(_) => Ok(self.lapse_input(chat_id, &request_id)),
         }
+    }
+
+    fn lapse_input(&self, chat_id: &str, request_id: &str) -> Option<Vec<UserInputAnswer>> {
+        let runs = lock(&self.inner.runs);
+        let Some(run) = runs.get(chat_id) else {
+            return Some(Vec::new());
+        };
+        let Some(input) = lock(&run.pending_inputs).remove(request_id) else {
+            return Some(Vec::new());
+        };
+        lock(&run.lapsed_inputs).insert(request_id.to_owned(), input.questions);
+        None
+    }
+
+    pub fn answer_lapsed(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: &[UserInputAnswer],
+    ) -> Option<Vec<UserInputQuestion>> {
+        let runs = lock(&self.inner.runs);
+        let run = runs.get(chat_id)?;
+        let questions = lock(&run.lapsed_inputs).remove(request_id)?;
+        let _ = run.engine_tx.send(AgentEvent::InputResolved {
+            request_id: request_id.to_owned(),
+            answers: Some(answers.to_vec()),
+        });
+        Some(questions)
+    }
+
+    pub fn change_request_to_send(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        answers: &[UserInputAnswer],
+    ) -> Option<String> {
+        let runs = lock(&self.inner.runs);
+        let run = runs.get(chat_id)?;
+        if zeron_harness::approval::carries_change_request(run.runtime_config.harness_id) {
+            return None;
+        }
+        let pending = lock(&run.pending_inputs);
+        pending
+            .get(request_id)?
+            .questions
+            .iter()
+            .filter(|q| q.approval)
+            .find_map(|q| zeron_harness::approval::change_request(q, answers))
+            .map(str::to_owned)
     }
 
     pub fn settle_input(&self, chat_id: &str, request_id: &str) -> bool {
@@ -4679,6 +4730,7 @@ impl SessionsEngine {
                         answers: Some(vec![UserInputAnswer {
                             question_id,
                             labels: vec![SecretStatus::TIMED_OUT.to_owned()],
+                            note: None,
                         }]),
                     });
                 }
@@ -9631,7 +9683,9 @@ async fn drive_run(
                         MessagePart::Tool { id, resolved: false, .. } => {
                             id != zeron_proto::LIVE_PLAN_TOOL_ID
                         }
-                        MessagePart::Input { resolved: false, .. } => true,
+                        MessagePart::Input { request_id, resolved: false, .. } => !lock(&inner.runs)
+                            .get(&chat_id)
+                            .is_some_and(|h| lock(&h.lapsed_inputs).contains_key(request_id)),
                         _ => false,
                     }) =>
                 {
@@ -10689,11 +10743,22 @@ async fn drive_run(
             // errored, interrupted) terminally resolves its input parts — an
             // unresolved question must not outlive the run that asked it
             // (its resolver died with the run; an answer could never land).
+            let lapsed = lock(&inner.runs)
+                .get(&chat_id)
+                .filter(|h| h.run_id == run_id)
+                .map(|h| std::mem::take(&mut *lock(&h.lapsed_inputs)))
+                .unwrap_or_default();
             for part in folded.iter_mut() {
                 if let MessagePart::Input {
-                    resolved, answers, ..
+                    request_id,
+                    resolved,
+                    answers,
+                    ..
                 } = part
                 {
+                    if !*resolved && lapsed.contains_key(request_id.as_str()) {
+                        continue;
+                    }
                     if !*resolved {
                         // Never answered: it closed with the run.
                         *answers = Some(Vec::new());

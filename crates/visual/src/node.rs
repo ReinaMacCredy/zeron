@@ -59,9 +59,25 @@ pub enum NodeKind {
     Shader(ShaderNode),
     Button {
         label: String,
-        on_click: HandlerId,
+        on_click: Option<HandlerId>,
         primary: bool,
+        /// Sent on the person's own press only, never by the script.
+        send: Option<String>,
     },
+    Input(Input),
+    Select {
+        options: Vec<SelectOption>,
+        value: String,
+        label: Option<String>,
+        on_change: HandlerId,
+    },
+    Disclosure {
+        label: String,
+        open: bool,
+        on_toggle: Option<HandlerId>,
+        children: Vec<Node>,
+    },
+    Quiz(Box<Quiz>),
     Tabs {
         options: Vec<String>,
         value: String,
@@ -99,6 +115,56 @@ pub struct Stack {
     pub hover: bool,
     pub on_click: Option<HandlerId>,
     pub children: Vec<Node>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Input {
+    pub value: String,
+    pub placeholder: Option<String>,
+    pub label: Option<String>,
+    pub on_change: Option<HandlerId>,
+    pub on_submit: Option<HandlerId>,
+    pub send: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectOption {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuizKind {
+    Single,
+    Multi,
+    TrueFalse,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuizOption {
+    pub text: String,
+    pub correct: bool,
+    pub why: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuizQuestion {
+    pub kind: QuizKind,
+    pub question: String,
+    pub hint: Option<String>,
+    pub options: Vec<QuizOption>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuizOpen {
+    pub question: String,
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Quiz {
+    pub questions: Vec<QuizQuestion>,
+    pub open: Option<QuizOpen>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -271,6 +337,10 @@ pub const MAX_HEIGHT: f32 = 720.0;
 const MAX_NODES: usize = 4000;
 const MAX_DEPTH: usize = 48;
 const MAX_TEXT: usize = 8000;
+const MAX_SELECT_OPTIONS: usize = 200;
+pub const MAX_SEND_CHARS: usize = 2000;
+pub const MAX_QUIZ_QUESTIONS: usize = 20;
+const QUIZ_OPTIONS: std::ops::RangeInclusive<usize> = 2..=8;
 
 /// Builds a [`Node`] tree from a view's return value, collecting the
 /// functions it references.
@@ -590,13 +660,92 @@ impl Parser {
                 })
             }
             "button" => {
-                props.allow(&["label", "on_click", "primary"])?;
+                props.allow(&["label", "on_click", "primary", "send"])?;
+                let label = props.required_string("label")?;
+                let send = match props.table.raw_get::<Value>("send")? {
+                    Value::Boolean(true) => {
+                        return Err(props.error("'send' is the message a press sends, a string"));
+                    }
+                    _ => props.send()?,
+                };
+                if send.as_deref() == Some("") {
+                    return Err(props.error("'send' needs the message a press sends"));
+                }
+                let on_click = props.function("on_click")?.map(|f| self.handler(f));
+                if on_click.is_none() && send.is_none() {
+                    return Err(
+                        props.error("needs on_click = function() end (or send = \"message\")")
+                    );
+                }
                 NodeKind::Button {
-                    label: props.required_string("label")?,
-                    on_click: self.required_function(&props, "on_click")?,
+                    label,
+                    on_click,
                     primary: props.bool("primary")?.unwrap_or(false),
+                    send,
                 }
             }
+            "input" => {
+                props.allow(&["value", "placeholder", "label", "on_change", "on_submit", "send"])?;
+                let input = Input {
+                    value: props.text_value("value")?.unwrap_or_default(),
+                    placeholder: props.string("placeholder")?,
+                    label: props.string("label")?,
+                    on_change: props.function("on_change")?.map(|f| self.handler(f)),
+                    on_submit: props.function("on_submit")?.map(|f| self.handler(f)),
+                    send: props.send()?,
+                };
+                if input.on_change.is_none() && input.on_submit.is_none() && input.send.is_none() {
+                    return Err(props.error("needs on_change, on_submit, or send"));
+                }
+                NodeKind::Input(input)
+            }
+            "select" => {
+                props.allow(&["options", "value", "label", "on_change"])?;
+                let mut options = Vec::new();
+                for option in props.get::<Option<Vec<Value>>>("options")?.unwrap_or_default() {
+                    options.push(match option {
+                        Value::Table(t) => {
+                            let option = Props { table: &t, kind: "select option" };
+                            option.allow(&["label", "value"])?;
+                            let value = option.required_string("value")?;
+                            SelectOption {
+                                label: option.string("label")?.unwrap_or_else(|| value.clone()),
+                                value,
+                            }
+                        }
+                        other => {
+                            let text = value_text(&other);
+                            SelectOption { label: text.clone(), value: text }
+                        }
+                    });
+                }
+                if options.is_empty() {
+                    return Err(props.error("needs options = { ... }"));
+                }
+                if options.len() > MAX_SELECT_OPTIONS {
+                    return Err(props.error(&format!("takes at most {MAX_SELECT_OPTIONS} options")));
+                }
+                NodeKind::Select {
+                    value: props.text_value("value")?.unwrap_or_else(|| options[0].value.clone()),
+                    options,
+                    label: props.string("label")?,
+                    on_change: self.required_function(&props, "on_change")?,
+                }
+            }
+            "disclosure" => {
+                props.allow(&["label", "open", "on_toggle"])?;
+                let mut children = Vec::new();
+                for child in table.sequence_values::<Value>() {
+                    self.children_into(child?, &mut children, depth + 1)?;
+                }
+                NodeKind::Disclosure {
+                    label: props.required_string("label")?,
+                    open: props.bool("open")?.unwrap_or(false),
+                    on_toggle: props.function("on_toggle")?.map(|f| self.handler(f)),
+                    children,
+                }
+            }
+            "quiz" => NodeKind::Quiz(Box::new(quiz(&props)?)),
             "tabs" => {
                 props.allow(&["options", "value", "on_change"])?;
                 let options: Vec<String> = props
@@ -914,6 +1063,109 @@ fn chart(props: &Props) -> Result<Chart, VisualError> {
     })
 }
 
+fn quiz(props: &Props) -> Result<Quiz, VisualError> {
+    props.allow(&["questions", "open"])?;
+    let list = props.get::<Option<Vec<Table>>>("questions")?.unwrap_or_default();
+    if list.is_empty() || list.len() > MAX_QUIZ_QUESTIONS {
+        return Err(props.error(&format!("takes 1 to {MAX_QUIZ_QUESTIONS} questions")));
+    }
+    let mut questions = Vec::new();
+    for (ix, table) in list.iter().enumerate() {
+        let n = ix + 1;
+        let q = Props { table, kind: "quiz question" };
+        q.allow(&["kind", "question", "hint", "options"])?;
+        let fail = |message: &str| props.error(&format!("question {n} {message}"));
+        let kind = match q.string("kind")?.as_deref().unwrap_or("single") {
+            "single" => QuizKind::Single,
+            "multi" => QuizKind::Multi,
+            "truefalse" => QuizKind::TrueFalse,
+            other => {
+                return Err(fail(&format!(
+                    "has kind '{other}': use single, multi, or truefalse"
+                )));
+            }
+        };
+        let question = q
+            .string("question")?
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| fail("needs question"))?;
+        let mut options = Vec::new();
+        for option in q.get::<Option<Vec<Table>>>("options")?.unwrap_or_default() {
+            let o = Props { table: &option, kind: "quiz option" };
+            o.allow(&["text", "correct", "why"])?;
+            options.push(QuizOption {
+                text: o
+                    .string("text")?
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| fail("has an option with no text"))?,
+                correct: o.bool("correct")?.unwrap_or(false),
+                why: o.string("why")?,
+            });
+        }
+        if kind == QuizKind::TrueFalse && options.len() != 2 {
+            return Err(fail("is truefalse: it takes exactly 2 options"));
+        }
+        if !QUIZ_OPTIONS.contains(&options.len()) {
+            return Err(fail(&format!(
+                "takes {} to {} options",
+                QUIZ_OPTIONS.start(),
+                QUIZ_OPTIONS.end()
+            )));
+        }
+        let correct = options.iter().filter(|o| o.correct).count();
+        match kind {
+            QuizKind::Multi if correct == 0 => {
+                return Err(fail("is multi: mark at least one option correct = true"));
+            }
+            QuizKind::Single | QuizKind::TrueFalse if correct != 1 => {
+                return Err(fail(
+                    "takes exactly one option with correct = true (use kind = \"multi\" for more)",
+                ));
+            }
+            _ => {}
+        }
+        questions.push(QuizQuestion {
+            kind,
+            question,
+            hint: q.string("hint")?,
+            options,
+        });
+    }
+    let open = match props.get::<Option<Table>>("open")? {
+        Some(table) => {
+            let o = Props { table: &table, kind: "quiz open" };
+            o.allow(&["question", "placeholder"])?;
+            let question = o
+                .string("question")?
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| props.error("open needs question"))?;
+            if let Some(why) = sent_problem(&question) {
+                return Err(props.error(&format!("open question {why}")));
+            }
+            Some(QuizOpen {
+                question,
+                placeholder: o.string("placeholder")?,
+            })
+        }
+        None => None,
+    };
+    Ok(Quiz { questions, open })
+}
+
+/// A command or a chat link would act with the person's authority, not just say something.
+fn sent_problem(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    if text.chars().count() > MAX_SEND_CHARS {
+        Some(format!("is over {MAX_SEND_CHARS} characters"))
+    } else if text.trim_start().starts_with('/') {
+        Some("can't start with '/': commands are the person's to type".into())
+    } else if lower.contains("zeron-chat:") || lower.contains("zeron-invoke:") {
+        Some("can't carry zeron-chat: or zeron-invoke: links".into())
+    } else {
+        None
+    }
+}
+
 struct Props<'a> {
     table: &'a Table,
     kind: &'a str,
@@ -974,6 +1226,21 @@ impl Props<'_> {
             }
             _ => return Err(self.error(&format!("'{name}' must be a string"))),
         })
+    }
+
+    fn send(&self) -> Result<Option<String>, VisualError> {
+        match self.table.raw_get::<Value>("send")? {
+            Value::Nil | Value::Boolean(false) => Ok(None),
+            Value::Boolean(true) => Ok(Some(String::new())),
+            value @ (Value::String(_) | Value::Integer(_) | Value::Number(_)) => {
+                let text = value_text(&value).trim().to_owned();
+                match sent_problem(&text) {
+                    Some(why) => Err(self.error(&format!("'send' {why}"))),
+                    None => Ok(Some(text)),
+                }
+            }
+            _ => Err(self.error("'send' must be true or a string")),
+        }
     }
 
     fn required_string(&self, name: &str) -> Result<String, VisualError> {

@@ -22,6 +22,12 @@
 //!   visuals.event { id, h, arg? }                          (`ui.action`)
 //!       a control's handler with its value (nil, a string, a boolean, a
 //!       number, `{ x, y }`), then the view rendered again.
+//!   visuals.reset id                                      (`ui.action`)
+//!       starts it over from its script, its state dropped, what it kept too.
+//!   visuals.saved { id, key }                             (`ui.call_sync`)
+//!   visuals.save { id, key, value }                       (`ui.action`)
+//!       what ds/visual keeps of its own for it (a quiz's answers, what was
+//!       sent), by key, kept with its `ui.keep` tables across a restart.
 //!   visuals.draw { id, h, w, ht, t, px?, py?, down? }     (`ui.call_sync`)
 //!       a canvas's drawing at a size and time: `{ cmds, pointer }` (or
 //!       `{ error }`), each command `{ k = "s" | "f" | "t", … }`.
@@ -114,8 +120,81 @@ enum Load {
     Failed(String),
 }
 
+#[derive(Default)]
+struct Stored {
+    keep: Vec<(String, zv::Kept)>,
+    keep_json: Option<String>,
+    app: serde_json::Map<String, serde_json::Value>,
+}
+
+const MAX_APP_BYTES: usize = 64 * 1024;
+
+thread_local! {
+    static STORE_DIR: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+
+fn store_path(id: &str) -> Option<std::path::PathBuf> {
+    let name: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    STORE_DIR.with(|d| d.borrow().as_ref().map(|dir| dir.join(format!("{name}.json"))))
+}
+
+fn kept_of(value: &serde_json::Value) -> Option<zv::Kept> {
+    Some(match value {
+        serde_json::Value::Bool(b) => zv::Kept::Bool(*b),
+        serde_json::Value::Number(n) => zv::Kept::Number(n.as_f64()?),
+        serde_json::Value::String(t) => zv::Kept::Text(t.clone()),
+        serde_json::Value::Array(items) => zv::Kept::List(items.iter().filter_map(kept_of).collect()),
+        serde_json::Value::Object(fields) => {
+            zv::Kept::Map(fields.iter().filter_map(|(k, v)| Some((k.clone(), kept_of(v)?))).collect())
+        }
+        serde_json::Value::Null => return None,
+    })
+}
+
+impl Stored {
+    fn read(id: &str) -> Self {
+        let Some(json) = store_path(id).and_then(|path| std::fs::read(path).ok()) else { return Self::default() };
+        let Ok(serde_json::Value::Object(mut file)) = serde_json::from_slice::<serde_json::Value>(&json) else {
+            return Self::default();
+        };
+        let keep = match file.remove("keep") {
+            Some(serde_json::Value::Object(keep)) => keep,
+            _ => serde_json::Map::new(),
+        };
+        let app = match file.remove("app") {
+            Some(serde_json::Value::Object(app)) => app,
+            _ => serde_json::Map::new(),
+        };
+        Self {
+            keep: keep.iter().filter_map(|(k, v)| Some((k.clone(), kept_of(v)?))).collect(),
+            keep_json: (!keep.is_empty()).then(|| serde_json::Value::Object(keep).to_string()),
+            app,
+        }
+    }
+
+    fn write(&self, id: &str) {
+        let Some(path) = store_path(id) else { return };
+        let keep = self.keep_json.as_deref().and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok());
+        if keep.is_none() && self.app.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        let file = json!({ "keep": keep.unwrap_or_else(|| json!({})), "app": self.app });
+        let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| {
+            let part = path.with_extension("json.part");
+            std::fs::write(&part, file.to_string())?;
+            std::fs::rename(&part, &path)
+        });
+        if let Err(why) = written {
+            eprintln!("zeron-zgx: visual {id}: couldn't keep its state: {why}");
+        }
+    }
+}
+
 /// A visual's live program and what it last showed.
 struct Entry {
+    id: String,
+    stored: Option<Stored>,
     title: String,
     load: Load,
     runtime: Option<zv::Visual>,
@@ -140,8 +219,10 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(title: String) -> Self {
+    fn new(id: &str, title: String) -> Self {
         Self {
+            id: id.to_owned(),
+            stored: None,
             title,
             load: Load::Loading,
             runtime: None,
@@ -159,11 +240,40 @@ impl Entry {
         }
     }
 
+    fn stored(&mut self) -> &mut Stored {
+        let id = &self.id;
+        self.stored.get_or_insert_with(|| Stored::read(id))
+    }
+
+    fn keep(&mut self) {
+        let Some(runtime) = self.runtime.as_ref() else { return };
+        let json = match runtime.kept_json() {
+            Ok(json) => json,
+            Err(error) => return self.fail(error),
+        };
+        let stored = self.stored();
+        if json == stored.keep_json {
+            return;
+        }
+        stored.keep = json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+            .and_then(|v| match v {
+                serde_json::Value::Object(fields) => Some(fields.iter().filter_map(|(k, v)| Some((k.clone(), kept_of(v)?))).collect()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        stored.keep_json = json;
+        let id = self.id.clone();
+        self.stored().write(&id);
+    }
+
     /// Run `source`'s setup and first render, seeded from `id`.
     fn start(&mut self, id: &str, source: String, assets: zv::Assets) {
         let started = std::time::Instant::now();
         let seed = zv::seed_for(id);
-        match zv::Visual::load(&source, seed) {
+        let kept = self.stored().keep.clone();
+        match zv::Visual::load_keeping(&source, seed, &kept) {
             Ok(runtime) => {
                 self.runtime = Some(runtime.with_assets(assets.clone()));
                 (self.source, self.assets, self.seed) = (source, assets, seed);
@@ -225,7 +335,8 @@ impl Entry {
             if self.load != Load::Ready {
                 return Err("not running".into());
             }
-            let loaded = zv::Visual::load(&self.source, self.seed).map_err(|e| e.message)?;
+            let kept = self.stored().keep.clone();
+            let loaded = zv::Visual::load_keeping(&self.source, self.seed, &kept).map_err(|e| e.message)?;
             let mut runtime = loaded.with_assets(self.assets.clone());
             let tree = runtime.render().map_err(|e| e.message)?;
             if self.tree.as_ref() != Some(&tree) {
@@ -238,6 +349,22 @@ impl Entry {
         self.runtime.as_mut().ok_or_else(|| "not running".into())
     }
 
+    fn reset(&mut self, id: &str) {
+        if self.load != Load::Ready {
+            return;
+        }
+        let (source, assets) = (std::mem::take(&mut self.source), std::mem::take(&mut self.assets));
+        self.runtime = None;
+        self.error = None;
+        self.stored = Some(Stored::default());
+        self.stored().write(id);
+        self.scenes.clear();
+        self.shaders.clear();
+        self.start(id, source, assets);
+        // (The same tree as before draws again too: what ds/visual holds of its own goes.)
+        self.rev += 1;
+    }
+
     /// A control's handler, then the view again.
     fn event(&mut self, handler: u32, arg: zv::HandlerArg) {
         self.keep_awake = true;
@@ -246,9 +373,41 @@ impl Entry {
             Err(why) => return self.fail(zv::VisualError::script(why)),
         };
         match runtime.call(zv::HandlerId(handler), arg) {
-            Ok(()) => self.render(),
+            Ok(()) => {
+                self.render();
+                self.keep();
+            }
             Err(error) => self.fail(error),
         }
+    }
+
+    fn saved(&mut self, key: &str) -> Value {
+        match self.stored().app.get(key) {
+            Some(value) => Value::from_json(&value.to_string()).unwrap_or(Value::Nil),
+            None => Value::Nil,
+        }
+    }
+
+    fn save(&mut self, key: &str, value: &Value) {
+        let json = match value {
+            Value::Nil => None,
+            value => serde_json::from_str::<serde_json::Value>(&value.to_json()).ok(),
+        };
+        let stored = self.stored();
+        if stored.app.get(key) == json.as_ref() {
+            return;
+        }
+        match json {
+            Some(json) => stored.app.insert(key.to_owned(), json),
+            None => stored.app.remove(key),
+        };
+        if serde_json::Value::Object(stored.app.clone()).to_string().len() > MAX_APP_BYTES {
+            stored.app.remove(key);
+            eprintln!("zeron-zgx: visual {}: its state for {key} is too large to keep", self.id);
+            return;
+        }
+        let id = self.id.clone();
+        self.stored().write(&id);
     }
 
     fn snapshot(&self) -> Value {
@@ -363,6 +522,12 @@ impl Visuals {
 /// The scripts' calls, on every window but the intro's.
 pub fn install(cx: &mut zgx_desktop::WindowContext, host: &ScriptHost) {
     crate::engine::install(cx);
+    STORE_DIR.with(|d| {
+        let mut dir = d.borrow_mut();
+        if dir.is_none() {
+            *dir = zgx_script::app_data_dir(crate::APP_ID).map(|d| d.join("visuals"));
+        }
+    });
     // `ui.window.shown`: a visual stops animating while its window is
     // hidden, minimized or covered.
     host.window_state(&cx.ui);
@@ -405,6 +570,24 @@ pub fn register(host: &ScriptHost) {
         if changed {
             v.publish();
         }
+    });
+    let v = visuals.clone();
+    host.action("visuals.reset", move |arg| {
+        let id = crate::auth::text(&arg);
+        if v.with(&id, |e| e.reset(&id)).is_some() {
+            v.publish();
+        }
+    });
+    let v = visuals.clone();
+    host.function("visuals.saved", move |arg| {
+        let (id, key) = (text(arg.field("id")), text(arg.field("key")));
+        v.with(&id, |e| e.saved(&key)).unwrap_or(Value::Nil)
+    });
+    let v = visuals.clone();
+    host.action("visuals.save", move |arg| {
+        let (id, key) = (text(arg.field("id")), text(arg.field("key")));
+        let value = arg.field("value").cloned().unwrap_or(Value::Nil);
+        v.with(&id, |e| e.save(&key, &value));
     });
     let v = visuals.clone();
     host.function("visuals.draw", move |arg| {
@@ -451,7 +634,7 @@ pub fn surfaces(id: &str) -> (Vec<(String, u32)>, Vec<String>) {
 #[cfg(test)]
 pub fn preload(id: &str, title: &str, source: &str) {
     VISUALS.with(|v| {
-        let mut e = Entry::new(title.into());
+        let mut e = Entry::new(id, title.into());
         e.start(id, source.into(), zv::Assets::default());
         v.entries.borrow_mut().insert(id.into(), e);
         v.publish();
@@ -512,7 +695,7 @@ async fn open(v: Rc<Visuals>, arg: Value) -> Result<Value, String> {
             Some(Load::Loading | Load::Ready) => return Ok(Value::Nil),
             // (One that failed is read again, as the chat opens again.)
             Some(Load::Failed(_)) | None => {
-                entries.insert(id.clone(), Entry::new(title));
+                entries.insert(id.clone(), Entry::new(&id, title));
             }
         }
     }
@@ -825,11 +1008,68 @@ fn node_value(node: &zv::Node, path: &str) -> Value {
             f.push(("pitch", num(s.pitch)));
             f.push(("zoom", num(s.zoom)));
         }
-        zv::NodeKind::Button { label, on_click, primary } => {
+        zv::NodeKind::Button { label, on_click, primary, send } => {
             f.push(("k", Value::from("button")));
             f.push(("label", Value::from(label.as_str())));
-            f.push(("click", handler(*on_click)));
+            if let Some(click) = on_click {
+                f.push(("click", handler(*click)));
+            }
             f.push(("primary", Value::Bool(*primary)));
+            if let Some(send) = send {
+                f.push(("send", Value::from(send.as_str())));
+            }
+        }
+        zv::NodeKind::Input(input) => {
+            f.push(("k", Value::from("input")));
+            f.push(("value", Value::from(input.value.as_str())));
+            if let Some(placeholder) = &input.placeholder {
+                f.push(("placeholder", Value::from(placeholder.as_str())));
+            }
+            if let Some(label) = &input.label {
+                f.push(("label", Value::from(label.as_str())));
+            }
+            if let Some(change) = input.on_change {
+                f.push(("change", handler(change)));
+            }
+            if let Some(submit) = input.on_submit {
+                f.push(("submit", handler(submit)));
+            }
+            if let Some(send) = &input.send {
+                f.push(("send", Value::from(send.as_str())));
+            }
+        }
+        zv::NodeKind::Select { options, value, label, on_change } => {
+            f.push(("k", Value::from("select")));
+            f.push((
+                "options",
+                list(options.iter().map(|o| Value::record([("label", Value::from(o.label.as_str())), ("value", Value::from(o.value.as_str()))])).collect()),
+            ));
+            f.push(("value", Value::from(value.as_str())));
+            if let Some(label) = label {
+                f.push(("label", Value::from(label.as_str())));
+            }
+            f.push(("change", handler(*on_change)));
+        }
+        zv::NodeKind::Disclosure { label, open, on_toggle, children } => {
+            f.push(("k", Value::from("disclosure")));
+            f.push(("label", Value::from(label.as_str())));
+            f.push(("open", Value::Bool(*open)));
+            if let Some(toggle) = on_toggle {
+                f.push(("toggle", handler(*toggle)));
+            }
+            f.push(("children", children_value(children, path)));
+        }
+        zv::NodeKind::Quiz(quiz) => {
+            f.push(("k", Value::from("quiz")));
+            f.push(("questions", list(quiz.questions.iter().map(question_value).collect())));
+            // (Not `open`: ds/visual follows a disclosure's `open` in place.)
+            if let Some(open) = &quiz.open {
+                let mut essay = vec![("question", Value::from(open.question.as_str()))];
+                if let Some(placeholder) = &open.placeholder {
+                    essay.push(("placeholder", Value::from(placeholder.as_str())));
+                }
+                f.push(("essay", Value::record(essay)));
+            }
         }
         zv::NodeKind::Tabs { options, value, on_change } => {
             f.push(("k", Value::from("tabs")));
@@ -862,6 +1102,30 @@ fn node_value(node: &zv::Node, path: &str) -> Value {
             f.push(("label", Value::from(label.as_str())));
             f.push(("url", Value::from(url.as_str())));
         }
+    }
+    Value::record(f)
+}
+
+fn question_value(q: &zv::QuizQuestion) -> Value {
+    let kind = match q.kind {
+        zv::QuizKind::Single => "single",
+        zv::QuizKind::Multi => "multi",
+        zv::QuizKind::TrueFalse => "truefalse",
+    };
+    let options = q
+        .options
+        .iter()
+        .map(|o| {
+            let mut f = vec![("text", Value::from(o.text.as_str())), ("correct", Value::Bool(o.correct))];
+            if let Some(why) = &o.why {
+                f.push(("why", Value::from(why.as_str())));
+            }
+            Value::record(f)
+        })
+        .collect();
+    let mut f = vec![("kind", Value::from(kind)), ("question", Value::from(q.question.as_str())), ("options", list(options))];
+    if let Some(hint) = &q.hint {
+        f.push(("hint", Value::from(hint.as_str())));
     }
     Value::record(f)
 }
@@ -1417,7 +1681,7 @@ mod tests {
     use super::*;
 
     fn started(id: &str, source: &str) -> Entry {
-        let mut e = Entry::new("Test".into());
+        let mut e = Entry::new(id, "Test".into());
         e.start(id, source.into(), zv::Assets::default());
         e
     }
@@ -1437,6 +1701,37 @@ mod tests {
           }
         end
     "#;
+
+    #[test]
+    fn what_a_visual_keeps_outlives_the_app_and_its_reset() {
+        let dir = std::env::temp_dir().join(format!("zeron-visual-keep-{}", std::process::id()));
+        STORE_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let source = r#"
+            local s = ui.keep("pick", { n = 0 })
+            local loose = ui.state { n = 0 }
+            return function()
+              return ui.button { label = s.n .. "/" .. loose.n, on_click = function() s.n += 1; loose.n += 1 end }
+            end
+        "#;
+        let label = |e: &Entry| text(tree(e).field("label"));
+        let mut e = started("v:keep", source);
+        for _ in 0..2 {
+            let click = tree(&e).field("click").and_then(Value::as_f64).unwrap();
+            e.event(click as u32, zv::HandlerArg::None);
+        }
+        assert_eq!(label(&e), "2/2");
+        e.save("quiz", &Value::record([("i", num(3.))]));
+        drop(e);
+        let mut again = started("v:keep", source);
+        assert_eq!(label(&again), "2/0");
+        assert_eq!(again.saved("quiz").field("i").and_then(Value::as_f64), Some(3.));
+        again.reset("v:keep");
+        assert_eq!(label(&again), "0/0");
+        assert_eq!(again.saved("quiz"), Value::Nil);
+        assert!(!store_path("v:keep").unwrap().exists(), "Reset lets its file go");
+        assert_eq!(label(&started("v:keep", source)), "0/0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_visual_runs_and_its_tree_is_plain_data() {

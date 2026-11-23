@@ -46,6 +46,7 @@ pub const BLOCKED: &[&str] = &[
     "terminal.start",
     "terminal.write",
     "terminal.command",
+    "python.run",
     "account.",
     "plugins.install",
     // (Deciding on and signing plugins are the consent window's alone, a

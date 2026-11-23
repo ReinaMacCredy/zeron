@@ -79,7 +79,7 @@ end
 -- No `\`, `?` or control characters; no empty, `.` or `..` part (but a
 -- leading `/`).
 local function clean(path: string): boolean
-	if string.find(path, "[\\%?%c]") then
+	if string.find(path, "[\\%?%z\1-\31\127]") then
 		return false
 	end
 	local index = 0

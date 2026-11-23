@@ -26,6 +26,7 @@ async fn main() {
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: q.options.first().cloned().into_iter().collect(),
+                    note: None,
                 })
                 .collect();
             let _ = tx.send(answers);

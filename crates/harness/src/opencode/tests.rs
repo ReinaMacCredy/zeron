@@ -387,6 +387,7 @@ impl TurnWire {
                             .map(|q| UserInputAnswer {
                                 question_id: q.id,
                                 labels: vec![if answer { "Yes" } else { "No" }.into()],
+                                note: None,
                             })
                             .collect(),
                     );
@@ -1585,10 +1586,12 @@ fn form_answers_key_by_field_with_multiselect_arrays() {
         UserInputAnswer {
             question_id: pairs[0].1.id.clone(),
             labels: vec!["Red".into()],
+            note: None,
         },
         UserInputAnswer {
             question_id: pairs[1].1.id.clone(),
             labels: vec!["A".into(), "B".into()],
+            note: None,
         },
     ];
     assert_eq!(

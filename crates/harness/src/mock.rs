@@ -344,6 +344,9 @@ fn question_script() -> Vec<UserInputQuestion> {
             multi_select: false,
             kind: None,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         },
         UserInputQuestion {
             approval: false,
@@ -361,6 +364,9 @@ fn question_script() -> Vec<UserInputQuestion> {
             multi_select: true,
             kind: None,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         },
     ]
 }

@@ -75,6 +75,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec!["Yes".into()],
+                    note: None,
                 })
                 .collect();
             let _ = tx.send(answers);
@@ -1574,6 +1575,7 @@ fn answering_controls(
                         .map(|q| UserInputAnswer {
                             question_id: q.id.clone(),
                             labels: vec![answer.into()],
+                            note: None,
                         })
                         .collect(),
                 );

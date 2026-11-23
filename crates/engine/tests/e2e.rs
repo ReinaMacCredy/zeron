@@ -1686,6 +1686,9 @@ impl Harness for EchoAnswerHarness {
                 multi_select: false,
                 kind: None,
                 action: None,
+                details: Vec::new(),
+                allow_note: false,
+                quick: false,
             }])
             .await
             .unwrap_or_default();
@@ -1828,6 +1831,9 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
                     multi_select: false,
                     kind: None,
                     action: None,
+                    details: Vec::new(),
+                    allow_note: false,
+                    quick: false,
                 }],
                 resolved: false,
                 answers: None,
@@ -1933,6 +1939,7 @@ async fn respond_input_resolves_pending_question() {
             answers: vec![zeron_proto::UserInputAnswer {
                 question_id: "q1".into(),
                 labels: vec!["b".into()],
+                note: None,
             }],
         },
     );
@@ -1972,6 +1979,7 @@ async fn respond_input_resolves_pending_question() {
         Some(vec![zeron_proto::UserInputAnswer {
             question_id: "q1".into(),
             labels: vec!["b".into()],
+            note: None,
         }])
     );
     // The run task writes the Complete entry BEFORE settling the status row —
@@ -2029,6 +2037,9 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                     multi_select: false,
                     kind: None,
                     action: None,
+                    details: Vec::new(),
+                    allow_note: false,
+                    quick: false,
                 }])
                 .await
                 .unwrap_or_default();
@@ -2096,6 +2107,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
             answers: vec![zeron_proto::UserInputAnswer {
                 question_id: "q1".into(),
                 labels: vec!["a".into()],
+                note: None,
             }],
         },
     );
@@ -2143,6 +2155,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
             answers: vec![zeron_proto::UserInputAnswer {
                 question_id: "q1".into(),
                 labels: vec!["b".into()],
+                note: None,
             }],
         },
     );
@@ -2226,6 +2239,9 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         multi_select: false,
                         kind: None,
                         action: None,
+                        details: Vec::new(),
+                        allow_note: false,
+                        quick: false,
                     }])
                     .await;
                     interrupt.cancelled().await;
@@ -2379,6 +2395,9 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     multi_select: false,
                     kind: None,
                     action: None,
+                    details: Vec::new(),
+                    allow_note: false,
+                    quick: false,
                 };
                 // The pre-fix Claude/Codex shape: surface the question under
                 // the harness's own id BEFORE asking through the bridge.
@@ -2483,6 +2502,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
             answers: vec![zeron_proto::UserInputAnswer {
                 question_id: "q1".into(),
                 labels: vec!["a".into()],
+                note: None,
             }],
         },
     );

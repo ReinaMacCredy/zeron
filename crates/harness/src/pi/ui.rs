@@ -52,6 +52,9 @@ impl Dialogs {
             multiline: method == "editor",
             kind: None,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         };
         // Pi's `timeout` is in milliseconds; 0 means none, and a negative one
         // has already expired, so the dialog is over before it is shown. One
@@ -215,6 +218,7 @@ mod tests {
             .send(vec![UserInputAnswer {
                 question_id: String::new(),
                 labels: vec![],
+                note: None,
             }])
             .ok();
         // Answered (with no matching label) only once the user replied.
@@ -256,6 +260,7 @@ mod tests {
             .send(vec![UserInputAnswer {
                 question_id: String::new(),
                 labels: vec![],
+                note: None,
             }])
             .ok();
         let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())

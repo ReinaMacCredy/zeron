@@ -824,6 +824,9 @@ impl Runner {
                 approval: false,
                 kind: None,
                 action: None,
+                details: Vec::new(),
+                allow_note: false,
+                quick: false,
             })
             .collect();
         let answers = (input)(questions.clone());
@@ -1020,6 +1023,9 @@ mod tests {
             approval: false,
             kind: None,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         }
     }
 
