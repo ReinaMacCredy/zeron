@@ -31,6 +31,12 @@ on:
       - 'scripts/test-browser-storage.py'
       - '.github/workflows/ui-tests.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass; empty records nothing.
+        type: string
+        default: ''
 
 permissions:
   contents: read

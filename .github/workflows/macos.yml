@@ -29,6 +29,12 @@ on:
       - 'apps/ios/**'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass; empty records nothing.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -167,11 +173,10 @@ jobs:
           retention-days: 1
 
   # iOS unit tests in the simulator (only when iOS or the mobile core changed, see `changes`).
-  # Waiting for macos-frame-source keeps a run to two macOS runners at a time.
   # Do not boot the simulator in the background: hundreds of launchd_sim daemons starve the 3-vCPU
   # VM and slow every other step down by minutes. xcodebuild boots it when needed.
   ios-tests:
-    needs: [changes, ios-core, macos-frame-source]
+    needs: [changes, ios-core]
     if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
     timeout-minutes: 30
