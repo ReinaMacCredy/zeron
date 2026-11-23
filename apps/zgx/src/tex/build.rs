@@ -437,12 +437,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let marker = dir.join("child");
         let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg(format!("sleep 30 & echo $! > '{}'; wait", marker.display()));
+        cmd.arg("-c").arg(format!("sleep 300 & echo $! > '{}'; wait", marker.display()));
         let started = std::time::Instant::now();
-        let ran = run(cmd, &dir.join("output.txt"), Duration::from_millis(400), |_| {}).unwrap();
-        assert!(ran.timed_out && started.elapsed() < Duration::from_secs(5));
+        // (Long enough for the shell to have named its child on a busy machine.)
+        let ran = run(cmd, &dir.join("output.txt"), Duration::from_secs(3), |_| {}).unwrap();
+        assert!(ran.timed_out && started.elapsed() < Duration::from_secs(60));
         let child: i32 = std::fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
-        std::thread::sleep(Duration::from_millis(200));
+        // Killed, it is gone once it has died and been reaped: soon, not at once.
+        let killed = std::time::Instant::now();
+        while unsafe { libc::kill(child, 0) } == 0 && killed.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert_ne!(unsafe { libc::kill(child, 0) }, 0, "the grandchild went with it");
         let ran = run(Command::new("/usr/bin/true"), &dir.join("output.txt"), Duration::from_secs(5), |_| {}).unwrap();
         assert!(!ran.timed_out && ran.status.is_some_and(|s| s.success()));
