@@ -3563,10 +3563,12 @@ mod tests {
         );
         server.abort();
 
+        // Windows retries a refused loopback connect for about 2 s before reporting it.
+        let client =
+            http_client_with_timeouts(Duration::from_secs(10), Duration::from_secs(1)).unwrap();
         let error = fetch_release_metadata_with_limits(
             &client,
             "http://127.0.0.1:1/manifest.json",
-            // Windows retries a refused loopback connect for about 2 s before reporting it.
             Duration::from_secs(10),
             100,
         )
