@@ -231,11 +231,13 @@ pub type Projects = Arc<dyn Fn() -> Scope + Send + Sync>;
 /// This scan's candidates (`None` when the process table could not be read),
 /// each with the checkout it is listed under, and whether anything that
 /// could start one is alive: a live run or terminal, or a process one of
-/// them started ([`discovery::Owned`]). Only then is the next scan due.
+/// them started ([`discovery::Owned`]). Only then is the next scan due, or
+/// (last) while a process started here is not read yet
+/// ([`discovery::Owned::unsettled`]).
 fn candidates(
     scope: Scope,
     origins: &mut discovery::Origins,
-) -> Option<(Vec<(PathBuf, discovery::Listener)>, Activity)> {
+) -> Option<(Vec<(PathBuf, discovery::Listener)>, Activity, bool)> {
     let Scope {
         chats,
         terminals,
@@ -260,7 +262,7 @@ fn candidates(
         .into_iter()
         .collect();
     if roots.is_empty() {
-        return Some((Vec::new(), Activity { live, owned: None }));
+        return Some((Vec::new(), Activity { live, owned: None }, false));
     }
     roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     // The origins a listed server can have (see the filter below).
@@ -315,6 +317,7 @@ fn candidates(
             })
             .collect(),
         active,
+        owned.unsettled(),
     ))
 }
 impl PreviewService {
@@ -517,7 +520,7 @@ impl PreviewService {
                         (candidates(projects(), &mut origins), origins)
                     })
                     .await;
-                    let (candidates, active) = match scanned {
+                    let (candidates, active, unsettled) = match scanned {
                         Ok((Some(scanned), kept)) => {
                             *origins = kept;
                             scanned
@@ -541,6 +544,14 @@ impl PreviewService {
                         probe,
                         settling_until,
                     } = memory.plan(candidates, Instant::now());
+                    // A process started here and not read yet is read by a
+                    // scan a cadence from now, as a settling listener is
+                    // probed by a later one.
+                    let unread_until = unsettled.then(|| Instant::now() + SCAN_CADENCE);
+                    let settling_until = match (settling_until, unread_until) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
                     let probed: Vec<_> = stream::iter(probe)
                         .map(|(root, listener)| async move {
                             let http = discovery::is_http(listener.address).await;
@@ -809,10 +820,10 @@ mod tests {
             live,
         };
         let mut origins = discovery::Origins::default();
-        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        let (found, active, _) = candidates(scope(false), &mut origins).unwrap();
         assert!(found.is_empty());
         assert!(!active.active(), "nothing of this chat runs: nothing to scan for");
-        let (_, active) = candidates(scope(true), &mut origins).unwrap();
+        let (_, active, _) = candidates(scope(true), &mut origins).unwrap();
         assert!(active.active(), "a live run keeps the cadence before its process exists");
 
         // What an agent of this chat starts: a listener in its folder.
@@ -838,9 +849,9 @@ mod tests {
         let mut line = String::new();
         std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line).unwrap();
         let port: u16 = line.trim().parse().unwrap();
-        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        let (found, active, _) = candidates(scope(false), &mut origins).unwrap();
         assert!(active.active() && !active.live, "a process the chat started is alive");
-        let (_, again) = candidates(scope(false), &mut origins).unwrap();
+        let (_, again, _) = candidates(scope(false), &mut origins).unwrap();
         assert_eq!(again, active, "the same process, listening the same: unchanged");
         assert!(
             found.iter().any(|(_, l)| l.address.port() == port
@@ -850,7 +861,7 @@ mod tests {
             found.iter().map(|(_, l)| (l.pid, l.address)).collect::<Vec<_>>()
         );
         drop(server);
-        let (found, active) = candidates(scope(false), &mut origins).unwrap();
+        let (found, active, _) = candidates(scope(false), &mut origins).unwrap();
         assert!(found.is_empty() && !active.active(), "gone with its process");
     }
     /// A fixture server a chat's test run starts is no candidate: its own
@@ -904,7 +915,7 @@ mod tests {
         let (_dev, dev_port) = server("bash");
         let (_fixture, fixture_port) = server("vitest");
         let mut origins = discovery::Origins::default();
-        let (found, _) = candidates(scope(), &mut origins).unwrap();
+        let (found, _, _) = candidates(scope(), &mut origins).unwrap();
         let ports: Vec<u16> = found.iter().map(|(_, l)| l.address.port()).collect();
         assert!(ports.contains(&dev_port), "the dev server is listed: {ports:?}");
         assert!(!ports.contains(&fixture_port), "the fixture is not: {ports:?}");
