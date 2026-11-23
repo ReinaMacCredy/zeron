@@ -19,7 +19,10 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::mpsc;
 
-use zeron_doc::{MessageStatus, SessionCommandPayload};
+use zeron_doc::{
+    CommandBasedOn, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
+    SessionCommandStatus,
+};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls, TurnControl};
 use zeron_proto::{
@@ -800,24 +803,40 @@ async fn a_stop_right_after_send_stops_that_turn() {
         .doc_host
         .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .unwrap();
+    let doc = rig.core.doc_host.open(CHAT).unwrap();
     wait_for(
         || {
             status(&rig.core) == Some(SessionStatus::Idle)
-                && rig.ledger.prompts.lock().unwrap().len() == 1
+                && doc
+                    .doc()
+                    .read_commands()
+                    .unwrap()
+                    .iter()
+                    .all(|command| command.status == SessionCommandStatus::Applied)
         },
         "the Stop to end the turn",
     )
     .await;
-    let doc = rig.core.doc_host.open(CHAT).unwrap();
-    assert!(
-        doc.doc()
-            .read_entries()
-            .unwrap()
-            .iter()
-            .any(|entry| entry.status == Some(MessageStatus::Aborted)),
-        "the turn reads as stopped"
-    );
     assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0);
+    // The Stop lands wherever the start has got to. A process that has the
+    // prompt stops in place and its reply reads as stopped; one that has not
+    // opened yet is never started.
+    if rig.ledger.prompts.lock().unwrap().len() == 1 {
+        assert!(
+            doc.doc()
+                .read_entries()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.status == Some(MessageStatus::Aborted)),
+            "the turn reads as stopped"
+        );
+    } else {
+        assert_eq!(rig.ledger.spawns.load(Ordering::SeqCst), 0);
+    }
+    // Either way the turn is over: nothing runs it later.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(status(&rig.core), Some(SessionStatus::Idle));
+    assert!(rig.ledger.prompts.lock().unwrap().len() <= 1);
     rig.core.sessions.shutdown().await;
 }
 
@@ -963,6 +982,62 @@ async fn a_steer_sent_before_stop_is_cancelled_with_it() {
         "nothing re-ran"
     );
     assert_eq!(status(&rig.core), Some(SessionStatus::Idle));
+    rig.core.sessions.shutdown().await;
+}
+
+/// A Stop names the last message its sender saw. The reply that shows after
+/// it belongs to the same turn, so the Stop still stops it.
+#[tokio::test]
+async fn a_stop_sent_before_the_reply_showed_stops_the_turn() {
+    let rig = rig();
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Mock, request("hold: working"), None)
+        .await
+        .unwrap();
+    let doc = rig.core.doc_host.open(CHAT).unwrap();
+    let entries = || doc.doc().read_entries().unwrap();
+    wait_for(
+        || {
+            entries()
+                .last()
+                .is_some_and(|e| e.role == MessageRole::Assistant)
+        },
+        "the reply to show",
+    )
+    .await;
+    let sent = entries()
+        .into_iter()
+        .find(|e| e.role == MessageRole::User)
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    doc.doc()
+        .queue_command(&SessionCommandEntry {
+            id: "stop-1".into(),
+            payload: SessionCommandPayload::Interrupt { teardown: true },
+            issued_by: "device-b".into(),
+            issued_at: now,
+            based_on: Some(CommandBasedOn {
+                turn_id: Some(sent.id),
+                frontier: None,
+            }),
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            computer_generation: None,
+        })
+        .unwrap();
+    wait_for(
+        || {
+            rig.ledger.kills.load(Ordering::SeqCst) == 1
+                && status(&rig.core) == Some(SessionStatus::Idle)
+        },
+        "the stop to settle",
+    )
+    .await;
     rig.core.sessions.shutdown().await;
 }
 

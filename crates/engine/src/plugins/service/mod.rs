@@ -366,11 +366,14 @@ impl Services {
             let mut st = lock(&slot.state);
             st.swapping = false;
             // Only learning its timers (nothing ran before, nothing's in
-            // flight): with none, it stops again at once.
+            // flight): with none, it stops again at once. A call that came
+            // in while it loaded was served by this VM, which then lives
+            // until it is idle like any other.
             if let Ok(running) = loaded
                 && !swap
                 && running.described.timers.is_empty()
                 && !running.vm.status().busy()
+                && !running.vm.status().called()
                 && st.running.as_ref().is_some_and(|r| r.vm.same(&running.vm))
             {
                 st.running = None;

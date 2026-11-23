@@ -404,6 +404,21 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The message ids of the prompts queued ahead of command `id`.
+fn sends_before(commands: &[SessionCommandEntry], id: &str) -> HashSet<String> {
+    let at = commands.iter().position(|c| c.id == id).unwrap_or(0);
+    commands[..at]
+        .iter()
+        .filter_map(|c| match &c.payload {
+            SessionCommandPayload::Run { message_id, .. } => Some(message_id.clone()),
+            SessionCommandPayload::Steer { message_id, .. } => {
+                Some(message_id.clone().unwrap_or_else(|| c.id.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The queued-attachment transfers a command's `pending://` refs imply —
 /// shared by the retry escort and the retry re-issue.
 fn command_transfers(entry: &SessionCommandEntry) -> Vec<crate::uploads::AttachmentTransfer> {
@@ -3073,13 +3088,17 @@ impl DocHost {
                         && pending_wake == Some(captured)
                         && lock(&handle.chat2).as_ref().is_some_and(|c|
                             c.catch_up_completed(handle.sync_wake_ticket.load(Ordering::Acquire)));
-                    if wake_read_complete && host.wakeup_is_durable(handle)
-                    {
+                    let receipted = wake_read_complete && host.wakeup_is_durable(handle);
+                    if receipted {
                         let _ =
                             host.inner
                                 .store
                                 .complete_sync_job(&handle.chat_id, "wake", captured);
                     }
+                    // The save a receipt waits for lands on the persister's
+                    // worker, a pass or more later. Closing before it does
+                    // leaves the wake on disk to be admitted all over again.
+                    let owes_receipt = wake_read_complete && !receipted;
                     let caught_up = lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
                     if caught_up && !handle.sync_caught_up_logged.swap(true, Ordering::AcqRel) {
                         tracing::info!(chat = %handle.chat_id,
@@ -3090,6 +3109,7 @@ impl DocHost {
                     // or commands. Incomplete catch-up only yields via rotate's
                     // explicit service deadline, never the short reuse grace.
                     let idle = caught_up
+                        && !owes_receipt
                         && !handle.sync_protected()
                         && handle.relay_lets_socket_close()
                         && (now_ms() - handle.last_access.load(Ordering::Relaxed) >= SYNC_IDLE_MS
@@ -7139,7 +7159,22 @@ impl DocHost {
             };
             let messages = handle.doc.read_entries_shared().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
-            let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
+            // A Stop names the last message its sender saw. The turn it is
+            // aimed at is over only once a prompt sent after it has landed:
+            // the turn's own reply and the sends queued ahead of the Stop
+            // (it cancels those) land after that message too, and reading
+            // them as a new turn dropped the Stop.
+            let covered = sends_before(&commands, &entry.id);
+            let turn_is_past = |turn_id: &str| {
+                messages
+                    .iter()
+                    .position(|m| m.id == turn_id)
+                    .is_some_and(|at| {
+                        messages[at + 1..]
+                            .iter()
+                            .any(|m| m.role == MessageRole::User && !covered.contains(&m.id))
+                    })
+            };
             let disposition = evaluate_command(
                 &entry,
                 &EvaluationContext {

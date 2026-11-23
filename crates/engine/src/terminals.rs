@@ -612,12 +612,11 @@ impl Terminals {
         }
         #[cfg(not(windows))]
         drop(reader_thread);
-        #[cfg(not(windows))]
-        let wait = tokio::task::spawn_blocking(move || child.wait());
-        #[cfg(windows)]
         let wait = {
-            // Shell lifetime must not consume workers needed by other Windows
-            // process pipes, nor delay resuming a new terminal behind them.
+            // Off the runtime's blocking pool: a shell's lifetime would hold
+            // a worker other process pipes need, and a runtime shutting down
+            // (a test that panicked) joins its blocking tasks, so one live
+            // shell would hang it.
             let (tx, rx) = tokio::sync::oneshot::channel();
             std::thread::Builder::new()
                 .name(format!("pty-wait-{id}"))
@@ -1767,6 +1766,32 @@ mod initial_command_tests {
         assert!(!terminals.status(&session.id).unwrap().exited);
         terminals.close(&session.id).unwrap();
         assert!(terminals.status(&session.id).is_err());
+    }
+
+    #[test]
+    fn a_runtime_ends_while_a_shell_is_still_open() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let terminals = runtime.block_on(async {
+            let terminals = Terminals::new();
+            terminals
+                .open_with_shell(root.path().to_str().unwrap(), 80, 24, Some("/bin/sh"))
+                .unwrap();
+            terminals
+        });
+        let (ended, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(runtime);
+            let _ = ended.send(());
+        });
+        assert!(
+            wait.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the runtime waited for the shell to exit"
+        );
+        drop(terminals);
     }
 
     #[tokio::test]
