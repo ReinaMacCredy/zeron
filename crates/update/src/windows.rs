@@ -1194,10 +1194,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manifest = super::super::Manifest {
             version: "1.2.3".into(),
+            source: "http://127.0.0.1:1".into(),
             ..Default::default()
         };
         assert!(
-            stage("http://127.0.0.1:1", &manifest, dir.path())
+            stage(&manifest, dir.path())
                 .await
                 .unwrap_err()
                 .to_string()
@@ -1236,9 +1237,10 @@ mod tests {
                 },
             )]
             .into(),
+            source: base,
             ..Default::default()
         };
-        let error = stage(&base, &manifest, dir.path()).await.unwrap_err();
+        let error = stage(&manifest, dir.path()).await.unwrap_err();
         server.join().unwrap();
         assert!(error.to_string().contains("checksum mismatch"));
         assert_eq!(std::fs::read(&installed).unwrap(), b"existing installation");
