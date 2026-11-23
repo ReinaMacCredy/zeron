@@ -167,7 +167,7 @@ impl AgentHost for Host {
 
     fn create_project(&self, new: &NewProject) -> Result<ProjectCreated, String> {
         let mut projects = lock(&self.projects);
-        if let Some(project) = projects.iter().find(|p| p.path == new.path || std::fs::canonicalize(&p.path).ok().as_deref() == Some(std::path::Path::new(&new.path))) {
+        if let Some(project) = projects.iter().find(|p| p.path == new.path || dunce::canonicalize(&p.path).ok().as_deref() == Some(std::path::Path::new(&new.path))) {
             return Ok(ProjectCreated {
                 id: project.id.clone(),
                 path: new.path.clone(),
@@ -953,7 +953,7 @@ async fn messages_a_new_project_reuses_the_folder_project() {
     assert_eq!(f.op("p", json!({ "op": "new_project", "path": std::env::current_dir().unwrap() }))
         .await.unwrap_err().reason, reason::NOT_ALLOWED);
     f.grant("p", &[PROJECTS_CREATE, SESSIONS_READ]);
-    let path = std::fs::canonicalize(std::env::current_dir().unwrap())
+    let path = dunce::canonicalize(std::env::current_dir().unwrap())
         .unwrap()
         .to_str()
         .unwrap()

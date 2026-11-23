@@ -324,9 +324,11 @@ local function over(app: any, a: string, b: string): boolean
 	return ay + ah <= by
 end
 
-test("at a narrow composer the pills, the side chat's tab, the folded pill and Jump to latest never meet, and the conversation's end clears the pill row", function()
-	local AGENTS, SHELLS, TAB, JUMP = "#pills-agents", "#pills-shells-pill", "#composer-side-chat", 'role:button "New reply"'
-	for _, w in { 400, 460, 480, 600 } do
+-- (A test for each width: a test's mounts share its storage, so one after
+-- another that scrolled away opens where that one was left, not at its end.)
+for _, w in { 400, 460, 480, 600 } do
+	test(`at a narrow composer ({w} wide) the pills, the side chat's tab, the folded pill and Jump to latest never meet, and the conversation's end clears the pill row`, function()
+		local AGENTS, SHELLS, TAB, JUMP = "#pills-agents", "#pills-shells-pill", "#composer-side-chat", 'role:button "New reply"'
 		local app = busy(w)
 		expect(apart(app, AGENTS, SHELLS)).to_be(true)
 		expect(apart(app, AGENTS, TAB)).to_be(true)
@@ -348,8 +350,8 @@ test("at a narrow composer the pills, the side chat's tab, the folded pill and J
 		local left = box(app, "#composer-pills")
 		expect(box(app, JUMP) >= left).to_be(true)
 		expect(app:error()).to_be(nil)
-	end
-end)
+	end)
+end
 
 test("Jump to latest beside a folded pill held short of the side chat's tab stays over the composer, or stands over the pill when the two don't fit", function()
 	for _, w in { 400, 450, 520 } do
@@ -370,7 +372,14 @@ test("Jump to latest beside a folded pill held short of the side chat's tab stay
 		expect(box(app, jump) >= left).to_be(true)
 		expect(apart(app, jump, PILL)).to_be(true)
 		expect(apart(app, jump, "#composer-side-chat")).to_be(true)
-		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
+		-- Wider than the room before the tab (whose shortcut reads "Ctrl+;"
+		-- off macOS, 27 wider than "⌘;"), the pill keeps the composer's left edge.
+		local px, _, pw = box(app, PILL)
+		if pw + 8 <= box(app, "#composer-side-chat") - left then
+			expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
+		else
+			expect(px).to_be(left)
+		end
 		expect(app:error()).to_be(nil)
 	end
 end)

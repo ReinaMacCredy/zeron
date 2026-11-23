@@ -982,12 +982,15 @@ async fn an_online_launch_dials_as_soon_as_the_network_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let start = Instant::now();
     let client = phone(&edge, dir.path());
+    // From the report, not from the launch: building the client is most of a launch's
+    // time beside eleven other tests, and isn't the wait this is about.
+    let report = Instant::now();
     client.set_network_online(true);
     while edge.connections() == 0 {
         assert!(start.elapsed() < Duration::from_secs(2), "never dialed");
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    let reported = start.elapsed();
+    let reported = report.elapsed();
     assert!(reported < Duration::from_millis(150), "an online launch waited {reported:?}");
     client.shutdown();
 

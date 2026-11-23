@@ -20,7 +20,9 @@ concurrency:
 jobs:
   core-tests:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # No saved Rust cache (see above), so every run builds the release profile
+    # cold: about 56 minutes on this runner before the first test starts.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/linux-ci

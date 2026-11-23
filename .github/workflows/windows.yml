@@ -25,6 +25,16 @@ on:
       - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass; empty records nothing.
+        type: string
+        default: ''
+      skip:
+        description: JSON list of jobs that already passed on the same inputs.
+        type: string
+        default: '[]'
 
 permissions:
   contents: read

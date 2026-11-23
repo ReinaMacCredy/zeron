@@ -29,6 +29,12 @@ on:
       - 'apps/ios/**'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass; empty records nothing.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -167,11 +173,10 @@ jobs:
           retention-days: 1
 
   # iOS unit tests in the simulator (only when iOS or the mobile core changed, see `changes`).
-  # Waiting for macos-frame-source keeps a run to two macOS runners at a time.
   # Do not boot the simulator in the background: hundreds of launchd_sim daemons starve the 3-vCPU
   # VM and slow every other step down by minutes. xcodebuild boots it when needed.
   ios-tests:
-    needs: [changes, ios-core, macos-frame-source]
+    needs: [changes, ios-core]
     if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
     timeout-minutes: 30
@@ -180,7 +185,7 @@ jobs:
       - name: Select an available iPhone simulator
         run: |
           # The app targets iOS 26: use the newest Xcode 26 and the newest iOS runtime installed.
-          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          xcode=$(find /Applications -maxdepth 1 -name 'Xcode_26*.app' 2>/dev/null | sort -V | tail -1 || true)
           if [ -n "$xcode" ]; then echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"; fi
           python3 - <<'PYTHON'
           import json, os, subprocess

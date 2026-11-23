@@ -261,8 +261,10 @@ async fn steers_confirm_on_consumption_and_interrupt_is_terminal_once() {
         .run(request(dir.path(), "slow"), c)
         .await
         .unwrap();
+    // The steered turn lasts until the interrupt: one that ends by itself
+    // can settle as completed before the interrupt is seen.
     tx.send(SteerMessage {
-        prompt: "redirect".into(),
+        prompt: "hold".into(),
         message_id: Some("user-id".into()),
         attachments: Vec::new(),
         config: None,

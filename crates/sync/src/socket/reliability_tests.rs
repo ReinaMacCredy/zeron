@@ -332,14 +332,20 @@ async fn idle_traffic(original: bool) -> (u64, u64) {
             }
         }
     });
-    tokio::time::sleep(Duration::from_secs(601)).await;
+    // Forty ping intervals from the first ping, whenever that came: the
+    // pump's pings fall on the wall clock's beat grid (`wake::beat_interval`),
+    // so its first is anywhere within an interval of the start.
+    while counts.written.load(Ordering::Relaxed) == 0 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(PING_INTERVAL * 40 - Duration::from_secs(1)).await;
     assert!(!task.is_finished(), "healthy idle connection churned");
     let totals = (
         counts.written.load(Ordering::Relaxed),
         counts.read.load(Ordering::Relaxed),
     );
     println!(
-        "{} idle 601s: connections=1, sent={}, received={}",
+        "{} idle 40 pings: connections=1, sent={}, received={}",
         if original { "main" } else { "current" },
         totals.0,
         totals.1

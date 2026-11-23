@@ -93,6 +93,8 @@ struct Service {
     /// changed since they were last published (`dictation_levels`).
     meter: Meter,
     levels_changed: bool,
+    /// The time it goes by: the machine's, or the one a test sets.
+    now: Box<dyn Fn() -> Instant>,
 }
 impl Service {
     fn new(dir: Option<PathBuf>) -> Self {
@@ -105,6 +107,7 @@ impl Service {
             serial: 0,
             meter: Meter::default(),
             levels_changed: false,
+            now: Box::new(Instant::now),
         }
     }
     fn needs_poll(&self) -> bool {
@@ -123,7 +126,7 @@ impl Service {
     fn poll_wait(&self) -> Duration {
         const BEAT: Duration = Duration::from_millis(40);
         self.meter
-            .until_next(Instant::now())
+            .until_next((self.now)())
             .map_or(BEAT, |d| (d + Duration::from_millis(1)).min(BEAT))
     }
     fn cancel(&mut self) {
@@ -140,9 +143,10 @@ impl Service {
     fn stop(&mut self) {
         if let Some(session) = &mut self.session {
             session.finish();
-            self.meter.freeze(Instant::now());
+            let now = (self.now)();
+            self.meter.freeze(now);
             self.deadline
-                .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+                .get_or_insert_with(|| now + Duration::from_secs(30));
             self.state["phase"] = json!("finalizing");
         }
     }
@@ -238,7 +242,7 @@ impl Service {
                 }
             }
         }
-        if self.deadline.is_some_and(|end| Instant::now() >= end) {
+        if self.deadline.is_some_and(|end| (self.now)() >= end) {
             self.cancel();
             self.state["phase"] = json!("failed");
             self.state["error"] = json!("Transcription timed out. Your draft is safe.");
@@ -250,15 +254,16 @@ impl Service {
                     zeron_voice::Event::Listening => {
                         if self.deadline.is_none() {
                             self.state["phase"] = json!("listening");
-                            self.meter.start(Instant::now());
+                            self.meter.start((self.now)());
                             session.take_level();
                         }
                     }
                     zeron_voice::Event::Finalizing => {
                         self.state["phase"] = json!("finalizing");
-                        self.meter.freeze(Instant::now());
+                        let now = (self.now)();
+                        self.meter.freeze(now);
                         self.deadline
-                            .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+                            .get_or_insert_with(|| now + Duration::from_secs(30));
                     }
                     zeron_voice::Event::Final(text) => {
                         self.state["phase"] = json!("final");
@@ -272,7 +277,7 @@ impl Service {
                     }
                 }
             }
-            if !ended && self.meter.record(Instant::now(), session.take_level()) {
+            if !ended && self.meter.record((self.now)(), session.take_level()) {
                 self.levels_changed = true;
             }
         }
@@ -486,10 +491,20 @@ mod tests {
         (s, events, cancelled, stopped)
     }
     /// Listening, with the microphone's level to set.
-    fn metered() -> (Service, Rc<RefCell<VecDeque<Event>>>, Rc<Cell<f32>>) {
+    fn metered() -> (
+        Service,
+        Rc<RefCell<VecDeque<Event>>>,
+        Rc<Cell<f32>>,
+        Rc<Cell<Instant>>,
+    ) {
         let events = Rc::new(RefCell::new(VecDeque::new()));
         let level = Rc::new(Cell::new(0.0));
+        let clock = Rc::new(Cell::new(Instant::now()));
         let mut s = Service::new(None);
+        s.now = Box::new({
+            let clock = clock.clone();
+            move || clock.get()
+        });
         s.state = json!({"phase":"starting", "serial":1});
         s.session = Some(Box::new(Fake {
             events: events.clone(),
@@ -497,11 +512,11 @@ mod tests {
             stopped: Rc::default(),
             level: level.clone(),
         }));
-        (s, events, level)
+        (s, events, level, clock)
     }
     #[test]
     fn dictation_levels_follow_the_microphone_at_slot_rate_while_listening() {
-        let (mut s, events, level) = metered();
+        let (mut s, events, level, clock) = metered();
         // Starting: the microphone isn't live, no bars.
         level.set(0.3);
         s.poll();
@@ -518,7 +533,7 @@ mod tests {
         assert_eq!(s.take_levels(), None);
         let wait = s.poll_wait();
         assert!(wait <= Duration::from_millis(61) && wait > Duration::ZERO, "{wait:?}");
-        std::thread::sleep(meter::STEP);
+        clock.set(clock.get() + meter::STEP);
         s.poll();
         let bars = s.take_levels().unwrap();
         assert_eq!(bars.len(), 2);
@@ -528,7 +543,7 @@ mod tests {
         s.poll();
         let _ = s.take_levels();
         level.set(0.5);
-        std::thread::sleep(meter::STEP);
+        clock.set(clock.get() + meter::STEP);
         s.poll();
         assert_eq!(s.take_levels(), None);
         assert_eq!(s.poll_wait(), Duration::from_millis(40));

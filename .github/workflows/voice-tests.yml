@@ -116,6 +116,7 @@ jobs:
           python-version: '3.12'
       - name: Initialize a projected Windows runtime (no provider or audio devices)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $env:ZERON_VOICE_MEDIA_DIR = Join-Path $env:RUNNER_TEMP 'zeron-media/codex-resources/voice'
           python scripts/package-voice-runtime.py --download --destination $env:ZERON_VOICE_MEDIA_DIR

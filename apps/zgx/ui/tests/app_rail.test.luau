@@ -169,9 +169,11 @@ test("the app's own update is the rail's in each of its phases, its motion only 
 	expect(app:has("#update-glyph-arc")).to_be(true)
 	expect(app:has("#update-glyph-arrow")).to_be(true)
 	expect(app:has("#update-glyph-halo-1")).to_be(false)
-	-- (The arrow falls: its loop started.)
+	-- (The arrow falls: its loop started. It starts in step with the clock, so
+	-- anywhere in its fall, and a fall's ends move under a point in 8 frames;
+	-- half a second on, it is always somewhere else.)
 	local _, fell = box(app, "#update-glyph-arrow")
-	app:frames(8)
+	app:frames(30)
 	local _, now = box(app, "#update-glyph-arrow")
 	expect(now ~= fell).to_be(true)
 

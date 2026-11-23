@@ -260,6 +260,10 @@ fn a_send_bound_for_the_queue_never_shows_as_a_prompt_while_its_files_go_up() {
             json!({ "status": "working", "updatedAt": now_seconds() * 1000 }),
         );
     });
+    // A file that is there: read or not yet, its upload waits on the engine
+    // (none in this test), so the send is still going whenever the read ends.
+    let shot = tempfile::NamedTempFile::new().unwrap();
+    let path = shot.path().to_str().unwrap().to_owned();
     let sender = view.clone();
     let mut queued: Sending = Box::pin(async move {
         sender
@@ -269,7 +273,7 @@ fn a_send_bound_for_the_queue_never_shows_as_a_prompt_while_its_files_go_up() {
                 ("text", Value::from("and this")),
                 (
                     "attachments",
-                    Value::List(vec![Value::record([("path", Value::from("/tmp/shot.png")), ("kind", Value::from("image"))])].into()),
+                    Value::List(vec![Value::record([("path", Value::from(path.as_str())), ("kind", Value::from("image"))])].into()),
                 ),
             ]))
             .await

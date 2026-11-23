@@ -1,7 +1,6 @@
 name: zgx tests
 
-# Called by ci.yml (the `zgx` suite, scripts/ci/plan.py) when apps/zgx or a
-# crate it or the engine's plugin host builds changes. zgx-beta.yml only builds.
+# Runs when apps/zgx or a crate it or the engine's plugin host builds changes.
 #
 #   apps/zgx's unit tests (`cargo test --bin zeron-zgx`: src/plugins/*_tests.rs
 #   among them), its integration tests (`cargo test --test '*'`:
@@ -14,15 +13,41 @@ name: zgx tests
 # Not on Windows yet: zgx-beta.yml builds apps/zgx there, but its tests have
 # never been run on Windows, so there's no known-failures list for it.
 on:
+  pull_request:
+    paths:
+      - 'apps/zgx/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/ci/test-zgx.sh'
+      - 'scripts/ci/zgx-known-failures.txt'
+      - '.github/workflows/zgx-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/zgx/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/ci/test-zgx.sh'
+      - 'scripts/ci/zgx-known-failures.txt'
+      - '.github/workflows/zgx-tests.yml'
+  workflow_dispatch:
   workflow_call:
     inputs:
       pass-key:
-        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        description: Cache key prefix under which each job records its pass; empty records nothing.
         type: string
         default: ''
 
 permissions:
   contents: read
+
+concurrency:
+  group: zgx-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   NEXTEST_PROFILE: ${{ github.event_name == 'schedule' && 'default' || 'ci' }}
@@ -70,21 +95,38 @@ jobs:
           tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin" cargo-nextest
           echo "$bin" >> "$GITHUB_PATH"
       - id: zgx-rev
-        name: The zgx rev apps/zgx pins
-        run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+        name: The zgx repository and rev apps/zgx pins
+        run: |
+          echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+          echo "git=$(sed -n 's/^zgx = .*git = "\([^"]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/zgx-cli
-          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
+          key: zgx-cli-i18n-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
       - name: zgx CLI
         if: steps.zgx-cli.outputs.cache-hit != 'true'
         env:
           REV: ${{ steps.zgx-rev.outputs.rev }}
+          GIT: ${{ steps.zgx-rev.outputs.git }}
         run: |
-          test -n "$REV"
+          test -n "$REV" && test -n "$GIT"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
-            --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+            --git "$GIT" --rev "$REV" zgx-script --bin zgx --features inspect,i18n --root ~/zgx-cli
+      # Built apart from the runs, so a slow or failed build shows as that.
+      # Ghostty's Zig build downloads its packages from deps.files.ghostty.org,
+      # which now and then resets a connection. What it has fetched stays in the
+      # zgx-ghostty cache, so the next build goes on from there. Only the build
+      # is tried again, never a test.
+      - name: Build apps/zgx tests
+        working-directory: apps/zgx
+        run: |
+          for attempt in 1 2 3; do
+            cargo test --locked --no-run --bin zeron-zgx --test '*' && exit 0
+            echo "::warning::Building the apps/zgx tests failed (attempt $attempt of 3)"
+            sleep 30
+          done
+          exit 1
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx integration tests
@@ -130,21 +172,28 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - id: zgx-rev
-        name: The zgx rev apps/zgx pins
-        run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+        name: The zgx repository and rev apps/zgx pins
+        run: |
+          echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
+          echo "git=$(sed -n 's/^zgx = .*git = "\([^"]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/zgx-cli
-          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
+          key: zgx-cli-i18n-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
       - name: zgx CLI
         if: steps.zgx-cli.outputs.cache-hit != 'true'
         env:
           REV: ${{ steps.zgx-rev.outputs.rev }}
+          GIT: ${{ steps.zgx-rev.outputs.git }}
         run: |
-          test -n "$REV"
+          test -n "$REV" && test -n "$GIT"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
-            --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+            --git "$GIT" --rev "$REV" zgx-script --bin zgx --features inspect,i18n --root ~/zgx-cli
+      # Built apart from the runs, so a slow or failed build shows as that.
+      - name: Build apps/zgx tests
+        working-directory: apps/zgx
+        run: cargo test --locked --no-run --bin zeron-zgx --test '*'
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx integration tests

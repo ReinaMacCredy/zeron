@@ -3291,6 +3291,55 @@ async fn a_redial_asked_while_down_doesnt_end_the_next_session() {
     client.shutdown().await;
 }
 
+/// Nor does one asked for while that dial is still joining (a chat coming on
+/// screen as its room connects sees no socket yet, and asks): the session it
+/// joins is the fresh socket.
+#[tokio::test(start_paused = true)]
+async fn a_redial_asked_while_joining_doesnt_end_that_session() {
+    let _serial = PATH_AND_TIMING.lock().await;
+    let (pipe1, mut end1) = pipe_pair();
+    let (pipe2, mut end2) = pipe_pair();
+    let (pipe3, _end3) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let flaky = FlakyConnector::new(vec![Some(pipe1), Some(pipe2), Some(pipe3)]);
+    let s1 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end1, state, &[], vec![], false).await;
+            end1
+        }
+    });
+    let client = ChatClient::connect_with_tuned(flaky.clone(), sink, fetch, "dev-a", 0, ChatTuning::default())
+        .await
+        .expect("first join succeeds");
+    drop(s1.await.unwrap());
+    // The second dial has its socket, and the room hasn't answered its hello.
+    while flaky.dial_times().len() < 2 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!client.stats().connected);
+    client.redial();
+    let s2 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end2, state, &[], vec![], true).await;
+            end2
+        }
+    });
+    let _keep = s2.await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(flaky.dial_times().len(), 2, "the join and one recovery");
+    assert_eq!(client.stats().disconnects, 1);
+    assert!(client.stats().connected);
+    // One asked for now is about this session, and ends it.
+    client.redial();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(flaky.dial_times().len(), 3, "a redial of a joined session dials");
+    client.shutdown().await;
+}
+
 /// The relay layer's frames go out while the row backfill is still running: on a
 /// relay chat they are the catch-up, and a host that has just rejoined waits for
 /// this device's announce.

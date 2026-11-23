@@ -10454,7 +10454,11 @@ mod tests {
         let tree: zeron_proto::WorkingTree =
             serde_json::from_value(received.ok.expect("a reply, never null")).unwrap();
         assert_eq!(tree.branch.as_deref(), Some("main"));
-        assert_eq!(tree.root, repo.to_string_lossy());
+        // The root is the checkout's canonical path (`\\?\`-prefixed on Windows).
+        assert_eq!(
+            tree.root,
+            std::fs::canonicalize(&repo).unwrap().to_string_lossy()
+        );
         assert!(!tree.agent_active);
         assert_eq!(
             tree.files

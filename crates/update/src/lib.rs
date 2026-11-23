@@ -3563,10 +3563,14 @@ mod tests {
         );
         server.abort();
 
+        // Windows retries a refused loopback connect for about 2 s before reporting it,
+        // and the read timeout runs from the moment the request is sent.
+        let client =
+            http_client_with_timeouts(Duration::from_secs(10), Duration::from_secs(10)).unwrap();
         let error = fetch_release_metadata_with_limits(
             &client,
             "http://127.0.0.1:1/manifest.json",
-            Duration::from_secs(1),
+            Duration::from_secs(10),
             100,
         )
         .await
@@ -3574,7 +3578,7 @@ mod tests {
         let refused = error
             .chain()
             .find_map(|cause| cause.downcast_ref::<std::io::Error>())
-            .expect("the connect error's io::Error is in the chain");
+            .unwrap_or_else(|| panic!("the connect error's io::Error is in the chain: {error:?}"));
         assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
         assert!(refused.raw_os_error().is_some());
         assert_eq!(
