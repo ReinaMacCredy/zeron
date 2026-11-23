@@ -77,6 +77,7 @@ async fn real_pi_mock_lifecycle() {
                 tx.send(vec![UserInputAnswer {
                     question_id: questions[0].id.clone(),
                     labels: vec!["local answer".into()],
+                    note: None,
                 }])
                 .unwrap();
                 rx

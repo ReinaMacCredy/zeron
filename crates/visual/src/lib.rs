@@ -36,8 +36,9 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 pub use assets::Assets;
 pub use draw::{DrawCmd, DrawText, Pointer};
 pub use node::{
-    Axis, Canvas, Chart, ChartKind, Column, HandlerId, Node, NodeKind, NumberFormat, SceneNode,
-    Series, ShaderNode, Span, Stack, Table_ as TableNode, Text,
+    Axis, Canvas, Chart, ChartKind, Column, HandlerId, Input, MAX_QUIZ_QUESTIONS, MAX_SEND_CHARS,
+    Node, NodeKind, NumberFormat, Quiz, QuizKind, QuizOpen, QuizOption, QuizQuestion, SceneNode,
+    SelectOption, Series, ShaderNode, Span, Stack, Table_ as TableNode, Text,
 };
 pub use raster::{Quality, Raster, RasterLabel};
 pub use scene::{
@@ -53,6 +54,17 @@ const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 const CALL_BUDGET: Duration = Duration::from_millis(250);
 /// A canvas or scene draw runs per frame while animating.
 const DRAW_BUDGET: Duration = Duration::from_millis(60);
+pub const MAX_KEPT_BYTES: usize = 16 * 1024;
+const MAX_KEPT_DEPTH: usize = 32;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Kept {
+    Bool(bool),
+    Number(f64),
+    Text(String),
+    List(Vec<Kept>),
+    Map(Vec<(String, Kept)>),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -129,6 +141,7 @@ pub struct Visual {
     deadline: Rc<Cell<Option<Instant>>>,
     logs: Rc<RefCell<Vec<String>>>,
     assets: Assets,
+    kept: Table,
 }
 
 const MAX_LOG_LINES: usize = 200;
@@ -137,6 +150,14 @@ impl Visual {
     /// Compile and run a script's setup. `seed` keeps its random numbers
     /// stable (derive it from the visual's id).
     pub fn load(source: &str, seed: u64) -> Result<Self, VisualError> {
+        Self::load_keeping(source, seed, &[])
+    }
+
+    pub fn load_keeping(
+        source: &str,
+        seed: u64,
+        kept: &[(String, Kept)],
+    ) -> Result<Self, VisualError> {
         if source.len() > MAX_SCRIPT_BYTES {
             return Err(VisualError::script(format!(
                 "the script is over {} KB",
@@ -184,11 +205,14 @@ impl Visual {
                 Ok(())
             })?,
         )?;
-        let ui: Table = lua
+        let (ui, kept_tables, stored): (Table, Table, Table) = lua
             .load(include_str!("prelude.luau"))
             .set_name("=ui")
             .set_mode(mlua::chunk::ChunkMode::Text)
             .eval()?;
+        for (name, value) in kept {
+            stored.raw_set(name.as_str(), kept_value(&lua, value)?)?;
+        }
         ui.set(
             "fmt",
             lua.create_function(|_, (value, options): (f64, Option<Table>)| {
@@ -249,6 +273,7 @@ impl Visual {
             deadline,
             logs,
             assets: Assets::default(),
+            kept: kept_tables,
         })
     }
 
@@ -358,6 +383,156 @@ impl Visual {
     pub fn logs(&self) -> Vec<String> {
         self.logs.borrow().clone()
     }
+
+    /// Keys sorted, so the same state is the same text.
+    pub fn kept_json(&self) -> Result<Option<String>, VisualError> {
+        let mut names = Vec::new();
+        for pair in self.kept.pairs::<String, Value>() {
+            names.push(pair?);
+        }
+        if names.is_empty() {
+            return Ok(None);
+        }
+        names.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut out = String::from("{");
+        for (ix, (name, value)) in names.iter().enumerate() {
+            if ix > 0 {
+                out.push(',');
+            }
+            json_string(name, &mut out);
+            out.push(':');
+            json_value(value, 0, &mut out)
+                .map_err(|why| VisualError::script(format!("ui.keep(\"{name}\") {why}")))?;
+        }
+        out.push('}');
+        Ok(Some(out))
+    }
+}
+
+fn kept_value(lua: &Lua, value: &Kept) -> mlua::Result<Value> {
+    Ok(match value {
+        Kept::Bool(b) => Value::Boolean(*b),
+        Kept::Number(n) => Value::Number(*n),
+        Kept::Text(t) => Value::String(lua.create_string(t)?),
+        Kept::List(items) => {
+            let table = lua.create_table()?;
+            for (ix, item) in items.iter().enumerate() {
+                table.raw_set(ix + 1, kept_value(lua, item)?)?;
+            }
+            Value::Table(table)
+        }
+        Kept::Map(fields) => {
+            let table = lua.create_table()?;
+            for (key, item) in fields {
+                table.raw_set(key.as_str(), kept_value(lua, item)?)?;
+            }
+            Value::Table(table)
+        }
+    })
+}
+
+fn json_string(text: &str, out: &mut String) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Read raw and stopped at the caps, so a cycle or a huge table can't outrun the time budget.
+fn json_value(value: &Value, depth: usize, out: &mut String) -> Result<(), String> {
+    let too_much = || {
+        format!(
+            "holds over {} KB: keep choices and indexes, not copies of the data",
+            MAX_KEPT_BYTES / 1024
+        )
+    };
+    if out.len() > MAX_KEPT_BYTES {
+        return Err(too_much());
+    }
+    match value {
+        Value::Boolean(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Integer(n) => out.push_str(&n.to_string()),
+        Value::Number(n) if n.is_finite() => out.push_str(&format!("{n}")),
+        Value::Number(_) => return Err("holds a number JSON can't (nan or inf)".into()),
+        Value::String(s) => json_string(&s.to_string_lossy(), out),
+        Value::Table(table) => {
+            if depth >= MAX_KEPT_DEPTH {
+                return Err("nests too deeply (or holds itself)".into());
+            }
+            let mut pairs = Vec::new();
+            for pair in table.pairs::<Value, Value>() {
+                pairs.push(pair.map_err(|e| node::short_error(&e))?);
+                if out.len() + pairs.len() > MAX_KEPT_BYTES {
+                    return Err(too_much());
+                }
+            }
+            let len = table.raw_len();
+            let index = |k: &Value| match k {
+                Value::Integer(i) => usize::try_from(*i).ok(),
+                Value::Number(n) if n.fract() == 0.0 && *n >= 1.0 => Some(*n as usize),
+                _ => None,
+            };
+            let list = pairs.len() == len
+                && pairs
+                    .iter()
+                    .all(|(k, _)| index(k).is_some_and(|i| (1..=len).contains(&i)));
+            if list && len > 0 {
+                let mut items: Vec<(usize, &Value)> = pairs
+                    .iter()
+                    .map(|(k, v)| (index(k).unwrap_or(0), v))
+                    .collect();
+                items.sort_by_key(|(i, _)| *i);
+                out.push('[');
+                for (ix, (_, item)) in items.iter().enumerate() {
+                    if ix > 0 {
+                        out.push(',');
+                    }
+                    json_value(item, depth + 1, out)?;
+                }
+                out.push(']');
+            } else {
+                let mut fields = Vec::new();
+                for (key, item) in &pairs {
+                    let Value::String(key) = key else {
+                        return Err("holds a table with keys that aren't names (keep lists \
+                                    1..n, or tables keyed by strings)"
+                            .into());
+                    };
+                    fields.push((key.to_string_lossy(), item));
+                }
+                fields.sort_by(|a, b| a.0.cmp(&b.0));
+                out.push('{');
+                for (ix, (key, item)) in fields.iter().enumerate() {
+                    if ix > 0 {
+                        out.push(',');
+                    }
+                    json_string(key, out);
+                    out.push(':');
+                    json_value(item, depth + 1, out)?;
+                }
+                out.push('}');
+            }
+        }
+        other => {
+            return Err(format!(
+                "holds a {}: keep numbers, strings, booleans, and tables of them",
+                other.type_name()
+            ));
+        }
+    }
+    if out.len() > MAX_KEPT_BYTES {
+        return Err(too_much());
+    }
+    Ok(())
 }
 
 /// Round tick values covering `lo..=hi`, about `count` of them.
@@ -415,20 +590,22 @@ pub fn check_with_assets(source: &str, seed: u64, assets: Assets) -> Result<Repo
     let tree = visual.render()?;
     let mut report = Report::default();
     exercise_draws(&mut visual, &tree, &mut report)?;
+    visual.kept_json()?;
 
     let mut interactions = Vec::new();
     collect_interactions(&tree, &mut interactions);
-    for (describe, path, arg) in interactions.into_iter().take(24) {
+    for (describe, path, slot, arg) in interactions.into_iter().take(24) {
         // Ids are per render; find the control again in the current tree.
         let current = visual.render()?;
-        let Some(id) = handler_at(&current, &path) else {
+        let Some(id) = handler_at(&current, &path, slot) else {
             continue;
         };
         visual
             .call(id, arg)
             .and_then(|()| {
                 let tree = visual.render()?;
-                exercise_draws(&mut visual, &tree, &mut Report::default())
+                exercise_draws(&mut visual, &tree, &mut Report::default())?;
+                visual.kept_json().map(|_| ())
             })
             .map_err(|e| VisualError::script(format!("after {describe}: {}", e.message)))?;
         report.interactions += 1;
@@ -525,13 +702,21 @@ fn exercise_draws(
 pub fn children(node: &Node) -> Box<dyn Iterator<Item = &Node> + '_> {
     match &node.kind {
         NodeKind::Stack(stack) => Box::new(stack.children.iter()),
-        NodeKind::Grid { children, .. } => Box::new(children.iter()),
+        NodeKind::Grid { children, .. } | NodeKind::Disclosure { children, .. } => {
+            Box::new(children.iter())
+        }
         NodeKind::Table(table) => Box::new(table.rows.iter().flatten()),
         _ => Box::new(std::iter::empty()),
     }
 }
 
-type Interaction = (String, Vec<usize>, HandlerArg);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Main,
+    Submit,
+}
+
+type Interaction = (String, Vec<usize>, Slot, HandlerArg);
 
 fn collect_interactions(node: &Node, out: &mut Vec<Interaction>) {
     fn walk(node: &Node, path: &mut Vec<usize>, out: &mut Vec<Interaction>) {
@@ -541,19 +726,72 @@ fn collect_interactions(node: &Node, out: &mut Vec<Interaction>) {
                     out.push((
                         format!("selecting tab '{option}'"),
                         path.clone(),
+                        Slot::Main,
                         HandlerArg::Text(option.clone()),
                     ));
                 }
                 out.push((
                     format!("selecting tab '{value}'"),
                     path.clone(),
+                    Slot::Main,
                     HandlerArg::Text(value.clone()),
+                ));
+            }
+            NodeKind::Select { options, value, .. } => {
+                for option in options.iter().filter(|o| o.value != *value) {
+                    out.push((
+                        format!("choosing '{}'", option.label),
+                        path.clone(),
+                        Slot::Main,
+                        HandlerArg::Text(option.value.clone()),
+                    ));
+                }
+                out.push((
+                    format!("choosing '{value}'"),
+                    path.clone(),
+                    Slot::Main,
+                    HandlerArg::Text(value.clone()),
+                ));
+            }
+            NodeKind::Input(input) => {
+                let name = input.label.as_deref().map_or("an input".into(), |l| format!("'{l}'"));
+                if input.on_change.is_some() {
+                    // Typing, then clearing it: a handler must take both.
+                    for typed in ["12", ""] {
+                        out.push((
+                            format!("typing \"{typed}\" in {name}"),
+                            path.clone(),
+                            Slot::Main,
+                            HandlerArg::Text(typed.into()),
+                        ));
+                    }
+                }
+                if input.on_submit.is_some() {
+                    out.push((
+                        format!("pressing Enter in {name}"),
+                        path.clone(),
+                        Slot::Submit,
+                        HandlerArg::Text(if input.value.is_empty() {
+                            "12".into()
+                        } else {
+                            input.value.clone()
+                        }),
+                    ));
+                }
+            }
+            NodeKind::Disclosure { label, open, on_toggle: Some(_), .. } => {
+                out.push((
+                    format!("{} '{label}'", if *open { "closing" } else { "opening" }),
+                    path.clone(),
+                    Slot::Main,
+                    HandlerArg::Bool(!open),
                 ));
             }
             NodeKind::Toggle { label, value, .. } => {
                 out.push((
                     format!("switching '{label}'"),
                     path.clone(),
+                    Slot::Main,
                     HandlerArg::Bool(!value),
                 ));
             }
@@ -564,25 +802,28 @@ fn collect_interactions(node: &Node, out: &mut Vec<Interaction>) {
                 out.push((
                     format!("moving {name} to its maximum"),
                     path.clone(),
+                    Slot::Main,
                     HandlerArg::Number(*max),
                 ));
                 out.push((
                     format!("moving {name} to its minimum"),
                     path.clone(),
+                    Slot::Main,
                     HandlerArg::Number(*min),
                 ));
             }
-            NodeKind::Button { label, .. } => {
+            NodeKind::Button { label, on_click: Some(_), .. } => {
                 out.push((
                     format!("pressing '{label}'"),
                     path.clone(),
+                    Slot::Main,
                     HandlerArg::None,
                 ));
             }
             NodeKind::Stack(Stack {
                 on_click: Some(_), ..
             }) => {
-                out.push(("clicking a row".into(), path.clone(), HandlerArg::None));
+                out.push(("clicking a row".into(), path.clone(), Slot::Main, HandlerArg::None));
             }
             _ => {}
         }
@@ -595,17 +836,26 @@ fn collect_interactions(node: &Node, out: &mut Vec<Interaction>) {
     walk(node, &mut Vec::new(), out);
 }
 
-fn handler_at(node: &Node, path: &[usize]) -> Option<HandlerId> {
+fn handler_at(node: &Node, path: &[usize], slot: Slot) -> Option<HandlerId> {
     let mut node = node;
     for ix in path {
         node = children(node).nth(*ix)?;
     }
-    match &node.kind {
-        NodeKind::Tabs { on_change, .. }
-        | NodeKind::Toggle { on_change, .. }
-        | NodeKind::Slider { on_change, .. } => Some(*on_change),
-        NodeKind::Button { on_click, .. } => Some(*on_click),
-        NodeKind::Stack(Stack { on_click, .. }) => *on_click,
+    match (&node.kind, slot) {
+        (NodeKind::Input(input), Slot::Submit) => input.on_submit,
+        (_, Slot::Submit) => None,
+        (
+            NodeKind::Tabs { on_change, .. }
+            | NodeKind::Toggle { on_change, .. }
+            | NodeKind::Slider { on_change, .. }
+            | NodeKind::Select { on_change, .. },
+            _,
+        ) => Some(*on_change),
+        (NodeKind::Input(input), _) => input.on_change,
+        (NodeKind::Button { on_click, .. } | NodeKind::Stack(Stack { on_click, .. }), _) => {
+            *on_click
+        }
+        (NodeKind::Disclosure { on_toggle, .. }, _) => *on_toggle,
         _ => None,
     }
 }

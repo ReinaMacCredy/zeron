@@ -304,6 +304,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: q.options.first().cloned().into_iter().collect(),
+                    note: None,
                 })
                 .collect();
             let _ = tx.send(answers);
@@ -1007,6 +1008,7 @@ async fn supervised_plan_run_names_the_plan_agent_and_asks_before_commands() {
             .map(|q| UserInputAnswer {
                 question_id: q.id.clone(),
                 labels: vec!["No".into()],
+                note: None,
             })
             .collect();
         seen.lock()
@@ -1770,6 +1772,7 @@ async fn live_access_modes_against_a_real_opencode() {
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec!["No".into()],
+                    note: None,
                 })
                 .collect();
             seen.lock()

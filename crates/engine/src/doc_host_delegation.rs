@@ -2460,6 +2460,9 @@ mod tests {
             multiline: false,
             approval: true,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         };
         let text = question_lines(&[forged]).join("\n");
         let mut inside = false;

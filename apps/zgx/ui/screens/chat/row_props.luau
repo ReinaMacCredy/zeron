@@ -3,11 +3,13 @@
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 local FileLinks = require("@app/screens/chat/file_links")
+local FileCards = require("@app/screens/chat/file_cards")
 local Shared = require("@app/screens/chat/shared")
 local Computer = require("@app/screens/settings/computer")
 local FilePaths = require("@app/screens/files/paths")
 local boundary = require("@app/screens/shell/boundary")
 local ConfigPanel = require("@app/screens/chat/config_panel")
+local sessions = require("@account/sessions")
 
 local M = {}
 
@@ -70,15 +72,83 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 				panel.run_in_terminal(s, text)
 			end
 		end,
+		python = M.python(chat, session, peek),
 	}
+	-- An inline question's card only while it's the one the chat waits on (an older one left open can't be answered here).
+	props.ask_card = {
+		asked = function(request: string): boolean
+			local s = session()
+			local a = if s then s.ask else nil
+			return a ~= nil and a.request == request and a.question ~= nil and a.question.inline == true
+		end,
+		answer = function(request: string, answer: any): any
+			local id = chat()
+			return if id then store.answer(id, request, { values = answer.values, text = "", note = answer.note }) else nil
+		end,
+	}
+	props.on_visual_send = function(text: string, title: string): boolean
+		return M.visual_send(chat(), peek(), text, title)
+	end
 	if props.open_link then
 		props.file_link = function(target: string): boolean
 			local s = peek()
 			local r = FileLinks.resolve(target, if s then s.cwd else nil)
 			return r ~= nil
 		end
+		props.file_cards = FileCards(peek)
 	end
 	return props
+end
+
+function M.python(chat: () -> string?, session: () -> any, peek: () -> any): any
+	local revs = ui.shared("python.runs", 0)
+	local function arg(code: string): { [string]: any }
+		return { chat = chat() or "", code = code }
+	end
+	return {
+		can = function(): boolean
+			revs:get()
+			local s = session()
+			if not s or (s.device ~= nil and s.device ~= sessions.now:get().here) then
+				return false
+			end
+			local ok, yes = pcall(ui.call_sync, "python.available", {})
+			return ok and yes == true
+		end,
+		result = function(code: string): any
+			revs:get()
+			local ok, r = pcall(ui.call_sync, "python.result", arg(code))
+			return if ok and type(r) == "table" then r else nil
+		end,
+		run = function(code: string)
+			local s = peek()
+			local a = arg(code)
+			a.root = if s then s.cwd else nil
+			ui.call("python.run", a):after(function() end, function() end)
+		end,
+		stop = function(code: string)
+			pcall(ui.invoke, "python.stop", arg(code))
+		end,
+		clear = function(code: string)
+			pcall(ui.invoke, "python.clear", arg(code))
+		end,
+	}
+end
+
+-- Through `chat.send`, never as an answer: the host queues it behind a running turn (one waiting on a question too), and a question left open with no turn to wait in refuses it.
+function M.visual_send(id: string?, s: any, text: string, title: string): boolean
+	if not id or not s then
+		return false
+	end
+	if s.ask ~= nil and s.running ~= true then
+		Shared.refuse_in(id, ui.t("ds.visual.send_waits"):get())
+		return false
+	end
+	local from = string.gsub(if title ~= "" then title else "Visual", "[\r\n]+", " ")
+	store.send({ session = id, text = `{text}\n\n(Sent from "{from}", not typed.)` } :: any):after(function() end, function()
+		Shared.refuse_in(id, ui.t("chat.composer.didnt_send"):get())
+	end)
+	return true
 end
 
 -- The engine's `parse_computer_invocation`: up to three spaces, then /computer-use alone or before a space.

@@ -2449,6 +2449,10 @@ fn handle_control_request(
             let answers = answers.await.unwrap_or_default();
             let response = if approval::approved(&question, &answers) {
                 allow(body.input)
+            } else if let Some(change) = approval::change_request(&question, &answers) {
+                deny_response(&format!(
+                    "{APPROVAL_DENIED} They asked for this change instead: {change}"
+                ))
             } else {
                 deny_response(APPROVAL_DENIED)
             };
@@ -2490,7 +2494,7 @@ const QUESTIONS_DISMISSED: &str = "The user dismissed the questions without answ
 
 /// Parse Claude's `AskUserQuestion` tool input into [`UserInputQuestion`]s
 /// (tolerant of `header`/`title`, `question`/`prompt`, string or object
-/// options — option descriptions are dropped, the wire type carries labels).
+/// options, each one's description carried in `details`).
 fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
     let raw = input.get("questions").and_then(Value::as_array);
     raw.map(|a| a.as_slice())
@@ -2499,6 +2503,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
         .map(|q| {
             let field =
                 |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
+            let (options, details) = crate::question_options(q);
             UserInputQuestion {
                 approval: false,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -2510,24 +2515,12 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                     .iter()
                     .find_map(|k| q.get(*k).and_then(Value::as_bool))
                     .unwrap_or(false),
-                options: q
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|a| a.as_slice())
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|op| match op {
-                        Value::String(s) => s.clone(),
-                        other => other
-                            .get("label")
-                            .or_else(|| other.get("value"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .into(),
-                    })
-                    .collect(),
+                options,
                 kind: None,
                 action: None,
+                details,
+                allow_note: false,
+                quick: false,
             }
         })
         .collect()
@@ -3163,6 +3156,10 @@ mod tests {
         assert_eq!(qs[1].header, "Alt");
         assert_eq!(qs[1].question, "Pick many");
         assert!(qs[1].multi_select);
+        assert_eq!(qs[0].details.len(), 2);
+        assert_eq!(qs[0].details[0], Default::default());
+        assert_eq!(qs[0].details[1].description.as_deref(), Some("second"));
+        assert!(qs[1].details.is_empty());
     }
 
     #[test]
@@ -3173,6 +3170,7 @@ mod tests {
         let answers = vec![UserInputAnswer {
             question_id: qs[0].id.clone(),
             labels: vec!["B".into()],
+            note: None,
         }];
         let updated = updated_input_with_answers(&input, &qs, &answers);
         assert_eq!(updated["answers"]["Pick one"], json!("B"));

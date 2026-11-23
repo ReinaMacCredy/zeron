@@ -520,6 +520,7 @@ mod tests {
             .send(vec![zeron_proto::UserInputAnswer {
                 question_id: "q".into(),
                 labels: vec!["Yes".into()],
+                note: None,
             }])
             .unwrap();
         let rest: Vec<AgentEvent> = events.map(Result::unwrap).collect().await;
@@ -607,6 +608,7 @@ mod tests {
                 let _ = tx.send(vec![zeron_proto::UserInputAnswer {
                     question_id: questions[0].id.clone(),
                     labels: vec!["A".into(), "B".into()],
+                    note: None,
                 }]);
                 rx
             }),

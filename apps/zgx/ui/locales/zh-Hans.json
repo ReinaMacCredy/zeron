@@ -700,6 +700,7 @@
       "expand": "展开",
       "more": "+{n}",
       "attach": "附加",
+      "attach_files": "附加文件",
       "stop_dictating": "停止听写",
       "dictate": "听写",
       "queue_message": "将消息加入队列",
@@ -721,7 +722,8 @@
         "plan": "描述目标。智能体会写计划，不做更改。",
         "plan_asks": "描述目标。智能体会写计划并等待你确认。",
         "mission": "描述目标。智能体会写计划并等待你确认。",
-        "mission_runs": "描述目标。智能体会制定计划并在线程中运行各个步骤。"
+        "mission_runs": "描述目标。智能体会制定计划并在线程中运行各个步骤。",
+        "inline_answer": "或输入回答"
       },
       "message": "消息",
       "branch": {
@@ -795,7 +797,10 @@
         "size_steps": "最多 {n} 步",
         "size_no_limit": "不限步数",
         "size_next": "下一档规模"
-      }
+      },
+      "question_above": "上方有 1 个问题在等待",
+      "request_changes": "要求修改",
+      "changes_need_words": "输入要修改的内容，然后按“要求修改”。"
     },
     "markdown": {
       "fit_content": "适合内容",
@@ -806,6 +811,20 @@
       "done": "完成",
       "run_code": "在终端中运行",
       "run": "运行"
+    },
+    "python_run": {
+      "run": "运行 Python",
+      "stop": "停止 Python",
+      "stop_label": "停止",
+      "clear": "清除结果",
+      "running": "正在运行…",
+      "done": "{time} 后完成，退出码 {code}",
+      "stopped": "已停止",
+      "timed_out": "10 秒后超时",
+      "failed": "无法运行：{reason}",
+      "cut": "（输出在 64 KB 处截断。）",
+      "figure": "图 {n}，来自 plt.show()",
+      "sandbox": "沙盒：无网络，只读取系统文件、Python 和此聊天的文件夹，只写入临时文件夹，脚本在 10 秒后被停止"
     },
     "mermaid": {
       "show_source": "显示源代码",
@@ -921,7 +940,8 @@
       "selected_numbered": "{n}. 选中的文本",
       "selected": "选中的文本",
       "user_comment": "用户评论：{comment}",
-      "steered": "一并引导"
+      "steered": "一并引导",
+      "from_visual": "来自{title}"
     },
     "reply_picture": {
       "not_a_picture": "不是可显示的图片",
@@ -1281,11 +1301,46 @@
       "loading": "正在加载{title}…",
       "unavailable": "无法显示{title}",
       "stopped": "可视化已停止",
-      "copy_error": "拷贝错误"
+      "copy_error": "拷贝错误",
+      "reset": "重置",
+      "data_table": "数据表",
+      "building": "正在生成{title}…",
+      "building_untitled": "正在生成可视化…",
+      "send": "发送给智能体",
+      "sent": "已发送",
+      "send_waits": "请先回答智能体的问题：这条消息没有发送。"
+    },
+    "quiz": {
+      "question": "第 {i}/{n} 题",
+      "previous": "上一题",
+      "next_question": "下一题",
+      "hint": "提示",
+      "check": "检查",
+      "correct": "正确",
+      "not_quite": "不太对",
+      "not_all": "没有选全：请看上面的标记",
+      "next": "下一题",
+      "to_unanswered": "去未答的题",
+      "see_results": "查看结果",
+      "back_to_results": "返回结果",
+      "results": "结果",
+      "correct_count": "答对",
+      "score": "得分",
+      "you_chose": "你选了：{choices}",
+      "try_again": "再试一次",
+      "explain": "讲解第 {list} 题",
+      "harder": "再来 5 道更难的题",
+      "asked": "已发送给智能体",
+      "choose_one": "选择一个答案。",
+      "choose_all": "选择所有正确答案。",
+      "answer": "你的答案",
+      "send": "发送给智能体",
+      "sent": "已发送"
     },
     "links": {
       "open": "打开",
       "open_in_panel": "在浏览器面板中打开",
+      "open_in_side_panel": "在侧边面板中打开",
       "open_outside": "在默认浏览器中打开",
       "copy_link": "拷贝链接",
       "copy_address": "拷贝地址",
@@ -1293,6 +1348,15 @@
       "reveal": "在访达中显示",
       "copied_link": "已拷贝链接",
       "link_not_ready": "此聊天的链接尚未就绪"
+    },
+    "file_card": {
+      "open_in_panel": "在文件面板中打开",
+      "gone": "已不在这台电脑上",
+      "detail": "{kind}，{size}",
+      "more_lines": "{n, plural, other {还有 # 行}}",
+      "more_in_panel": "更多内容在文件面板中",
+      "text": "文本",
+      "file": "文件"
     },
     "emoji_picker": {
       "search": "搜索表情",
@@ -1458,7 +1522,9 @@
         "quiet": "{title} quiet {n}m",
         "background": "{title} waits on a background command",
         "running": "{n} running",
-        "finished": "Finished"
+        "finished": "Finished",
+        "hide": "隐藏计划",
+        "show": "显示计划"
       }
     },
     "profiles": {
@@ -1636,13 +1702,17 @@
       "mention": "提及"
     },
     "html_picks": {
-      "close": "关闭",
-      "pill": "{title} · {n} 组待选",
-      "left": "{n} 组待选",
+      "pill": "{title} · 还剩 {n} 组",
+      "left": "还剩 {n} 组",
       "sent": "已选选项",
-      "close_page": "关闭页面",
-      "pill_edit": "{title} · 更改选择",
-      "left_edit": "更改选择"
+      "pill_done": "{title} · 已全部选好",
+      "left_done": "已全部选好",
+      "collapse": "收起",
+      "change": "更改",
+      "not_picked": "未选",
+      "hint": "点击外部、按 Esc 或输入文字即可收起。",
+      "hint_done": "已全部选好。在输入框按 Enter 发送，或输入备注。",
+      "skip_page": "跳过此页"
     },
     "html_card": {
       "closed": "已关闭",
@@ -1652,6 +1722,7 @@
       "count_partly_sent_chosen": "已发送 {n}/{total} · 已选 {chosen}",
       "count_all": "{total} 项已全部选好",
       "count_chosen": "已选 {n}/{total}",
+      "picked": "已选 {n}/{total}",
       "open_in_browser": "在浏览器中打开",
       "live": "实时",
       "source": "源代码",
@@ -1753,6 +1824,17 @@
         "title": "找不到它的根文件",
         "body": "它的 % !TEX root 行指向 {root}，但该文件不存在。"
       }
+    },
+    "ask_card": {
+      "waiting": "等待你的回答",
+      "recommended": "推荐",
+      "note": "添加备注（可选）",
+      "choose_one": "选择一个选项。",
+      "choose_many": "选择一个或多个。",
+      "send": "发送选择",
+      "sending": "正在发送…",
+      "quick_reply": "快速回复",
+      "failed": "回答没有发出。请重试。"
     }
   },
   "settings": {

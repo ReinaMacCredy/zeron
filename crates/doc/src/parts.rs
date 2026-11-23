@@ -395,6 +395,8 @@ pub enum MessagePart {
         id: String,
         path: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
     },
     /// Model thinking. Carries its body in a dedicated doc field (`reasoning`,
     /// never `text`) so pre-reasoning desktop builds — whose unknown-kind
@@ -620,7 +622,9 @@ impl MessagePart {
                 name,
                 mime_type,
             } => id.len() + path.len() + name.len() + mime_type.len(),
-            MessagePart::Visual { id, path, title } => id.len() + path.len() + title.len(),
+            MessagePart::Visual { id, path, title, caption } => {
+                id.len() + path.len() + title.len() + caption.as_ref().map_or(0, String::len)
+            }
             MessagePart::Error { message, .. } => message.len(),
             MessagePart::Fork {
                 source_chat_id,
@@ -698,11 +702,12 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(image);
             }
         }
-        AgentEvent::Visual { id, path, title } => {
+        AgentEvent::Visual { id, path, title, caption } => {
             let visual = MessagePart::Visual {
                 id: id.clone(),
                 path: path.clone(),
                 title: title.clone(),
+                caption: caption.clone(),
             };
             if let Some(existing) = out.iter_mut().find(|p| p.id() == id) {
                 *existing = visual;
@@ -1475,6 +1480,7 @@ mod tests {
         let picked = vec![UserInputAnswer {
             question_id: "q".into(),
             labels: vec!["B".into()],
+            note: None,
         }];
         let mut parts = Vec::new();
         for id in ["answered", "closed", "legacy"] {

@@ -699,3 +699,48 @@ async fn auto_applies_an_edit_without_asking_anyone() {
     );
     rig.core.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_refusal_with_a_change_reaches_a_driver_that_cannot_carry_it_as_the_next_message() {
+    let rig = rig("supervised").await;
+    start_child(&rig.core, "one command");
+    wait_for(|| open_inputs(&rig.core).len() == 1, "the command card").await;
+    let (request_id, questions) = open_inputs(&rig.core).remove(0);
+    rig.core
+        .doc_host
+        .open("child")
+        .unwrap()
+        .doc()
+        .queue_command(&SessionCommandEntry {
+            id: "changes".into(),
+            payload: SessionCommandPayload::RespondInput {
+                request_id,
+                answers: vec![zeron_proto::UserInputAnswer {
+                    question_id: questions[0].id.clone(),
+                    labels: vec![approval::DENY.into()],
+                    note: Some("run cargo check instead".into()),
+                }],
+            },
+            issued_by: "viewer".into(),
+            issued_at: chrono::Utc::now().timestamp_millis(),
+            based_on: None::<CommandBasedOn>,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+            computer_generation: None,
+        })
+        .unwrap();
+    let said = || {
+        let handle = rig.core.doc_host.open("child").unwrap();
+        let doc = handle.doc();
+        let queued = doc.read_queue().unwrap_or_default().into_iter().map(|q| q.text);
+        let sent = doc.read_entries().unwrap_or_default().into_iter().flat_map(|e| e.parts).filter_map(|p| match p {
+            MessagePart::Text { text, .. } => Some(text),
+            _ => None,
+        });
+        queued.chain(sent).any(|text| text == "run cargo check instead")
+    };
+    wait_for(said, "the change to follow as the person's message").await;
+    assert_eq!(answered(&rig), [("next turn".into(), false)], "a change request never allows");
+    rig.core.shutdown().await;
+}

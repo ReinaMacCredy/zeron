@@ -70,6 +70,8 @@ mod mermaid;
 mod pdf;
 #[cfg(target_os = "macos")]
 mod tex;
+#[cfg(target_os = "macos")]
+mod python_run;
 mod plugins;
 mod previews;
 mod projects;
@@ -223,6 +225,22 @@ fn raise_open_files() {
     }
 }
 
+/// The C locale for this thread, the one every Luau VM runs on. libghostty
+/// (and GTK) set the process locale from the environment when a terminal
+/// first opens, after which Luau's `%s`, `%c` and `%w` match bytes inside
+/// UTF-8 letters and `tonumber` may want a comma; a thread's own locale wins
+/// over the process's.
+#[cfg(unix)]
+fn pin_c_locale() {
+    // SAFETY: a static name, no base locale; the new locale is never freed.
+    unsafe {
+        let c = libc::newlocale(libc::LC_ALL_MASK, c"C".as_ptr(), std::ptr::null_mut());
+        if !c.is_null() {
+            libc::uselocale(c);
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     raise_open_files();
@@ -232,6 +250,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if argv.get(1).map(String::as_str) == Some("terminal-bridge") {
         std::process::exit(terminal::bridge(&argv[2..]));
     }
+    #[cfg(unix)]
+    pin_c_locale();
     // This launch as it started, for Reload Zeron (src/relaunch.rs), before
     // anything below sets a variable; started by one, the launch it
     // replaces waited out first.
@@ -917,6 +937,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         visuals::install(cx, &host);
         // Agent pages in a transcript (src/html_pages.rs).
         html_pages::install(&host);
+        #[cfg(target_os = "macos")]
+        python_run::install(cx, &host);
         // Settings' account, organization and engine calls (src/settings.rs).
         settings::install(cx, &host);
         // Settings → Device hub and a chat's Device tab (src/device.rs).

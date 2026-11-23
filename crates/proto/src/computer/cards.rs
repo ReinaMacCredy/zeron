@@ -245,6 +245,7 @@ pub fn consent_answers(question_id: &str, choice: &ConsentChoice) -> Vec<UserInp
     vec![UserInputAnswer {
         question_id: question_id.to_owned(),
         labels: vec![choice.answer_label().to_owned()],
+        note: None,
     }]
 }
 
@@ -428,6 +429,7 @@ mod tests {
         vec![UserInputAnswer {
             question_id: "consent".into(),
             labels: labels.iter().map(|l| l.to_string()).collect(),
+            note: None,
         }]
     }
 
@@ -660,6 +662,9 @@ mod tests {
             prefill: None,
             multiline: false,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         }
     }
 

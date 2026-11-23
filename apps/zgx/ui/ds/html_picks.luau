@@ -39,7 +39,7 @@ function M.block(card: string, picks: { Pick }, missing: { Group }): string
 end
 
 function M.with_picks(words: string, cards: { Card }): string
-	local out = string.match(words, "^(.-)%s*$") or words
+	local out = string.match(words, "^(.-)[ \t\r\n\f\v]*$") or words
 	for _, c in cards do
 		if #c.picks > 0 then
 			if out ~= "" then
@@ -52,7 +52,7 @@ function M.with_picks(words: string, cards: { Card }): string
 end
 
 function M.with_open(text: string, open: { { title: string, left: { Group } } }): string
-	local out = string.match(text, "^(.-)%s*$") or text
+	local out = string.match(text, "^(.-)[ \t\r\n\f\v]*$") or text
 	if #open == 0 then
 		return out
 	end

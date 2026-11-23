@@ -73,6 +73,7 @@ pub(crate) fn part(index: usize) -> MessagePart {
         id: id.to_owned(),
         path: path(id),
         title: title.to_owned(),
+        caption: None,
     }
 }
 

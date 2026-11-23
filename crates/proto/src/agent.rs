@@ -1464,6 +1464,7 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 9] = [
 /// script Zeron runs in a sandbox and renders natively.
 pub const VISUAL_MAX_BYTES: usize = 256 * 1024;
 pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
+pub const VISUAL_MAX_CAPTION_CHARS: usize = 300;
 /// Files a visual may ship with (models, textures, environment maps).
 pub const VISUAL_MAX_ASSETS: usize = 16;
 pub const VISUAL_MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
@@ -1716,6 +1717,37 @@ pub struct UserInputQuestion {
         deserialize_with = "lenient_approval_action"
     )]
     pub action: Option<ApprovalAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<UserInputOptionDetail>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_note: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quick: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputOptionDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+impl UserInputOptionDetail {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn aligned(details: Vec<Self>) -> Vec<Self> {
+        if details.iter().all(Self::is_empty) {
+            Vec::new()
+        } else {
+            details
+        }
+    }
 }
 
 fn lenient_approval_action<'de, D>(deserializer: D) -> Result<Option<ApprovalAction>, D::Error>
@@ -1784,6 +1816,8 @@ impl UserInputQuestion {
 pub struct UserInputAnswer {
     pub question_id: String,
     pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1832,6 +1866,8 @@ pub enum AgentEvent {
         id: String,
         path: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
     },
     ReasoningDelta {
         text: String,
@@ -2099,6 +2135,9 @@ mod tests {
             prefill: None,
             multiline: false,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         };
         assert!(question.is_computer() && !question.is_consent());
         let plain = UserInputQuestion {
@@ -2106,6 +2145,27 @@ mod tests {
             ..question
         };
         assert!(!plain.is_computer());
+    }
+
+    #[test]
+    fn option_details_notes_and_quick_are_left_out_when_unused() {
+        let old = serde_json::json!({
+            "id": "q", "header": "Pick", "question": "Which?", "options": ["A", "B"], "multiSelect": false, "multiline": false,
+        });
+        let question: UserInputQuestion = serde_json::from_value(old.clone()).unwrap();
+        assert!(question.details.is_empty() && !question.allow_note && !question.quick);
+        assert_eq!(serde_json::to_value(&question).unwrap(), old);
+        let rich = serde_json::json!({
+            "id": "q", "header": "Pick", "question": "Which?", "options": ["A", "B"], "multiSelect": false, "multiline": false,
+            "details": [{}, { "description": "Safer", "recommended": true, "id": "b" }], "allowNote": true, "quick": true,
+        });
+        let question: UserInputQuestion = serde_json::from_value(rich.clone()).unwrap();
+        assert!(question.details[1].recommended && question.allow_note && question.quick);
+        assert_eq!(serde_json::to_value(&question).unwrap(), rich);
+        assert!(UserInputOptionDetail::aligned(vec![UserInputOptionDetail::default(); 2]).is_empty());
+        let answer: UserInputAnswer = serde_json::from_value(serde_json::json!({ "questionId": "q", "labels": ["A"] })).unwrap();
+        assert_eq!(answer.note, None);
+        assert_eq!(serde_json::to_value(&answer).unwrap(), serde_json::json!({ "questionId": "q", "labels": ["A"] }));
     }
 
     #[test]

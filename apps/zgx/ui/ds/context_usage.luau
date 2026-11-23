@@ -32,8 +32,10 @@ local Button = require("@self/button")
 local status = require("@self/status")
 local motion = require("@self/motion")
 local Tooltip = require("@self/tooltip")
+local RollText = require("@self/roll_text")
 
 export type Usage = { tokens: number?, window: number? }
+export type Sized = { label: string, n: number, held: boolean }
 export type Marks = { floor: number?, warn: number?, auto: number? }
 export type Next = { icon: "spin" | "agent" | "clock" | "warn" | "off", title: string, detail: string?, chip: string? }
 export type Compaction = {
@@ -52,6 +54,8 @@ local M = {}
 
 -- From here a plan's window shows on the footer (Zeron's account ring turns amber).
 M.PLAN_NEAR = 0.8
+
+local NUDGE, NUDGE_MS = 3, 180
 
 -- A count of tokens, its thousands grouped ("408,389").
 function M.grouped(n: number): string
@@ -81,6 +85,14 @@ function M.lines(u: Usage?): (string, string?)
 		return locale.s("ds.composer.context.capacity", { n = M.grouped(window) }), locale.s("ds.composer.context.waiting")
 	end
 	return locale.s("ds.composer.context.unreported"), nil
+end
+
+-- Tokens as gpui's: 212K, 1.0M.
+function M.short_tokens(n: number): string
+	if n >= 999500 then
+		return string.format("%.1fM", n / 1000000)
+	end
+	return `{math.floor((n + 500) / 1000)}K`
 end
 
 function M.ink(f: number): string
@@ -599,6 +611,7 @@ M.Chip = ui.component(function(props: {
 	plan: (() -> Plan?)?,
 	compaction: Compaction?,
 	side: () -> string,
+	sized: State<Sized?>?,
 }): Node
 	local working = props.working or function(): boolean
 		return false
@@ -613,14 +626,37 @@ M.Chip = ui.component(function(props: {
 	local function fraction(): number?
 		return M.fraction(props.usage())
 	end
+	local function sized(): Sized?
+		return if props.sized then props.sized:get() else nil
+	end
+	local rolling = false
+	local el: any = nil
+	local nudged = 0
+	ui.effect(function()
+		local s = sized()
+		if not s then
+			ui.after(0, function()
+				rolling = false
+			end)
+			return
+		end
+		rolling = true
+		if s.held and s.n ~= nudged and el and not motion.reduced_now() then
+			anime.animate(el, { x = { NUDGE, 0 }, duration = NUDGE_MS, ease = "outQuint" })
+		end
+		nudged = s.n
+	end)
 	local function card(): Node
 		return M.Card { usage = props.usage, stats = props.stats, working = props.working, plan = props.plan, compaction = props.compaction }
 	end
 	return ui.show(function(): boolean
-		return windowed() or word:get() ~= nil
+		return windowed() or word:get() ~= nil or sized() ~= nil
 	end, ui.presence(props.side, function(at: string): Node
 		local chip = ui.row {
 			id = "composer-context",
+			on_mount = function(mounted)
+				el = mounted
+			end,
 			h = 24,
 			px = "$zeron.space.tight",
 			gap = ui.raw(5, "gpui's ring_chip gap"),
@@ -643,16 +679,31 @@ M.Chip = ui.component(function(props: {
 				end,
 			}),
 			ui.show(function(): boolean
-				return fraction() ~= nil
-			end, ui.text {
-				function(): string
-					return percent(fraction() or 0)
-				end,
+				return fraction() ~= nil or sized() ~= nil
+			end, ui.row {
 				id = "composer-context-percent",
-				tabular = true,
-				color = function(): string
-					return M.ink(fraction() or 0)
-				end,
+				shrink = 0,
+				RollText {
+					function(): string
+						local s, u = sized(), props.usage()
+						if s then
+							return if u and u.tokens then `{M.short_tokens(u.tokens)} / {s.label}` else s.label
+						end
+						return percent(fraction() or 0)
+					end,
+					text_size = "$font.size.xs",
+					tabular = true,
+					rolls = function(): boolean
+						return rolling or sized() ~= nil
+					end,
+					color = function(): string
+						local u = props.usage()
+						if sized() and u and u.tokens and u.window and u.tokens > u.window then
+							return "$warning"
+						end
+						return M.ink(fraction() or 0)
+					end,
+				},
 			}),
 			ui.show(function(): boolean
 				return windowed() and word:get() ~= nil

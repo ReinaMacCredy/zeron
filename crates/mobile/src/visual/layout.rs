@@ -237,7 +237,13 @@ impl Layouter<'_, '_> {
                     .natural();
                 Some((value_w + delta_w).max(label_w))
             }
-            NodeKind::Button { label, .. } => Some(self.button_width(label)),
+            NodeKind::Button {
+                on_click: Some(_),
+                send: None,
+                label,
+                ..
+            } => Some(self.button_width(label)),
+            NodeKind::Button { .. } => None,
             NodeKind::Tabs { options, .. } => {
                 let widths: Vec<f32> = options.iter().map(|o| self.tab_width(o)).collect();
                 Some(widths.iter().sum::<f32>() + TAB_GAP * widths.len().saturating_sub(1) as f32)
@@ -254,6 +260,10 @@ impl Layouter<'_, '_> {
                     .natural(),
             ),
             NodeKind::Grid { .. }
+            | NodeKind::Input(_)
+            | NodeKind::Select { .. }
+            | NodeKind::Disclosure { .. }
+            | NodeKind::Quiz(_)
             | NodeKind::Table(_)
             | NodeKind::Rule
             | NodeKind::Chart(_)
@@ -365,9 +375,31 @@ impl Layouter<'_, '_> {
             }
             NodeKind::Button {
                 label,
-                on_click,
+                on_click: Some(on_click),
                 primary,
+                send: None,
             } => self.button(&key, label, *on_click, *primary, x, y),
+            // What this app can't draw or send yet: its name, quietly.
+            NodeKind::Button { label, .. } | NodeKind::Disclosure { label, .. } => {
+                self.fallback(label, x, y, width)
+            }
+            NodeKind::Input(input) => {
+                let name = input.label.as_deref().or(input.placeholder.as_deref());
+                self.fallback(name.unwrap_or(&input.value), x, y, width)
+            }
+            NodeKind::Select {
+                label,
+                value,
+                options,
+                ..
+            } => {
+                let chosen = options.iter().find(|o| o.value == *value).map(|o| o.label.as_str());
+                self.fallback(label.as_deref().or(chosen).unwrap_or(value), x, y, width)
+            }
+            NodeKind::Quiz(quiz) => {
+                let first = quiz.questions.first().map_or("", |q| q.question.as_str());
+                self.fallback(first, x, y, width)
+            }
             NodeKind::Tabs {
                 options,
                 value,
@@ -839,6 +871,13 @@ impl Layouter<'_, '_> {
             });
         }
         top - y
+    }
+
+    fn fallback(&mut self, label: &str, x: f32, y: f32, width: f32) -> f32 {
+        let para = self.plain(label, TextSize::Sm, Weight::Regular, self.palette.muted);
+        self.out
+            .paint
+            .para(self.ctx, &para, x, y, width, Align::Start, false)
     }
 
     fn button(

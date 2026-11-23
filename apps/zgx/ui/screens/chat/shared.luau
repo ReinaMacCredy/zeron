@@ -2018,7 +2018,7 @@ function M.put_words(key: string, words: string, focus: boolean?)
 	end
 	local start = if from and from ~= caret then math.clamp(from, 0, at) else at
 	local tail = if at == #text then " " else ""
-	local lead = if start > 0 and not string.find(string.sub(text, start, start), "%s") then " " else ""
+	local lead = if start > 0 and not string.find(string.sub(text, start, start), "[ \t\r\n\f\v]") then " " else ""
 	local put = lead .. words .. tail
 	if el and el:set_selection_bytes(start, at) and el:replace_selection(put) then
 		if focus then

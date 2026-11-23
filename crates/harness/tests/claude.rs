@@ -78,6 +78,7 @@ fn controls(
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec![answer_label.into()],
+                    note: None,
                 })
                 .collect();
             let _ = tx.send(answers);
@@ -485,6 +486,7 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec!["B".into()],
+                    note: None,
                 })
                 .collect();
             let _ = tx.send(answers);
@@ -2113,6 +2115,7 @@ fn approving(
                     UserInputAnswer {
                         question_id: q.id.clone(),
                         labels: vec![if allow { "Yes" } else { "No" }.into()],
+                        note: None,
                     }
                 })
                 .collect();

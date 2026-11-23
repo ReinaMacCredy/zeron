@@ -36,7 +36,7 @@ local M = {}
 export type Edits = {
 	id: () -> string?,
 	text: State<string>,
-	editing: State<{ item: string, aside: string, aside_cargo: { any }? }?>,
+	editing: State<{ item: string, chat: string?, aside: string, aside_cargo: { any }? }?>,
 	focus: () -> (),
 	say: (tone: string, key: string) -> (),
 	cargo: (() -> { any })?,
@@ -68,7 +68,7 @@ function M.queue_edits(e: Edits): { [string]: any }
 	-- ("commit" saves what's in the draft, "cancel" leaves it as it was.)
 	local function finish(action: string)
 		local now = e.editing:peek()
-		local id = e.id()
+		local id = if now then now.chat or e.id() else nil
 		if not now or not id then
 			return
 		end
@@ -110,7 +110,7 @@ function M.queue_edits(e: Edits): { [string]: any }
 			end
 			store.queue_edit(id, item):after(function(got: any)
 				ui.batch(function()
-					e.editing:set { item = item, aside = e.text:peek(), aside_cargo = if e.cargo then e.cargo() else nil }
+					e.editing:set { item = item, chat = id, aside = e.text:peek(), aside_cargo = if e.cargo then e.cargo() else nil }
 					local text = if got then got.text else ""
 					local files = chips_of(if got then got.attachments else nil)
 					local head, cards, tail = HtmlPicks.split(text)
@@ -178,7 +178,15 @@ function M.bind(b: Bind): { [string]: any }
 	end)
 	local question = ui.computed(function(): any
 		local a = ask:get()
-		return if a and a.kind == "question" then a.question else nil
+		if not a or a.kind ~= "question" then
+			return nil
+		end
+		if a.question.inline then
+			local q = table.clone(a.question)
+			q.request = a.request
+			return q
+		end
+		return a.question
 	end)
 	local approval = ui.computed(function(): any
 		local a = ask:get()
@@ -383,7 +391,29 @@ function M.bind(b: Bind): { [string]: any }
 				store.approve(id, a.request, scope)
 			end
 		end,
-		on_deny = on_ask(store.deny),
+		on_deny = function(change: any?)
+			local id, a = b.id(), ask:peek()
+			if not (id and a) then
+				return
+			end
+			if not change then
+				store.deny(id, a.request)
+				return
+			end
+			if not string.find(change.text, "%S") then
+				if b.notice then
+					b.notice { tone = "warning", key = "ds.composer.changes_need_words", dismissable = true }
+				elseif b.say then
+					b.say("warning", "ds.composer.changes_need_words")
+				end
+				change.focus()
+				return
+			end
+			store.request_changes(id, a.request, change.text):after(function() end, function(err: any)
+				change.keep()
+				say("ds.pills.answer_failed", err)
+			end)
+		end,
 		queue = queue,
 		engine_queue = engine_queue,
 		can_steer = can_steer,

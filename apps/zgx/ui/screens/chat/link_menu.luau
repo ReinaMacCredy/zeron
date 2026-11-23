@@ -19,10 +19,32 @@ local function base_name(path: string): string
 	return string.match(path, "([^/]+)/?$") or path
 end
 
-return function(open: (target: string) -> (), session: () -> any?): (target: string) -> { Links.Entry }?
-	return function(target: string): { Links.Entry }?
+-- (From selected text most dotted words are code, not files: `string.find`.
+-- Only one its folder lists is offered.)
+local function listed(known: { [string]: boolean }, s: any, cwd: string, path: string): boolean
+	local key = `{s.id}\0{path}`
+	if known[key] == nil then
+		known[key] = false
+		local dir = string.match(path, "^(.*)/[^/]+$") or ""
+		files.list({ chat = s.id, device = s.device, root = cwd }, dir):after(function(listing: any)
+			known[key] = nil
+			for _, e in (if type(listing) == "table" then listing.entries else nil) or {} do
+				if e.path == path and not e.dir then
+					known[key] = true
+				end
+			end
+		end, function()
+			known[key] = nil
+		end)
+	end
+	return known[key] == true
+end
+
+return function(open: (target: string) -> (), session: () -> any?): (target: string, selected: boolean?) -> { Links.Entry }?
+	local known: { [string]: boolean } = {}
+	return function(target: string, selected: boolean?): { Links.Entry }?
 		local chat = string.match(target, "^zeron%-chat:([%w%-_]+)$")
-		if chat then
+		if chat and not selected then
 			return Links.chat {
 				open = function()
 					open(target)
@@ -38,7 +60,7 @@ return function(open: (target: string) -> (), session: () -> any?): (target: str
 				end,
 			}
 		end
-		if Links.web(target) then
+		if Links.web(target) or (chat and selected) then
 			return nil
 		end
 		local s = session()
@@ -54,7 +76,11 @@ return function(open: (target: string) -> (), session: () -> any?): (target: str
 					open(target)
 				end,
 				path = path,
+				panel = selected,
 			}
+		end
+		if selected and not (s and cwd and listed(known, s, cwd, path)) then
+			return {}
 		end
 		local here = s ~= nil and (s.device == nil or s.device == sessions.now:peek().here)
 		return Links.file {
@@ -69,6 +95,7 @@ return function(open: (target: string) -> (), session: () -> any?): (target: str
 				end
 				else nil,
 			path = if cwd then `{(string.gsub(cwd, "/+$", ""))}/{path}` else path,
+			panel = selected,
 		}
 	end
 end

@@ -38,6 +38,12 @@ text = "Idle compaction no longer misses a Claude Code chat with background work
 [[entry.improvements]]
 text = "Settings > Agents > Compaction lists the three reasons with who decides each. A compaction's divider opens to what the agent asked to keep and its summary."
 
+[[entry.improvements]]
+text = "With an empty composer, Shift+Up and Shift+Down step the chat's context size along the model picker's Context slider. The context ring says the tokens in use and the new size for a moment."
+
+[[entry.improvements]]
+text = "Picking 1M on the Context slider after a smaller size now stays. It used to go back to the smaller size a few seconds later."
+
 [[entry]]
 version = "0.3.4"
 date = "Nov 13"

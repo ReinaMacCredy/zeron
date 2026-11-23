@@ -781,6 +781,7 @@ pub fn theme_variables(theme: &PageTheme, font_size: f32) -> Vec<(&'static str, 
         ("--card-foreground", c(theme.text)),
         ("--popover", c(theme.surface_overlay)),
         ("--popover-foreground", c(theme.text)),
+        ("--solid", c(opaque(theme.surface_overlay, theme.bg))),
         ("--secondary", c(theme.surface_raised)),
         ("--secondary-foreground", c(theme.text)),
         ("--border", c(theme.border)),
@@ -853,6 +854,18 @@ pub fn theme_variables(theme: &PageTheme, font_size: f32) -> Vec<(&'static str, 
     vars.push(("--font-size-code", css_px(theme.code_font_size)));
     vars.push(("--surface-treatment", surface(theme).into()));
     vars
+}
+
+/// `top` over `under`, with no alpha left: on glass every surface is
+/// see-through, and a page's own layer that covers content needs one that isn't.
+fn opaque(top: Rgba, under: Rgba) -> Rgba {
+    let mix = |t: f32, u: f32| t * top.a + u * (1.0 - top.a);
+    Rgba {
+        r: mix(top.r, under.r),
+        g: mix(top.g, under.g),
+        b: mix(top.b, under.b),
+        a: 1.0,
+    }
 }
 
 fn surface(theme: &PageTheme) -> &'static str {
@@ -1106,15 +1119,15 @@ fn blank_non_markup(html: &str) -> Vec<u8> {
 
 pub const PAGE_RULES: &str = "Write one self-contained document with inline <style> and <script>. Local images written as absolute file paths (src=\"/abs/shot.png\", CSS url(/abs/bg.webp), or a JS string) are inlined automatically; remote http(s) URLs, such as a CDN chart library, load as-is.";
 
-pub const LAYOUT_GUIDE: &str = "Layout: the frame is borderless on the thread's background, as wide as the reply column (736px by default) and aligned with your text, so use a fluid width with no outer padding, card, border or banner title. Give charts fixed pixel heights. Let content set the height: no 100vh or height:100% on html or body, which makes the frame grow again and again.";
+pub const LAYOUT_GUIDE: &str = "Layout: the frame is borderless on the thread's background, as wide as the reply column (736px by default) and aligned with your text, so use a fluid width with no outer padding, card, border or banner title. Give charts fixed pixel heights. Let content set the height: no 100vh or height:100% on html or body, which makes the frame grow again and again. The page has no background: the thread shows through it, and on glass every surface variable is translucent, --background included. Don't cover content with them: no sticky or fixed bars, no layer that slides over the page, no full-width filled band. A panel that must hide what is under it uses --solid.";
 
-pub const THEME_GUIDE: &str = "Theme: CSS variables on :root that follow the person's theme and light or dark mode live: --background (the thread's), --foreground, --muted, --muted-foreground, --card, --card-foreground, --popover, --popover-foreground, --secondary, --secondary-foreground, --border, --input, --ring, --primary, --primary-foreground, --accent, --accent-foreground, --accent-surface, --accent-surface-foreground, --destructive, --destructive-foreground, --destructive-surface, --warning, --warning-foreground, --warning-surface, --success, --success-foreground, --success-surface, --info, --info-foreground, --code-background, --code-foreground, --chart-1 … --chart-6 (series), --radius, --font-sans, --font-mono, --faint-foreground, --hover, --border-strong, --selection, --danger, --surface-treatment, and type sizes in px: --font-size-xs, --font-size-sm, --font-size, --font-size-lg, --font-size-xl, --font-size-2xl, --font-size-code, --line-height. <html> carries data-surface (glass|opaque) and data-appearance (light|dark). The base stylesheet sets color and font, body margin 0, and hides the scrollbar.";
+pub const THEME_GUIDE: &str = "Theme: CSS variables on :root that follow the person's theme and light or dark mode live: --background (the thread's), --foreground, --muted, --muted-foreground, --card, --card-foreground, --popover, --popover-foreground, --solid (the one opaque surface), --secondary, --secondary-foreground, --border, --input, --ring, --primary, --primary-foreground, --accent, --accent-foreground, --accent-surface, --accent-surface-foreground, --destructive, --destructive-foreground, --destructive-surface, --warning, --warning-foreground, --warning-surface, --success, --success-foreground, --success-surface, --info, --info-foreground, --code-background, --code-foreground, --chart-1 … --chart-6 (series), --radius, --font-sans, --font-mono, --faint-foreground, --hover, --border-strong, --selection, --danger, --surface-treatment, and type sizes in px: --font-size-xs, --font-size-sm, --font-size, --font-size-lg, --font-size-xl, --font-size-2xl, --font-size-code, --line-height. <html> carries data-surface (glass|opaque) and data-appearance (light|dark). The base stylesheet sets color and font, body margin 0, and hides the scrollbar.";
 
 /// Run guidance: when to answer with a page instead of only text.
-pub const GUIDANCE: &str = "When a visual says more than prose, show it before your final reply: a chart, table, dashboard, diagram, simulation or 3D view as a Luau script with the zeron `show_visual` tool; an image collage or UI mockup as one self-contained HTML page with `html_render`, its options marked `data-zeron-pick` so a click lands in the person's composer. It appears live above your reply in the person's theme; the reply adds only what it doesn't say.";
+pub const GUIDANCE: &str = "When a visual says more than prose, show it where it belongs in your reply: write the paragraph that leads to it, show it, then go on writing; a reply may hold several. A chart, table, dashboard, diagram, simulation or 3D view is a Luau script with the zeron `show_visual` tool (Zeron draws its frame, title and caption); an image collage or UI mockup is one self-contained HTML page with `html_render`, its options marked `data-zeron-pick` so a click lands in the person's composer. It appears live in the person's theme; the text adds only what the visual doesn't say. Files you made for the person go after the text, each path alone on its own line, and show as cards.";
 
 /// What `html_render` tells the agent once the page is shown.
-pub const RENDERED_MESSAGE: &str = "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
+pub const RENDERED_MESSAGE: &str = "Shown to the reader here in your reply. Don't mention or describe the page; go on with only what it doesn't already say.";
 
 const UNPICKED_HINT: &str = "The page has buttons but none carries data-zeron-pick: if any of them is an option the person decides between, add the pick attributes and show the page again.";
 
@@ -1367,7 +1380,7 @@ mod tests {
     }
 
     // gpui's `theme_css` (crates/ui/src/html_render.rs before U23), worked by hand for `fixed_theme`.
-    const GPUI_CSS: &str = ":root{color-scheme:dark;--background:rgba(16,16,16,1);--foreground:rgba(240,240,240,1);--faint-foreground:rgba(120,120,120,1);--muted:rgba(40,40,40,1);--muted-foreground:rgba(170,170,170,1);--hover:rgba(255,255,255,0.08);--selection:rgba(236,131,183,0.349);--card:rgba(24,24,24,1);--card-foreground:rgba(240,240,240,1);--popover:rgba(30,30,30,1);--popover-foreground:rgba(240,240,240,1);--secondary:rgba(28,28,28,1);--secondary-foreground:rgba(240,240,240,1);--border:rgba(255,255,255,0.1);--border-strong:rgba(255,255,255,0.2);--input:rgba(20,20,20,1);--ring:rgba(236,131,183,1);--primary:rgba(240,240,240,1);--primary-foreground:rgba(16,16,16,1);--accent:rgba(236,131,183,1);--accent-foreground:rgba(0,0,0,1);--accent-surface:rgba(236,131,183,0.161);--accent-surface-foreground:rgba(244,168,207,1);--destructive:rgba(255,95,87,1);--destructive-foreground:rgba(255,138,132,1);--destructive-surface:rgba(255,95,87,0.122);--danger:rgba(255,95,87,1);--warning:rgba(254,188,46,1);--warning-foreground:rgba(254,188,46,1);--warning-surface:rgba(254,188,46,0.122);--success:rgba(40,200,64,1);--success-foreground:rgba(40,200,64,1);--success-surface:rgba(40,200,64,0.122);--info:#3b82f6;--info-foreground:#60a5fa;--code-background:rgba(255,255,255,0.06);--code-foreground:rgba(230,230,230,1);--chart-1:rgba(236,131,183,1);--chart-2:#2dd4bf;--chart-3:#fbbf24;--chart-4:#c084fc;--chart-5:#fb7185;--chart-6:#a3e635;--radius:0.625rem;--font-sans:\"Inter\", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;--font-mono:\"SF Mono\", Menlo, monospace;--font-size-xs:11px;--font-size-sm:12px;--font-size:14px;--font-size-lg:15px;--font-size-xl:16px;--font-size-2xl:19px;--line-height:22px;--font-size-code:12.5px;--surface-treatment:opaque;}html{background:transparent;overscroll-behavior:none;color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}";
+    const GPUI_CSS: &str = ":root{color-scheme:dark;--background:rgba(16,16,16,1);--foreground:rgba(240,240,240,1);--faint-foreground:rgba(120,120,120,1);--muted:rgba(40,40,40,1);--muted-foreground:rgba(170,170,170,1);--hover:rgba(255,255,255,0.08);--selection:rgba(236,131,183,0.349);--card:rgba(24,24,24,1);--card-foreground:rgba(240,240,240,1);--popover:rgba(30,30,30,1);--popover-foreground:rgba(240,240,240,1);--solid:rgba(30,30,30,1);--secondary:rgba(28,28,28,1);--secondary-foreground:rgba(240,240,240,1);--border:rgba(255,255,255,0.1);--border-strong:rgba(255,255,255,0.2);--input:rgba(20,20,20,1);--ring:rgba(236,131,183,1);--primary:rgba(240,240,240,1);--primary-foreground:rgba(16,16,16,1);--accent:rgba(236,131,183,1);--accent-foreground:rgba(0,0,0,1);--accent-surface:rgba(236,131,183,0.161);--accent-surface-foreground:rgba(244,168,207,1);--destructive:rgba(255,95,87,1);--destructive-foreground:rgba(255,138,132,1);--destructive-surface:rgba(255,95,87,0.122);--danger:rgba(255,95,87,1);--warning:rgba(254,188,46,1);--warning-foreground:rgba(254,188,46,1);--warning-surface:rgba(254,188,46,0.122);--success:rgba(40,200,64,1);--success-foreground:rgba(40,200,64,1);--success-surface:rgba(40,200,64,0.122);--info:#3b82f6;--info-foreground:#60a5fa;--code-background:rgba(255,255,255,0.06);--code-foreground:rgba(230,230,230,1);--chart-1:rgba(236,131,183,1);--chart-2:#2dd4bf;--chart-3:#fbbf24;--chart-4:#c084fc;--chart-5:#fb7185;--chart-6:#a3e635;--radius:0.625rem;--font-sans:\"Inter\", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;--font-mono:\"SF Mono\", Menlo, monospace;--font-size-xs:11px;--font-size-sm:12px;--font-size:14px;--font-size-lg:15px;--font-size-xl:16px;--font-size-2xl:19px;--line-height:22px;--font-size-code:12.5px;--surface-treatment:opaque;}html{background:transparent;overscroll-behavior:none;color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;scrollbar-width:none}html::-webkit-scrollbar{display:none}body{margin:0}code,kbd,pre,samp{font-family:var(--font-mono)}";
 
     #[test]
     fn the_theme_css_is_gpuis_for_the_same_colors() {

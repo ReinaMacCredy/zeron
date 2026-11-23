@@ -2005,6 +2005,7 @@ impl SessionHandle {
             vec![UserInputAnswer {
                 question_id: question_id.to_owned(),
                 labels: vec![label.to_owned()],
+                note: None,
             }],
         )?;
         Ok(true)

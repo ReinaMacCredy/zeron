@@ -173,11 +173,11 @@ end
 
 -- A file's entries: Open, Reveal in Finder (with `reveal`: on this Mac),
 -- Copy path (with `path`: its whole path).
-export type FileFacts = { open: (() -> ())?, reveal: (() -> ())?, path: string? }
+export type FileFacts = { open: (() -> ())?, reveal: (() -> ())?, path: string?, panel: boolean? }
 function M.file(f: FileFacts): { Entry }
 	local out: { Entry } = {}
 	if f.open then
-		table.insert(out, item("ds.links.open", "document", f.open))
+		table.insert(out, item(if f.panel then "ds.links.open_in_side_panel" else "ds.links.open", "document", f.open))
 	end
 	if f.reveal then
 		table.insert(out, item("ds.links.reveal", "folder", f.reveal))

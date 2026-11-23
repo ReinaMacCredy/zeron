@@ -30,6 +30,7 @@ use zeron_proto::view::{Indicator, effective_indicator};
 use zeron_proto::{
     AccessMode, AgentProfile, AgentProfileDraft, AgentProfilesSnapshot, Chat, HarnessId,
     ReasoningLevel, Session, Space, Task, TaskStep, ThreadState, UserInputAnswer,
+    UserInputOptionDetail,
 };
 use zeron_rpc::{RpcClient, methods};
 
@@ -351,7 +352,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "ask_user",
-            "description": "Ask the person watching this chat one to four questions and wait for the answers. Options are short labels, several pickable with `multiSelect`; the person may type free text instead, and a question without options is open. Returns each question's chosen labels, or `answered: false` when nobody answered by turn end or within 25 minutes.",
+            "description": "Ask the person watching this chat one to four questions and wait for the answers. Options are short labels, several pickable with `multiSelect`; the person may type free text instead, and a question without options is open. An option may be `{ label, description, recommended, id }`: `description` is one line on what it means, `recommended` marks your suggestion (the person still decides). `allowNote` lets them add a note to their pick; `quick` draws a single-choice next step as buttons one press answers. Returns each question's chosen labels (with `optionIds` and `note` when given), or `answered: false` when they closed it or the turn ended. After 25 minutes it returns `answered: false, waiting: true`: the question stays open, their answer arrives later as a message, so end your turn then without guessing.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -365,8 +366,28 @@ fn thread_tool_list() -> Value {
                                 "id": { "type": "string", "description": "Default q1, q2, ..." },
                                 "header": { "type": "string", "description": "Label above the question, 12 chars or fewer." },
                                 "question": { "type": "string" },
-                                "options": { "type": "array", "items": { "type": "string" } },
-                                "multiSelect": { "type": "boolean" }
+                                "options": {
+                                    "type": "array",
+                                    "items": {
+                                        "anyOf": [
+                                            { "type": "string" },
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "label": { "type": "string" },
+                                                    "description": { "type": "string" },
+                                                    "recommended": { "type": "boolean" },
+                                                    "id": { "type": "string" }
+                                                },
+                                                "required": ["label"],
+                                                "additionalProperties": false
+                                            }
+                                        ]
+                                    }
+                                },
+                                "multiSelect": { "type": "boolean" },
+                                "allowNote": { "type": "boolean", "description": "The person may add a note beside the option they pick." },
+                                "quick": { "type": "boolean", "description": "A next-step choice one press answers: single choice, two to four short options." }
                             },
                             "required": ["question"],
                             "additionalProperties": false
@@ -558,7 +579,7 @@ fn thread_tool_list() -> Value {
         },
         {
             "name": "html_render",
-            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline above your final reply; call it before the reply, which adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html`, `path` or `url`, or only `close`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `path` is an .html file you already wrote in this thread's folder, shown as `html` is without reading it back. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` and `path` pages. {} {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::PICK_GUIDE, html_render::THEME_GUIDE),
+            "description": format!("Show a finished HTML page (chart, table, diagram, collage, mockup) inline where it belongs in your reply: write the paragraph that leads to it, call this, then go on; the text adds only what the page doesn't say. Call it from the main conversation, not a subagent. Give exactly one of `html`, `path` or `url`, or only `close`. `html` is a finished page you wrote: the frame fits the page's height; a smaller `height` caps it and the rest scrolls. `path` is an .html file you already wrote in this thread's folder, shown as `html` is without reading it back. `url` is a local dev server you are running (http(s) on localhost, 127.0.0.1 or [::1], any port and path, such as a Vite preview): the person watches it live in a `height`-tall frame, with animations and hot reloads as they happen, and can click and scroll it; check it first with html_preview `url`. The rules below are for `html` and `path` pages. {} {} {} {}", html_render::PAGE_RULES, html_render::LAYOUT_GUIDE, html_render::PICK_GUIDE, html_render::THEME_GUIDE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2045,6 +2066,10 @@ impl ThreadTools {
     async fn show_visual(&self, args: &Value) -> Result<Value, String> {
         let script = args["script"].as_str().ok_or("script must be a string")?;
         let title = args["title"].as_str().ok_or("title must be a string")?;
+        let caption = match &args["caption"] {
+            Value::Null => None,
+            raw => Some(raw.as_str().ok_or("caption must be a string")?),
+        };
         let assets: std::collections::BTreeMap<String, String> = match &args["assets"] {
             Value::Null => Default::default(),
             raw => serde_json::from_value(raw.clone())
@@ -2054,12 +2079,12 @@ impl ThreadTools {
         let shown = self
             .call_engine(
                 methods::PUBLISH_VISUAL,
-                json!({ "chatId": self.chat_id, "title": title, "script": script, "assets": assets }),
+                json!({ "chatId": self.chat_id, "title": title, "caption": caption, "script": script, "assets": assets }),
             )
             .await?;
         Ok(json!({
             "visual": shown,
-            "message": "Shown to the reader above your reply. Don't mention or describe the visual; reply with only what it doesn't already say.",
+            "message": "Shown to the reader here, in place in your reply. Go on writing; don't mention or describe the visual, say only what it doesn't already say.",
         }))
     }
 
@@ -2078,7 +2103,7 @@ impl ThreadTools {
             .await?;
         Ok(json!({
             "image": shown,
-            "message": "Shown to the reader above your reply. Don't mention or describe the image; reply with only what it doesn't already show.",
+            "message": "Shown to the reader here, in place in your reply. Go on writing; don't mention or describe the image, say only what it doesn't already show.",
         }))
     }
 
@@ -2132,21 +2157,26 @@ impl ThreadTools {
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
                 .ok_or_else(|| format!("question {} has no `question` text", ix + 1))?;
-            let options = match &q["options"] {
-                Value::Null => Vec::new(),
+            let (options, details): (Vec<String>, Vec<UserInputOptionDetail>) = match &q["options"]
+            {
+                Value::Null => (Vec::new(), Vec::new()),
                 Value::Array(options) => options
                     .iter()
-                    .map(|option| {
-                        option
-                            .as_str()
-                            .map(str::trim)
-                            .filter(|label| !label.is_empty())
-                            .map(str::to_owned)
-                    })
+                    .map(ask_option)
                     .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| format!("question {} has an empty option label", ix + 1))?,
+                    .ok_or_else(|| format!("question {} has an empty option label", ix + 1))?
+                    .into_iter()
+                    .unzip(),
                 _ => return Err(format!("question {} options must be a list", ix + 1)),
             };
+            let multi = q["multiSelect"].as_bool().unwrap_or(false);
+            let quick = q["quick"].as_bool().unwrap_or(false);
+            if quick && (multi || options.is_empty()) {
+                return Err(format!(
+                    "question {} is quick, so it needs options and no multiSelect",
+                    ix + 1
+                ));
+            }
             let id = q["id"]
                 .as_str()
                 .filter(|id| !id.is_empty())
@@ -2154,13 +2184,24 @@ impl ThreadTools {
             if questions.iter().any(|seen: &Value| seen["id"] == id) {
                 return Err(format!("question id {id} is used twice"));
             }
-            questions.push(json!({
+            let mut question = json!({
                 "id": id,
                 "header": q["header"].as_str().filter(|h| !h.is_empty()).unwrap_or("Question"),
                 "question": text,
                 "options": options,
-                "multiSelect": q["multiSelect"].as_bool().unwrap_or(false),
-            }));
+                "multiSelect": multi,
+            });
+            let details = UserInputOptionDetail::aligned(details);
+            if !details.is_empty() {
+                question["details"] = json!(details);
+            }
+            if q["allowNote"].as_bool() == Some(true) {
+                question["allowNote"] = json!(true);
+            }
+            if quick {
+                question["quick"] = json!(true);
+            }
+            questions.push(question);
         }
         let reply = self
             .call_engine(
@@ -2170,18 +2211,37 @@ impl ThreadTools {
             .await?;
         let answers: Vec<UserInputAnswer> =
             serde_json::from_value(reply["answers"].clone()).unwrap_or_default();
+        if reply["waiting"].as_bool() == Some(true) {
+            return Ok(json!({
+                "answered": false,
+                "waiting": true,
+                "message": "The person has not answered yet. The question stays open while this chat is idle, and their answer then arrives as a later message. If other work restarts this chat first, the question closes unanswered: ask it again if you still need it. End your turn now; do not guess the answer.",
+            }));
+        }
         if answers.iter().all(|answer| answer.labels.is_empty()) {
             return Ok(json!({ "answered": false }));
         }
         let answers: Vec<Value> = questions
             .iter()
             .map(|q| {
-                let labels = answers
+                let answer = answers.iter().find(|answer| q["id"] == answer.question_id);
+                let labels = answer.map(|answer| answer.labels.clone()).unwrap_or_default();
+                let mut row = json!({ "id": q["id"], "question": q["question"], "labels": labels });
+                let ids: Vec<Value> = labels
                     .iter()
-                    .find(|answer| q["id"] == answer.question_id)
-                    .map(|answer| answer.labels.clone())
-                    .unwrap_or_default();
-                json!({ "id": q["id"], "question": q["question"], "labels": labels })
+                    .filter_map(|label| {
+                        let at = q["options"].as_array()?.iter().position(|o| o == label)?;
+                        q["details"].get(at)?.get("id").cloned()
+                    })
+                    .collect();
+                if !ids.is_empty() {
+                    row["optionIds"] = Value::Array(ids);
+                }
+                let note = answer.and_then(|a| a.note.as_deref()).map(str::trim);
+                if let Some(note) = note.filter(|n| !n.is_empty()) {
+                    row["note"] = json!(note);
+                }
+                row
             })
             .collect();
         Ok(json!({ "answered": true, "answers": answers }))
@@ -3236,6 +3296,28 @@ impl ThreadTools {
             }
         }
     }
+}
+
+fn ask_option(option: &Value) -> Option<(String, UserInputOptionDetail)> {
+    let text = |key: &str| {
+        option[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    };
+    let label = option
+        .as_str()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .or_else(|| text("label"))?;
+    let detail = UserInputOptionDetail {
+        description: text("description"),
+        recommended: option["recommended"].as_bool() == Some(true),
+        id: text("id"),
+    };
+    Some((label, detail))
 }
 
 /// The peer-tagged user entries a `WatchDocMessages` frame carries that were
@@ -4375,12 +4457,19 @@ mod tests {
                                 } else {
                                     options[..1].to_vec()
                                 };
-                                json!({ "questionId": q["id"], "labels": labels })
+                                let mut answer = json!({ "questionId": q["id"], "labels": labels });
+                                if q["allowNote"] == true {
+                                    answer["note"] = json!(" no new deps ");
+                                }
+                                answer
                             })
                             .collect()
                     } else {
                         Vec::new()
                     };
+                    if params["runSecret"] == "later" {
+                        return Ok(RpcReply::Value(json!({ "answers": [], "waiting": true })));
+                    }
                     Ok(RpcReply::Value(json!({ "answers": answers })))
                 }
                 methods::DEVICE_TOOL_LIST
@@ -6182,7 +6271,7 @@ mod tests {
             .tools
             .call(
                 "show_visual",
-                &json!({ "script": "return ui.text 'chart'", "title": "Chart", "chatId": "other" }),
+                &json!({ "script": "return ui.text 'chart'", "title": "Chart", "caption": "Source: a.csv", "chatId": "other" }),
             )
             .await
             .unwrap();
@@ -6192,6 +6281,7 @@ mod tests {
         assert_eq!(sent[0]["chatId"], "a");
         assert_eq!(sent[0]["script"], "return ui.text 'chart'");
         assert_eq!(sent[0]["assets"], json!({}));
+        assert_eq!(sent[0]["caption"], "Source: a.csv");
         assert!(
             rig.tools
                 .call(
@@ -7038,6 +7128,10 @@ mod tests {
                     { "id": "stack", "header": "Stack", "question": "Which layers?",
                       "options": ["UI", "Engine", "MCP"], "multiSelect": true },
                     { "question": "Ship it?", "options": ["Yes", "No"] },
+                    { "id": "impl", "question": "How?", "allowNote": true, "options": [
+                        { "label": "Config only", "description": " Edit the TTL. ", "id": "min", "recommended": true },
+                        "Adaptive",
+                    ] },
                 ] }),
             )
             .await
@@ -7053,6 +7147,9 @@ mod tests {
                   "options": ["UI", "Engine", "MCP"], "multiSelect": true },
                 { "id": "q2", "header": "Question", "question": "Ship it?",
                   "options": ["Yes", "No"], "multiSelect": false },
+                { "id": "impl", "header": "Question", "question": "How?",
+                  "options": ["Config only", "Adaptive"], "multiSelect": false, "allowNote": true,
+                  "details": [{ "description": "Edit the TTL.", "recommended": true, "id": "min" }, {}] },
             ])
         );
         assert_eq!(
@@ -7060,6 +7157,7 @@ mod tests {
             json!({ "answered": true, "answers": [
                 { "id": "stack", "question": "Which layers?", "labels": ["UI", "Engine", "MCP"] },
                 { "id": "q2", "question": "Ship it?", "labels": ["Yes"] },
+                { "id": "impl", "question": "How?", "labels": ["Config only"], "optionIds": ["min"], "note": "no new deps" },
             ] })
         );
     }
@@ -7080,6 +7178,10 @@ mod tests {
             silent.tools.call("ask_user", &one).await.unwrap(),
             json!({ "answered": false })
         );
+        let later = computer_rig(Some("later"));
+        let waiting = later.tools.call("ask_user", &one).await.unwrap();
+        assert_eq!((waiting["answered"].clone(), waiting["waiting"].clone()), (json!(false), json!(true)));
+        assert!(waiting["message"].as_str().unwrap().contains("End your turn"));
         let rig = computer_rig(Some("live"));
         let five: Vec<Value> = (0..5).map(|_| json!({ "question": "Again?" })).collect();
         for (args, message) in [
@@ -7102,6 +7204,14 @@ mod tests {
             (
                 json!({ "questions": [{ "id": "x", "question": "A" }, { "id": "x", "question": "B" }] }),
                 "question id x is used twice",
+            ),
+            (
+                json!({ "questions": [{ "question": "Next?", "quick": true, "multiSelect": true, "options": ["a", "b"] }] }),
+                "question 1 is quick, so it needs options and no multiSelect",
+            ),
+            (
+                json!({ "questions": [{ "question": "Next?", "options": [{ "label": " " }] }] }),
+                "question 1 has an empty option label",
             ),
         ] {
             assert_eq!(
@@ -7696,7 +7806,8 @@ mod tests {
                 request_id: "req-1".into(),
                 answers: vec![UserInputAnswer {
                     question_id: "q1".into(),
-                    labels: vec!["Yes".into()]
+                    labels: vec!["Yes".into()],
+                    note: None,
                 }],
             }
         );

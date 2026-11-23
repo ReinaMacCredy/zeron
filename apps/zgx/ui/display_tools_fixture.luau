@@ -9,6 +9,7 @@ ds.setup()
 local T = require("@ds/transcript")
 
 local messages = ui.shared("transcript_messages", {} :: { any })
+local sent = ui.state("visual_sent", "")
 
 -- (Inside a component: the transcript keeps state of its own.)
 return ui.component(function(): Node
@@ -16,6 +17,19 @@ return ui.component(function(): Node
 		id = "conversation",
 		w_full = true,
 		h_full = true,
-		T.Transcript { messages = messages },
+		T.Transcript {
+			messages = messages,
+			on_visual_send = function(text: string, title: string): boolean
+				sent:set(`{text} | {title}`)
+				return true
+			end,
+		},
+		ui.text {
+			function(): string
+				return sent:get()
+			end,
+			id = "visual-sent",
+			literal = true,
+		},
 	}
 end)({})

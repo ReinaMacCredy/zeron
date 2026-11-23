@@ -15,6 +15,7 @@ local Roster = require("@app/screens/chat/roster")
 local Waiting = require("@app/screens/chat/waiting")
 local Threads = require("@app/screens/chat/threads")
 local PicksPill = require("@app/screens/chat/picks_pill")
+local Pages = require("@app/screens/chat/pages")
 local typing = require("@app/screens/chat/typing")
 local glass = require("@ds/glass")
 local RollText = require("@ds/roll_text")
@@ -31,6 +32,20 @@ local PLACE = { side = "top", align = "start", offset = 8 }
 local usage = ui.shared("chat.roster_usage", {} :: { [string]: any })
 local shell_output = ui.shared("chat.shell_output", {} :: { [string]: any })
 local published_subs = ui.shared("chat.subagents", {} :: { any })
+local plan_hidden = ui.persist("chat_plan_hidden", {} :: { [string]: boolean })
+local function hide_plan(chat: string, hidden: boolean)
+	local all = table.clone(plan_hidden:peek())
+	all[chat] = if hidden then true else nil
+	plan_hidden:set(all)
+end
+
+function M.plan_hidden(chat: string?): boolean
+	return chat ~= nil and plan_hidden:get()[chat] == true and Threads.plan_running(chat)
+end
+
+function M.show_plan(chat: string)
+	hide_plan(chat, false)
+end
 
 local cards: { [any]: boolean } = {}
 function M.dismiss(): boolean
@@ -1103,7 +1118,8 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		return if main then Threads.working(bind.id()) else 0
 	end
 	local function plan_live(): boolean
-		return main and Threads.plan_running(bind.id())
+		local id = bind.id()
+		return main and Threads.plan_running(id) and not (id and plan_hidden:get()[id])
 	end
 	local mission_now = ui.computed(function(): any
 		return if main then Threads.card(bind.id()) else nil
@@ -1153,7 +1169,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	local roster_open = ui.use_state(false)
 	local shells_open = ui.use_state(false)
 	local waiting_open = ui.use_state(false)
-	local picks_open = ui.use_state(false)
+	local picks_open = if props.picks then Pages.tray else ui.use_state(false)
 	local shell_detail = ui.use_state(nil :: string?)
 	ui.effect(function()
 		if not shells_open:get() then
@@ -1166,9 +1182,11 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 	tracked(picks_open)
 	floating[roster_open] = true
 	floating[shells_open] = true
+	floating[picks_open] = true
 	ui.on_cleanup(function()
 		floating[roster_open] = nil
 		floating[shells_open] = nil
+		floating[picks_open] = nil
 	end)
 	keys_back(waiting_open, keys)
 	keys_back(picks_open, keys)
@@ -1335,6 +1353,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			wrap = false,
 		},
 	}
+	local plan_hover = ui.use_state(false)
 	local plan_pill = P.Pill {
 		id = "pills-plan",
 		class = "pills-pill",
@@ -1349,7 +1368,11 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		on_click = function()
 			Threads.open(bind.id())
 		end,
+		on_hover = function(inside: boolean)
+			plan_hover:set(inside)
+		end,
 		gap = ui.raw(7, "the mockup's plan pill"),
+		pr = ui.raw(5, "the mockup's plan pill, its X"),
 		ui.text { locale.t("ds.pills.mission.title"), weight = "$font.weight.medium", color = "$text.primary", wrap = false, shrink = 0 },
 		Steps.Roll {
 			id = "pills-plan-count",
@@ -1387,6 +1410,31 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			text_size = ui.raw(12, "the mockup's plan pill"),
 			color = "$text.tertiary",
 		},
+		ui.button {
+			id = "pills-plan-hide",
+			label = locale.t("ds.pills.mission.hide"),
+			w = 18,
+			h = 18,
+			p = 0,
+			shrink = 0,
+			items = "center",
+			justify = "center",
+			rounded = "$radius.full",
+			bg = "#00000000",
+			color = "$text.tertiary",
+			hover = { color = "$text.primary", bg = "$hover" },
+			focus = { opacity = 1 },
+			opacity = function(): number
+				return if plan_hover:get() then 1 else 0
+			end,
+			on_click = function()
+				local id = bind.id()
+				if id then
+					hide_plan(id, true)
+				end
+			end,
+			Icon { name = "close", size = 10 },
+		},
 	}
 	local shells_pill = P.Pill {
 		id = "pills-shells-pill",
@@ -1418,7 +1466,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 			return build()
 		end, { enter = enter, exit = exit, shrink = if gives then 100 else 0, min_w = if gives then 0 else nil })
 	end
-	local function card(open: any, class: string, inset: any, place: { [string]: any }, body: () -> Node): Node
+	local function card(open: any, class: string, inset: any, place: { [string]: any }, body: () -> Node, rounded: any?): Node
 		-- No exit: a leaving entry is pinned at its box's top, and this box hangs from its bottom, so the card would drop over the composer as it fades.
 		local opts: { [string]: any } = { absolute = true, left = 0, bottom = P.HEIGHT + PLACE.offset, enter = enter }
 		for k, v in place do
@@ -1431,6 +1479,7 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 				class = class,
 				w_full = true,
 				p = inset,
+				rounded = rounded,
 				pointer_events = "auto",
 				on_press = press_in,
 				on_key = function(e: any): boolean
@@ -1498,13 +1547,27 @@ M.Row = ui.component(function(props: { bind: any, tasks: any, waiting: boolean?,
 		end),
 	}
 	if props.picks then
+		local chat = props.picks
 		table.insert(children, PicksPill.Pill {
 			open = picks_open,
-			width = function(): number
-				return width:get()
+			chat = chat,
+			on_press = press_in,
+			on_click = function()
+				toggle(picks_open)
 			end,
-			chat = props.picks,
 		})
+		table.insert(children, card(picks_open, "pills-picks-panel", 0, {
+			w = function(): number
+				return math.min(PicksPill.W, width:get() - 28)
+			end,
+		}, function(): Node
+			return PicksPill.Card {
+				chat = chat,
+				close = function()
+					picks_open:set(false)
+				end,
+			}
+		end, ui.raw(PicksPill.RADIUS, "the mockup's tray")))
 	end
 	if props.waiting then
 		table.insert(children, Waiting.Pill {

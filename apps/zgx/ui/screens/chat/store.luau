@@ -305,14 +305,19 @@ function M.question_back(id: string, request: string): any
 	return ui.call("chat.question_back", { id = id, request = request })
 end
 
-function M.answer(id: string, request: string, answer: { values: { string }, text: string }): any
+function M.answer(id: string, request: string, answer: { values: { string }, text: string, note: string? }): any
 	return ui.call("chat.respond", {
 		id = id,
 		request = request,
 		decision = "answer",
 		values = answer.values,
 		text = answer.text,
+		note = answer.note,
 	})
+end
+
+function M.request_changes(id: string, request: string, text: string): any
+	return ui.call("chat.respond", { id = id, request = request, decision = "changes", text = text })
 end
 
 -- A transcript secret card's answer: the secret, or nil to decline.

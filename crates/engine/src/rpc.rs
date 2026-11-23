@@ -108,7 +108,7 @@ use crate::workspace_host::WorkspaceHost;
 const FILE_SEARCH_RPC_TIMEOUT: Duration = Duration::from_secs(6);
 const FILE_SEARCH_FEATURED_PATHS: usize = 32;
 /// Under the 30-minute MCP call ceiling the harnesses are configured with, so
-/// the card settles here instead of outliving a call the harness abandoned.
+/// the call returns here instead of being abandoned; the card stays open.
 const ASK_USER_WAIT: Duration = Duration::from_secs(25 * 60);
 
 #[derive(Debug, Deserialize)]
@@ -1046,6 +1046,8 @@ struct PublishVisualParams {
     chat_id: String,
     title: String,
     script: String,
+    #[serde(default)]
+    caption: Option<String>,
     /// Files the script uses, base64 by name.
     #[serde(default)]
     assets: std::collections::BTreeMap<String, String>,
@@ -5881,7 +5883,10 @@ impl RpcService for EngineRpc {
                     .ask_user(&p.chat_id, &p.run_secret, p.questions, ASK_USER_WAIT)
                     .await
                     .map_err(RpcError::Failed)?;
-                RpcReply::value(&serde_json::json!({ "answers": answers }))
+                RpcReply::value(&match answers {
+                    Some(answers) => serde_json::json!({ "answers": answers }),
+                    None => serde_json::json!({ "answers": [], "waiting": true }),
+                })
             }
             methods::REQUEST_SECRET => {
                 let p = parse_params(params)?;
@@ -8959,6 +8964,11 @@ impl RpcService for EngineRpc {
                 if title.is_empty() {
                     return Err(RpcError::BadParams("title is empty".into()));
                 }
+                let caption: Option<String> = p
+                    .caption
+                    .as_deref()
+                    .map(|c| c.trim().chars().take(zeron_proto::VISUAL_MAX_CAPTION_CHARS).collect())
+                    .filter(|c: &String| !c.is_empty());
                 if p.script.trim().is_empty() || p.script.len() > zeron_proto::VISUAL_MAX_BYTES {
                     return Err(RpcError::BadParams(format!(
                         "script must be 1 to {} bytes",
@@ -9006,6 +9016,7 @@ impl RpcService for EngineRpc {
                     id: id.clone(),
                     path: path.clone(),
                     title: title.clone(),
+                    caption,
                 };
                 if !self.sessions.inject_event(&p.chat_id, event) {
                     self.uploads.remove_visual(&id);

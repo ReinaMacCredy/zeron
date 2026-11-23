@@ -887,6 +887,7 @@ impl Rig {
                 answers: vec![zeron_proto::UserInputAnswer {
                     question_id: "foreground".into(),
                     labels: vec![label.into()],
+                    note: None,
                 }],
             },
         );

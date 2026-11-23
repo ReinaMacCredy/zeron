@@ -13,10 +13,12 @@ use zeron_proto::{
 pub const TOOL: &str = "show_visual";
 
 pub const DESCRIPTION: &str = "Show an interactive native visual (chart, table, dashboard, diagram, \
-simulation, 3D scene, shader) inline above your final reply; call it before the reply, which adds only \
-what the visual doesn't say. An image file goes to show_image instead. The script is sandboxed Luau \
-that returns a view function of ui.* nodes; Zeron runs it first and returns the first error with its \
-line. Read the ui API and style rules once with the docs tool (action read, id show_visual).";
+simulation, 3D scene, shader) in place in your reply: write the paragraph that leads to it, call this, \
+then go on writing. A reply may hold several; its text adds only what a visual doesn't say. Zeron draws \
+the frame, the title and the caption around it. An image file goes to show_image instead. The script is \
+sandboxed Luau that returns a view function of ui.* nodes; Zeron runs it first and returns the first \
+error with its line. Read the ui API and style rules once with the docs tool (action read, id \
+show_visual).";
 
 pub const REFERENCE: &str = "\
 # show_visual
@@ -30,7 +32,6 @@ local s = ui.state { metric = \"p95\" }\n\
 local data = { { region = \"us-east\", p95 = 182, p99 = 240 }, { region = \"eu-west\", p95 = 140, p99 = 210 } }\n\
 return function()\n\
   return ui.column { gap = 16,\n\
-    ui.text { \"Latency by region\", size = \"lg\", weight = 600 },\n\
     ui.tabs { options = { \"p95\", \"p99\" }, value = s.metric, on_change = function(v) s.metric = v end },\n\
     ui.chart { type = \"bar\", height = 220, unit = \"ms\",\n\
       x = ui.map(data, function(d) return d.region end),\n\
@@ -38,8 +39,9 @@ return function()\n\
   }\n\
 end\n\
 \n\
-Zeron runs the script before showing it (setup, render, every draw, and each tab, toggle, slider, and \
-button once) and returns the first error with its line; fix it and call again.\n\
+Zeron runs the script before showing it (setup, render, every draw, and each tab, toggle, slider, \
+button, select option, and disclosure once, and text typed into, cleared from, and entered in each \
+input) and returns the first error with its line; fix it and call again.\n\
 \n\
 Nodes are props tables: children are the array part, strings are plain text, nil and false children \
 are skipped, and lists of nodes flatten (so ui.map results can be children). Unknown props are errors.\n\
@@ -65,6 +67,30 @@ opens like a chat link.\n\
 - Controls: ui.tabs { options = { ... }, value, on_change = function(option) end }, ui.toggle { label, \
 value = bool, on_change = function(on) end }, ui.slider { label, value, min, max, step, unit, on_change \
 = function(n) end }, ui.button { label, on_click = function() end, primary = bool }.\n\
+- ui.input { value, placeholder, label, on_change = function(text) end, on_submit = function(text) \
+end, send }: a one-line text field (on_submit on Enter). ui.select { options = { \"a\", { label = \
+\"Bee\", value = \"b\" } }, value, label, on_change = function(value) end }: a dropdown, for options \
+too many or too long for tabs. ui.disclosure { label, open = bool, on_toggle = function(open) end, \
+... }: a row that shows its children while open (without on_toggle, Zeron opens and closes it).\n\
+- Sending to you: ui.button { label, send = \"Explain the second chart.\" } and ui.input { send = true \
+} send you that text, or what was typed, as the person's own message, and only when the person presses \
+the button or Enter in the field (on_click and on_submit still run). Nothing a script does can send. \
+An input's send = \"a question\" goes on a line before the typed words, so you know what they answer. \
+The message says it was sent from the visual. It can't start with '/' or carry zeron-chat: or \
+zeron-invoke: links, and is at most 2000 characters. Offer it for a next step the person picks, not \
+for something you could just say.\n\
+- ui.keep(\"name\", { ... }) is ui.state that outlives the app restarting (the person's picks, a \
+filter, progress): numbers, strings, booleans, and tables of them, 16 KB a visual in all. The \
+frame's Reset clears it.\n\
+- ui.quiz { questions = { { kind = \"single|multi|truefalse\", question, hint, options = { { text, \
+correct = true, why = \"shown once answered\" }, ... } }, ... }, open = { question, placeholder } }: a \
+practice quiz Zeron draws and grades in place, with no turn of yours: progress, hints, Check, \
+feedback per option, a score, Try again, and a button that asks you to explain the questions the \
+person got wrong (or for 5 harder ones). 1-20 questions of 2-8 options; truefalse takes exactly 2; \
+single and truefalse exactly one correct, multi at least one (graded as the exact set). The answers \
+are in the visual, so it is practice, not an exam: use it when the person wants to check what they \
+understood. open adds one written answer the person sends you to grade. Zeron keeps what was \
+submitted across a restart.\n\
 - ui.canvas { height = 240, draw = function(g, w, h, t) ... end, animate = bool, on_click = \
 function(x, y) end }: 2D drawing in pixels, origin top-left, w = the reply column's width. \
 g:line(x1, y1, x2, y2, { color, width, dash }), g:polyline(pts, { color, width }), g:polygon(pts, \
@@ -142,10 +168,11 @@ or draw it where it takes no layout space (inside a ui.canvas with g.pointer, or
 Don't add or remove nodes, or lengthen text onto another line, on hover. ui.chart's hover readout \
 never changes the chart's height.\n\
 \n\
-Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. A visual is part \
-of the reply, not a widget, so lay content directly on the chat with type, spacing, and alignment: no \
+Style, enforced: layout nodes have no fill, border, shadow, padding, or font props. Zeron draws a \
+hairline frame, the title and the caption around every visual, so a script draws no frame of its own \
+and does not repeat the title: lay content directly inside with type, spacing, and alignment, with no \
 cards, tiles, boxed panels, banners, or canvas backgrounds. Stats are a row of plain ui.stat figures; \
-a chart is a plain heading, then the chart; separate sections with gap or one ui.rule. Text renders \
+a chart among several takes a plain heading; separate sections with gap or one ui.rule. Text renders \
 in Zeron's interface font at the reader's text size: body for most text, sm and xs for labels and \
 notes, lg and xl for headings, 2xl for a headline figure. The width is the reply column (about 720px, \
 as narrow as 360px), so lay out fluidly with grow, wrap, and grid, and give charts, canvases, and \
@@ -160,6 +187,7 @@ pub fn tool() -> Value {
             "properties": {
                 "script": { "type": "string", "description": "Setup at the top level, ending with `return function() return ui.column { ... } end`." },
                 "title": { "type": "string", "description": "Short name for the visual." },
+                "caption": { "type": "string", "description": "One line under the visual: the source, the units, or what is estimated. At most 300 characters." },
                 "assets": {
                     "type": "object",
                     "additionalProperties": { "type": "string" },
@@ -175,9 +203,10 @@ pub fn tool() -> Value {
 
 pub const IMAGE_TOOL: &str = "show_image";
 
-const IMAGE_DESCRIPTION: &str = "Show an image file (screenshot, rendered chart, photo) inline above \
-your final reply; call it before the reply, once per image in display order, and don't describe the image \
-there. PNG, JPEG, WebP or GIF, up to 10 MB and 4096 px a side; Zeron keeps a copy.";
+const IMAGE_DESCRIPTION: &str = "Show an image file (screenshot, rendered chart, photo) in place in \
+your reply: write the paragraph that leads to it, call this, then go on writing; once per image in \
+display order, and the text doesn't describe the image. PNG, JPEG, WebP or GIF, up to 10 MB and 4096 px \
+a side; Zeron keeps a copy.";
 
 pub fn image_tool() -> Value {
     json!({

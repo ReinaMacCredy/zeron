@@ -550,6 +550,7 @@ fn answer_all(questions: &[zeron_proto::UserInputQuestion]) -> Vec<zeron_proto::
             zeron_proto::UserInputAnswer {
                 question_id: q.id.clone(),
                 labels: allow.or(q.options.first()).cloned().into_iter().collect(),
+                note: None,
             }
         })
         .collect()

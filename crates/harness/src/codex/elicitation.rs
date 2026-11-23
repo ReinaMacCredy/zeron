@@ -94,6 +94,9 @@ pub(super) fn form(params: &Value) -> Option<Form> {
             kind: None,
             multi_select: false,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         };
         return Some(Form {
             fields: Vec::new(),
@@ -141,6 +144,9 @@ pub(super) fn form(params: &Value) -> Option<Form> {
             kind: None,
             multi_select,
             action: None,
+            details: Vec::new(),
+            allow_note: false,
+            quick: false,
         };
         fields.push(Field {
             key: key.clone(),
@@ -304,6 +310,7 @@ mod tests {
             .map(|(q, l)| UserInputAnswer {
                 question_id: q.id.clone(),
                 labels: l.iter().map(|s| (*s).to_owned()).collect(),
+                note: None,
             })
             .collect()
     }
@@ -341,18 +348,22 @@ mod tests {
             UserInputAnswer {
                 question_id: by_key("env"),
                 labels: vec!["Development".into()],
+                note: None,
             },
             UserInputAnswer {
                 question_id: by_key("count"),
                 labels: vec![" 3 ".into()],
+                note: None,
             },
             UserInputAnswer {
                 question_id: by_key("force"),
                 labels: vec!["Yes".into()],
+                note: None,
             },
             UserInputAnswer {
                 question_id: by_key("tags"),
                 labels: vec!["a".into(), "b".into()],
+                note: None,
             },
         ];
         assert_eq!(

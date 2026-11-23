@@ -44,7 +44,7 @@ fn every_node_type_draws_with_the_design_system() {
         "#visual-dashboard >> \"Smoothing window\"",
         "#visual-dashboard >> role:switch",
         "#visual-dashboard >> role:switch \"Show table\"",
-        "#visual-dashboard >> role:button \"Reset\"",
+        "#visual-dashboard >> .visual-column >> role:button \"Reset\"",
         // Bars, a grid, a rule, a line with a gap, a scatter.
         "#visual-charts >> \"Where the build's time goes\"",
         "#visual-charts >> .visual-grid",
@@ -70,6 +70,9 @@ fn every_node_type_draws_with_the_design_system() {
     assert!(!has(&mut app, "~\"time budget\""), "{}", app.tree());
     // Every chart's plot: the dashboard's area, the bars, a line, a scatter.
     assert!(has(&mut app, ".chart-plot[4]") && !has(&mut app, ".chart-plot[5]"), "{}", app.tree());
+    assert!(has(&mut app, "#visual-dashboard >> .visual-head >> \"API latency\""), "{}", app.tree());
+    assert!(has(&mut app, "#visual-dashboard >> .visual-reset"), "{}", app.tree());
+    assert!(!has(&mut app, "#visual-scene >> .visual-reset"), "a scene with nothing to set has no Reset:\n{}", app.tree());
 }
 
 #[test]
@@ -83,6 +86,102 @@ fn controls_reach_the_script_and_its_view_follows() {
     app.click("#visual-dashboard >> role:radio \"30d\"");
     app.wait_until(|app| app.find(".data-table >> \"210\"").is_some());
     assert!(has(&mut app, ".data-table >> \"210\"") && !has(&mut app, ".data-table >> \"182\""), "30d's Monday p95:\n{}", app.tree());
+    app.click("#visual-dashboard >> .visual-data-toggle");
+    app.wait_until(|app| app.find(".visual-chart-data >> .data-table >> ~\"210\"").is_some());
+    assert!(has(&mut app, ".visual-chart-data >> .data-table >> \"Mon\""), "{}", app.tree());
+    app.click("#visual-dashboard >> .visual-reset");
+    app.wait_until(|app| app.find(".data-table").is_none());
+    assert!(!has(&mut app, ".data-table"), "Reset leaves no table open:\n{}", app.tree());
+    app.click("#visual-dashboard >> role:switch \"Show table\"");
+    app.wait_until(|app| app.find(".data-table >> \"Mon\"").is_some());
+    assert!(has(&mut app, ".data-table >> \"182\""), "7d again after Reset:\n{}", app.tree());
+}
+
+#[test]
+fn a_visual_sends_only_from_the_persons_own_press() {
+    let mut app = mount(Some("send"));
+    let log = |app: &mut TestApp| app.text("#sent-log");
+    assert!(has(&mut app, "#visual-send >> \"picked checkout\""), "{}", app.tree());
+    app.click("#visual-send >> .visual-disclosure-toggle");
+    app.wait_until(|app| app.find("#visual-send >> ~\"p95 over the last 7 days\"").is_some());
+    assert!(has(&mut app, "#visual-send >> .visual-disclosure-toggle >> \"Hide how it's measured\""), "its label follows the script:\n{}", app.tree());
+    app.type_text("#visual-send >> role:textbox \"Filter\"", "a");
+    app.wait_until(|app| app.find("#visual-send >> \"filter: a\"").is_some());
+    // (The rule it brought builds the visual again: the second key must still reach the field.)
+    app.ui.dispatch(zgx::input::InputEvent::Text("b".into()));
+    app.wait_until(|app| app.find("#visual-send >> \"filter: ab\"").is_some());
+    assert!(has(&mut app, "#visual-send >> \"filter: ab\""), "the second key reached the field:\n{}", app.tree());
+    assert_eq!(log(&mut app), "", "nothing sent until a press");
+    app.click("#visual-send >> role:button \"Explain the spike\"");
+    app.wait_until(|app| app.find("#visual-send >> \"pressed 1\"").is_some());
+    assert_eq!(log(&mut app), "Explain the spike on Wednesday.");
+    assert!(has(&mut app, "#visual-send >> .visual-send-button >> \"Sent\""), "{}", app.tree());
+    app.click("#visual-send >> .visual-send-button");
+    app.frames(10);
+    assert_eq!(log(&mut app), "Explain the spike on Wednesday.", "once");
+    app.type_text("#visual-send >> role:textbox \"Checkout latency\"", "what is p95");
+    app.keys("Enter");
+    app.wait_until(|app| app.find("#visual-send >> .visual-send >> \"Sent\"").is_some());
+    assert_eq!(log(&mut app), "Explain the spike on Wednesday. | About the latency chart:\nwhat is p95");
+    let field = app.bounds("#visual-send >> role:textbox \"Checkout latency\"");
+    assert!(field.width > 400., "a field in a row takes its spare width: {field:?}\n{}", app.tree());
+}
+
+#[test]
+fn a_quiz_grades_each_kind_in_place() {
+    let mut app = mount(Some("quiz"));
+    let result = |app: &mut TestApp| app.text("#visual-quiz >> .quiz-result");
+    let check = |app: &mut TestApp| {
+        app.click("#visual-quiz >> .quiz-check");
+        app.wait_until(|app| app.find("#visual-quiz >> .quiz-go").is_some());
+    };
+    let next = |app: &mut TestApp| {
+        app.click("#visual-quiz >> .quiz-go");
+        app.frames(10);
+    };
+    assert_eq!(result(&mut app), "Choose one answer.");
+    app.click("#visual-quiz >> role:radio \"How many layers the network has\"");
+    check(&mut app);
+    assert_eq!(result(&mut app), "Not quite");
+    assert!(has(&mut app, "#visual-quiz >> \"Each update is the rate times the gradient.\""), "the right one's why shows:\n{}", app.tree());
+    next(&mut app);
+    assert_eq!(result(&mut app), "Choose every correct answer.");
+    app.click("#visual-quiz >> role:checkbox \"A learning rate far too large\"");
+    check(&mut app);
+    assert_eq!(result(&mut app), "Not all of them: see the marks above");
+    next(&mut app);
+    app.click("#visual-quiz >> role:radio \"False\"");
+    check(&mut app);
+    assert_eq!(result(&mut app), "Correct");
+    assert!(has(&mut app, "#visual-quiz >> .quiz-go >> \"See results\""), "{}", app.tree());
+    next(&mut app);
+    assert!(has(&mut app, "#visual-quiz >> .quiz-summary >> \"1/3\"") && has(&mut app, "#visual-quiz >> \"33%\""), "{}", app.tree());
+    assert_eq!(app.text("#sent-log"), "", "grading sends nothing");
+    app.click("#visual-quiz >> .quiz-ask");
+    app.wait_until(|app| app.find("#visual-quiz >> .quiz-ask >> \"Sent to the agent\"").is_some());
+    assert_eq!(app.text("#sent-log"), "Explain the quiz questions I got wrong: 1, 2.");
+    // Drawn again from what the host kept (as after a restart): the results, and what was sent.
+    let mut back = mount(Some("quiz"));
+    assert!(has(&mut back, "#visual-quiz >> .quiz-summary >> \"1/3\""), "{}", back.tree());
+    assert!(has(&mut back, "#visual-quiz >> .quiz-ask >> \"Sent to the agent\""), "{}", back.tree());
+    drop(back);
+    app.click("#visual-quiz >> .quiz-review[2]");
+    app.frames(10);
+    assert_eq!(result(&mut app), "Not all of them: see the marks above");
+    app.click("#visual-quiz >> .quiz-go");
+    app.frames(10);
+    app.click("#visual-quiz >> .quiz-retry");
+    app.frames(10);
+    next_question(&mut app);
+    app.click("#visual-quiz >> role:checkbox \"A learning rate far too large\"");
+    app.click("#visual-quiz >> role:checkbox \"Exploding gradients\"");
+    check(&mut app);
+    assert_eq!(result(&mut app), "Correct");
+}
+
+fn next_question(app: &mut TestApp) {
+    app.click("#visual-quiz >> .quiz-next");
+    app.frames(10);
 }
 
 #[test]
@@ -656,7 +755,7 @@ fn a_show_visual_call_leaves_no_tool_row_and_its_visual_sits_in_place() {
     crate::visuals::preload(
         "v:in-place",
         "Signups",
-        r#"return ui.column { ui.stat { value = "1,284", label = "Signups this week" } }"#,
+        r#"return ui.column { ui.stat { value = "1,284", label = "Signups this week" }, ui.button { label = "Ask", send = "Why the jump?" } }"#,
     );
     let mcp = |id: &str, tool: &str, error: bool, output: &str| {
         json!({ "kind": "tool", "id": id, "resolved": true, "isError": error, "output": output,
@@ -694,4 +793,8 @@ fn a_show_visual_call_leaves_no_tool_row_and_its_visual_sits_in_place() {
     assert!(app.find("\"Couldn't show this visual\"").is_some(), "{tree}");
     assert!(!tree.contains("attempt to index"), "the script's error in the reply:\n{tree}");
     assert_eq!(tree.matches("Ran 1 command").count(), 2, "each command its own group, split by the visual:\n{tree}");
+    // Its send reaches the transcript's owner with the visual's title.
+    app.click("role:button \"Ask\"");
+    app.frames(10);
+    assert_eq!(app.text("#visual-sent"), "Why the jump? | Signups");
 }
