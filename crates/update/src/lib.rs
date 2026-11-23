@@ -3566,7 +3566,8 @@ mod tests {
         let error = fetch_release_metadata_with_limits(
             &client,
             "http://127.0.0.1:1/manifest.json",
-            Duration::from_secs(1),
+            // Windows retries a refused loopback connect for about 2 s before reporting it.
+            Duration::from_secs(10),
             100,
         )
         .await
