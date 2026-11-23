@@ -370,7 +370,14 @@ test("Jump to latest beside a folded pill held short of the side chat's tab stay
 		expect(box(app, jump) >= left).to_be(true)
 		expect(apart(app, jump, PILL)).to_be(true)
 		expect(apart(app, jump, "#composer-side-chat")).to_be(true)
-		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
+		-- Wider than the room before the tab (whose shortcut reads "Ctrl+;"
+		-- off macOS, 27 wider than "⌘;"), the pill keeps the composer's left edge.
+		local px, _, pw = box(app, PILL)
+		if pw + 8 <= box(app, "#composer-side-chat") - left then
+			expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
+		else
+			expect(px).to_be(left)
+		end
 		expect(app:error()).to_be(nil)
 	end
 end)

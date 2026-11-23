@@ -77,7 +77,8 @@ function M.key(e: any)
 	if held or e.editing or e["repeat"] then
 		return
 	end
-	if e.key == "v" and (e.cmd or e.ctrl) and not (e.cmd and e.ctrl) and not (e.shift or e.alt) then
+	-- (`e.cmd` is Ctrl itself off macOS, so the paste chord is read from the keys held.)
+	if e.key == "v" and e.meta ~= e.ctrl and not (e.shift or e.alt) then
 		take()
 		return
 	end
