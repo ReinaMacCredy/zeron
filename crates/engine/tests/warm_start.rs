@@ -18,6 +18,8 @@ use zeron_proto::{
 /// What the fixtures saw.
 #[derive(Default)]
 struct Seen {
+    /// Warm launches begun.
+    launching: usize,
     /// `(key, request)` of each warm launch.
     prewarms: Vec<(String, RunRequest)>,
     /// Keys of warm launches ended unused.
@@ -110,6 +112,7 @@ impl Harness for WarmFixture {
         self.prewarms
     }
     async fn prewarm(&self, key: &str, request: RunRequest) -> Result<(), HarnessError> {
+        self.seen.lock().unwrap().launching += 1;
         tokio::time::sleep(self.launch).await;
         let mut seen = self.seen.lock().unwrap();
         seen.prewarms.push((key.to_owned(), request.clone()));
@@ -578,8 +581,10 @@ async fn a_stop_during_its_launch_ends_what_it_made() {
         let rig = rig.clone();
         tokio::spawn(async move { rig.warm(CHAT, "mock-1", false).await })
     };
-    wait_for("the ask registered", || {
-        !rig.core.sessions.warm_chats().is_empty()
+    // (Not merely registered: stopped before its launch begins, it makes
+    // nothing, and there is nothing to end.)
+    wait_for("its launch began", || {
+        rig.seen.lock().unwrap().launching == 1
     })
     .await;
     rig.rpc("WarmStop", serde_json::json!({ "chatId": CHAT }))

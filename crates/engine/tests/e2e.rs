@@ -555,14 +555,17 @@ fn queue_as_viewer(doc: &SessionDoc, id: &str, payload: SessionCommandPayload) {
     .expect("queue command");
 }
 
+/// The deadline is on the wall clock: what a test waits for can be work a
+/// paused clock does not wait for (a send runs `git` first), and ten seconds of
+/// paused sleeps pass in milliseconds.
 async fn wait_for<F>(mut predicate: F, what: &str)
 where
     F: FnMut() -> bool,
 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !predicate() {
         assert!(
-            tokio::time::Instant::now() < deadline,
+            std::time::Instant::now() < deadline,
             "timed out waiting for {what}"
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
@@ -1588,7 +1591,12 @@ async fn rpc_surface_over_in_memory_transport() {
     // Delta protocol: the stream opens with a full reset frame.
     assert_eq!(
         initial,
-        serde_json::json!({ "reset": [], "contextUsage": null, "replayBaseline": {"entries": {}} })
+        serde_json::json!({
+            "reset": [],
+            "contextUsage": null,
+            "contextBaseline": 0,
+            "replayBaseline": {"entries": {}}
+        })
     );
 
     // QueueCommand (as this device's composer would over IPC).
