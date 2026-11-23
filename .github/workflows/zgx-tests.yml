@@ -113,7 +113,18 @@ jobs:
           test -n "$REV" && test -n "$GIT"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
             --git "$GIT" --rev "$REV" zgx-script --bin zgx --features inspect,i18n --root ~/zgx-cli
+      # Built apart from the runs, so a slow or failed build shows as that.
+      - name: Build apps/zgx tests
+        working-directory: apps/zgx
+        timeout-minutes: 60
+        run: |
+          # (Temporary: what the runner has left while it builds.)
+          ( while sleep 300; do
+              echo "::notice::$(date +%H:%M:%S) $(vm_stat | awk '/Pages free/{f=$3} /occupied by compressor/{c=$5} /Swapouts/{s=$2} END{printf "free=%dMB compressed=%dMB swapouts=%d", f*16384/1048576, c*16384/1048576, s}') $(sysctl -n vm.swapusage | cut -c1-60) disk=$(df -h / | awk 'NR==2{print $4}') $(ps -Ao rss,comm | sort -rn | head -3 | awk '{printf "%dMB:%s ", $1/1024, $2}')"
+            done ) &
+          cargo test --locked --no-run --bin zeron-zgx --test '*'
       - name: apps/zgx unit tests
+        timeout-minutes: 30
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx integration tests
         if: ${{ !cancelled() }}
@@ -176,6 +187,10 @@ jobs:
           test -n "$REV" && test -n "$GIT"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
             --git "$GIT" --rev "$REV" zgx-script --bin zgx --features inspect,i18n --root ~/zgx-cli
+      # Built apart from the runs, so a slow or failed build shows as that.
+      - name: Build apps/zgx tests
+        working-directory: apps/zgx
+        run: cargo test --locked --no-run --bin zeron-zgx --test '*'
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx integration tests
