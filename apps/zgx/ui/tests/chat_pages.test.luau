@@ -156,6 +156,8 @@ test("pages: expand opens the sheet with Live and Source and Save .html; Escape 
 	expect(sheet_open(app)).to_be(true)
 	expect(app:tree("#html-sheet")).to_contain('"Khung app"')
 	expect(app:has("#html-sheet-page")).to_be(true)
+	-- (No card's page under the sheet: zgx would draw the sheet's glass over the sheet's own page.)
+	expect(app:has(`#html-page-{FRAME}`)).to_be(false)
 	app:click("#html-sheet-source")
 	settle(app)
 	expect(app:tree("#html-sheet-source-text")).to_contain("/u/html/s2/frame.html")
@@ -165,6 +167,7 @@ test("pages: expand opens the sheet with Live and Source and Save .html; Escape 
 	app:key("Escape")
 	settle(app)
 	expect(sheet_open(app)).to_be(false)
+	expect(app:has(`#html-page-{FRAME}`)).to_be(true)
 	-- (A click outside is the modal's own: the tests can't press its backdrop; on the Dev.)
 	-- Closed on Source, it opens again on Live.
 	app:click(`#html-card-expand-{FRAME}`)

@@ -109,6 +109,9 @@ end
 
 local PAGES: { [string]: any } = {}
 local ORDER: { string } = {}
+-- (zgx places every page under all overlay paint: a card's page left under the open sheet puts the sheet's glass over the sheet's own page.)
+local SHEET = ui.state("html_sheet_open", nil :: string?)
+local SHEETS_MADE = 0
 
 local function touch(key: string)
 	local i = table.find(ORDER, key)
@@ -434,6 +437,22 @@ local function Sheet(props: any, open: State<boolean>, e: any, live: any): Node
 		local s = (ui :: any).window.size:get()
 		return s
 	end
+	-- (Its own token, not the key: one chat can show the same card twice.)
+	SHEETS_MADE += 1
+	local mine = `{props.key}#{SHEETS_MADE}`
+	local function let_go()
+		if SHEET:peek() == mine then
+			SHEET:set(nil)
+		end
+	end
+	ui.effect(function()
+		if open:get() then
+			SHEET:set(mine)
+		else
+			let_go()
+		end
+	end)
+	ui.on_cleanup(let_go)
 	return ui.modal(glass.style({
 		id = "html-sheet",
 		label = props.title,
@@ -843,12 +862,13 @@ local function Page(props: any): Node
 			end),
 		},
 		ui.presence(function(): string
-			return status:get()
+			local now = status:get()
+			return if now == "ready" and SHEET:get() ~= nil then "under_sheet" else now
 		end, function(now: string): Node
 			if now == "failed" then
 				return placeholder(locale.t("ds.html_card.unavailable"), frame)
 			end
-			if now == "loading" then
+			if now == "loading" or now == "under_sheet" then
 				return ui.column { w_full = true, h = frame }
 			end
 			return ui.column {
@@ -923,7 +943,7 @@ local function Live(props: any): Node
 		},
 		-- (Keyed on the sheet too, so the sheet's live view is the only one loading the server.)
 		ui.presence(function(): string
-			return `{reach:get()}:{nonce:get()}:{if sheet:get() then "sheet" else ""}`
+			return `{reach:get()}:{nonce:get()}:{if SHEET:get() ~= nil then "sheet" else ""}`
 		end, function(now: string): Node
 			if string.sub(now, 1, 5) == "down:" then
 				return ui.column {
@@ -950,7 +970,7 @@ local function Live(props: any): Node
 					},
 				}
 			end
-			if string.sub(now, 1, 3) ~= "up:" or sheet:peek() then
+			if string.sub(now, 1, 3) ~= "up:" or SHEET:peek() ~= nil then
 				return ui.column { w_full = true, h = height }
 			end
 			return ui.column {
