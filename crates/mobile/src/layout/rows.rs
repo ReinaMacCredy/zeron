@@ -1093,7 +1093,11 @@ fn user_chips(body: &str, previews: &[(u32, bool, String)]) -> Vec<UserChip> {
     }));
     chips.extend(zeron_proto::attachment_mentions::attachment_mentions(body).into_iter().map(|mention| UserChip {
         range: mention.range,
-        icon: if mention.is_image { "photo".to_owned() } else { file_icon_asset(&mention.label) },
+        icon: if mention.is_image || zeron_proto::attachment_mentions::is_image_path(&mention.label) {
+            "photo".to_owned()
+        } else {
+            file_icon_asset(&mention.label)
+        },
         open: previews
             .iter()
             .find(|(index, is_image, _)| *is_image == mention.is_image && *index == mention.index)

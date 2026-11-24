@@ -64,6 +64,27 @@ test("words: an upload's picture number and a file's name, as the engine keeps t
 	expect(AM.names(pic, "/u/1b2c3d4e-Image_4.png")).to_be(true)
 end)
 
+test("words: friendly_name cleans macOS screenshot dates and pasted_name formats readable deduplicated names", function()
+	expect(AM.is_image_name("shell.png")).to_be(true)
+	expect(AM.is_image_name("PHOTO.JPEG")).to_be(true)
+	expect(AM.is_image_name("notes.md")).to_be(false)
+
+	expect(AM.friendly_name(`Screenshot 2026-11-07 at 1.10.14{NNBSP}PM.png`)).to_be("Screenshot 1.10.14 PM.png")
+	expect(AM.friendly_name(`Screenshot 2026-11-07 at 1.10.14{NNBSP}PM (2).png`)).to_be("Screenshot 1.10.14 PM (2).png")
+	expect(AM.friendly_name("Screen Shot 2026-11-07 at 14.05.09.png")).to_be("Screenshot 14.05.09.png")
+	expect(AM.friendly_name("shell.png")).to_be("shell.png")
+	expect(AM.friendly_name("notes (draft) [v2] \u{1F4DD}.md")).to_be("notes (draft) [v2] \u{1F4DD}.md")
+
+	-- Fixed timestamp so formatting and deduplication are deterministic regardless of timezone.
+	local t0 = 1700000000
+	local first = AM.pasted_name({}, t0)
+	expect(string.match(first, "^Clipboard %d+%.%d%d%.%d%d [AP]M%.png$") ~= nil).to_be(true)
+	local second = AM.pasted_name({ first }, t0)
+	expect(second).to_be(string.gsub(first, "%.png$", " (2).png"))
+	local third = AM.pasted_name({ first, second }, t0)
+	expect(third).to_be(string.gsub(first, "%.png$", " (3).png"))
+end)
+
 local BOX = 'role:textbox "Message"'
 
 local function settle(app: any)

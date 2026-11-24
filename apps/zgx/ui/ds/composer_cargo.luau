@@ -1048,6 +1048,7 @@ end
 local function row_chip(item: Item, row: State<Item>, props: Props): Node
 	local hovered = ui.use_state(false)
 	local focused = ui.use_state(false)
+	local removing = false
 	local function lit(): boolean
 		return hovered:get() or focused:get()
 	end
@@ -1072,6 +1073,13 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 		glyph = Icon { name = "wrap-text", size = glyph_size - 2 }
 	end
 	local remove = props.on_remove
+	local on_remove = if remove
+		then function(id: string)
+			removing = true
+			over(item, false)
+			remove(id)
+		end
+		else nil
 	-- An element picked on a page (the browser panel's): its number and
 	-- page over its note or words, its card under the pointer, no click.
 	local pick = item.kind == "annotation" and item.element ~= nil
@@ -1126,6 +1134,9 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 			return row:get().name
 		end,
 		on_hover = function(inside: boolean)
+			if removing then
+				return
+			end
 			hovered:set(inside)
 			over(item, inside)
 		end,
@@ -1234,8 +1245,11 @@ local function row_chip(item: Item, row: State<Item>, props: Props): Node
 				}
 			),
 		},
-		if remove
-			then cross(item, lit, remove, function(on: boolean)
+		if on_remove
+			then cross(item, lit, on_remove, function(on: boolean)
+				if removing then
+					return
+				end
 				focused:set(on)
 			end, function(): string
 				return row:get().name
