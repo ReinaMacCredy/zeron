@@ -9038,7 +9038,6 @@ version = "0.3.4"
 dependencies = [
  "anyhow",
  "chrono",
- "clap",
  "embed-resource",
  "libc",
  "libmimalloc-sys",
@@ -9048,8 +9047,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
- "windows-sys 0.61.2",
  "zeron-cli",
  "zeron-engine",
  "zeron-mcp",
