@@ -22,10 +22,11 @@ for i = 5, 169 do
 end
 local TEXT: { [string]: string } = {
 	["checkout-latency-report.md"] = table.concat(REPORT, "\n") .. "\n",
+	["dashboard.html"] = "<!doctype html>\n<title>Dashboard</title>\n",
 	["checkout-latency.csv"] = table.concat(CSV, "\n") .. "\n",
 	["notes.txt"] = "one\ntwo\n",
 }
-local SIZES: { [string]: number } = { ["checkout-latency-report.md"] = 4100, ["checkout-latency.csv"] = 5200, ["chart.png"] = 81000, ["notes.txt"] = 8 }
+local SIZES: { [string]: number } = { ["checkout-latency-report.md"] = 4100, ["checkout-latency.csv"] = 5200, ["chart.png"] = 81000, ["notes.txt"] = 8, ["dashboard.html"] = 40 }
 local OUTSIDE: { [string]: { size: number, text: string? } } = {
 	["/tmp/scratch/shot.png"] = { size = 52000 },
 	["/tmp/scratch/findings.md"] = { size = 21, text = "# Findings\n\nAll good.\n" },
@@ -80,6 +81,10 @@ files_stub.read = function(_target: any, path: string): any
 		return later({ path = path, text = f.text, size = f.size, encoding = if f.text then "utf8" else "binary", readonly = if f.text then "outsideWorkspace" else "binary", truncated = false })
 	end
 	return later({ path = path, text = TEXT[path], size = SIZES[path], encoding = "utf8", truncated = false })
+end
+files_stub.open_external = function(target: any, path: string): any
+	calls:push(`browse:{target.chat}:{target.root}:{path}`)
+	return later(nil)
 end
 files_stub.reveal = function(target: any, path: string): any
 	calls:push(`reveal:{target.chat}:{target.root}:{path}`)

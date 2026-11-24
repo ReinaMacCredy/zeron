@@ -135,6 +135,15 @@ return function(session: () -> any?, shows: ((chat: string, path: string) -> boo
 				ds.toast.show { title = ui.t("files.workspace.not_revealed", { name = base_name(path) }), tone = "danger" }
 			end)
 		end,
+		browse = function(target: string)
+			local where, path, _, outside = place(target)
+			if not where or outside then
+				return
+			end
+			files.open_external(where, path):after(function() end, function()
+				ds.toast.show { title = ui.t("files.workspace.not_opened", { name = base_name(path) }), tone = "danger" }
+			end)
+		end,
 		shown = function(target: string): boolean
 			local where, path = place(target)
 			return where ~= nil and shows ~= nil and shows(where.chat :: string, path)

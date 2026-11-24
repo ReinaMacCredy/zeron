@@ -1142,6 +1142,7 @@ return {
 	["ds.file_card.quick_look_file"] = "Quick look {name}",
 	["ds.file_card.close_preview"] = "Close preview",
 	["ds.file_card.count"] = "{n, plural, one {# file} other {# files}}",
+	["ds.file_card.open_file_in_browser"] = "Open {name} in the browser",
 	["ds.emoji_picker.search"] = "Search emoji",
 	["ds.emoji_picker.results"] = "Results",
 	["ds.emoji_picker.none"] = "No emoji found",

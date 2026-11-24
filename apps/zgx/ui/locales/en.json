@@ -1362,7 +1362,8 @@
       "quick_look": "Quick look",
       "quick_look_file": "Quick look {name}",
       "close_preview": "Close preview",
-      "count": "{n, plural, one {# file} other {# files}}"
+      "count": "{n, plural, one {# file} other {# files}}",
+      "open_file_in_browser": "Open {name} in the browser"
     },
     "emoji_picker": {
       "search": "Search emoji",

@@ -1362,7 +1362,8 @@
       "quick_look": "快速查看",
       "quick_look_file": "快速查看 {name}",
       "close_preview": "关闭预览",
-      "count": "{n, plural, other {# 个文件}}"
+      "count": "{n, plural, other {# 个文件}}",
+      "open_file_in_browser": "在浏览器中打开 {name}"
     },
     "emoji_picker": {
       "search": "搜索表情",

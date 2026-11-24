@@ -20,6 +20,7 @@ export type Files = {
 	here: () -> boolean,
 	shown: ((target: string) -> boolean)?,
 	root: (() -> string?)?,
+	browse: ((target: string) -> ())?,
 }
 export type Item = { target: string, words: string }
 export type RowProps = {
@@ -35,6 +36,7 @@ local HEAD_LINES, CSV_ROWS = 8, 3
 local LINE_MOST = 400
 local READ_MOST = 2 * 1024 * 1024
 local PICTURE = { png = true, jpg = true, jpeg = true, gif = true, webp = true }
+local PAGE = { html = true, htm = true }
 local OPEN_MOVE = { duration = 200, ease = "cubicBezier(.2,.8,.2,1)" }
 local HOVER_MOVE = { duration = 100, ease = "linear" }
 local ROW_H, LIST_MOST = 38, 560
@@ -355,6 +357,10 @@ M.Row = ui.component(function(props: RowProps): Node
 		local function showing(): boolean
 			return files.shown ~= nil and not gone(target) and files.shown(target)
 		end
+		local function page(): boolean
+			local f = file_of(target)
+			return files.browse ~= nil and f ~= nil and not f.outside and not gone(target) and PAGE[ext_of(f.name)] == true and files.here()
+		end
 		local function acting(): boolean
 			return not gone(target) and (over:get() or focused:get() or peeked() or showing())
 		end
@@ -429,6 +435,21 @@ M.Row = ui.component(function(props: RowProps): Node
 					color = "$text.tertiary",
 				},
 			},
+			ui.show(page, IconButton {
+				icon = "global",
+				size = "md",
+				class = "md-file-browse",
+				mr = "$space.2",
+				label = function(): string
+					return locale.s("ds.file_card.open_file_in_browser", { name = name() })
+				end,
+				tooltip = locale.s("ds.html_card.open_in_browser"),
+				on_click = function()
+					if files.browse then
+						files.browse(target)
+					end
+				end,
+			}),
 			ui.row {
 				relative = true,
 				shrink = 0,
