@@ -21,6 +21,7 @@ export type Files = {
 	here: () -> boolean,
 	shown: ((target: string) -> boolean)?,
 	root: (() -> string?)?,
+	whole: ((target: string) -> string?)?,
 	browse: ((target: string) -> ())?,
 }
 export type Item = { target: string, words: string }
@@ -200,8 +201,7 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 	local files, item, file = props.row.files, props.item, props.file
 	local ext = ext_of(file.name)
 	local picture = PICTURE[ext] == true
-	local root = if files.root then files.root() else nil
-	local whole = if file.outside then file.path elseif root then `{(string.gsub(root, "/+$", ""))}/{file.path}` else nil
+	local whole = if files.whole then files.whole(item.target) else nil
 	local page = PAGE[ext] == true and whole ~= nil and files.here() and (ui :: any).web ~= nil
 	local got = ui.use_state(nil :: any)
 	if not picture and not page and (file.size or 0) <= READ_MOST then

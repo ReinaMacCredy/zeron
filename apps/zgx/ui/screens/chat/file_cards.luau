@@ -152,6 +152,13 @@ return function(session: () -> any?, shows: ((chat: string, path: string) -> boo
 			local s = session()
 			return if s then s.cwd else nil
 		end,
+		whole = function(target: string): string?
+			local where, path, _, outside = place(target)
+			if not where then
+				return nil
+			end
+			return if outside then path else files.local_path(where, path)
+		end,
 		here = function(): boolean
 			local s = session()
 			return s ~= nil and (s.device == nil or s.device == sessions.now:peek().here)

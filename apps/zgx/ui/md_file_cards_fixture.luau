@@ -86,6 +86,9 @@ files_stub.open_external = function(target: any, path: string): any
 	calls:push(`browse:{target.chat}:{target.root}:{path}`)
 	return later(nil)
 end
+files_stub.local_path = function(): string?
+	return nil
+end
 files_stub.reveal = function(target: any, path: string): any
 	calls:push(`reveal:{target.chat}:{target.root}:{path}`)
 	return later(nil)
