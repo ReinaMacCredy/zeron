@@ -1914,7 +1914,7 @@ local function Transcript(props: Props): Node
 				wait_held:set(false)
 			end
 			if w.phase == "compacting" and (not wait_last or wait_last.phase ~= "compacting") then
-				wait_since = ui.now()
+				wait_since = w.since or ui.now()
 			end
 			wait_last = w
 		elseif waits_live then

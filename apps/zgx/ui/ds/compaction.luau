@@ -30,7 +30,7 @@ local locale = require("@self/locale")
 local M = {}
 
 export type Kept = { pre: number?, post: number?, ms: number?, summary: string?, focus: string? }
-export type Wait = { phase: "queued" | "compacting" }
+export type Wait = { phase: "queued" | "compacting", since: number? }
 export type Handoff = { phase: "queued" | "compacting", since: number, held: () -> boolean, landed: () -> () }
 export type Continued = { note: string?, limit: boolean?, at: string? }
 export type Head = {

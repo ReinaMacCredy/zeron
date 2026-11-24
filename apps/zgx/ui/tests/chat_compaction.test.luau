@@ -118,6 +118,10 @@ test("compaction: the wait stands in the trailer's place, queued then compacting
 	run_for(app, 1.2)
 	wait_for(app, { phase = "compacting" })
 	expect(app:tree("#compaction-wait"):find("· 0:00", 1, true) ~= nil).to_be(true)
+	wait_for(app, nil)
+	app:frames(20)
+	wait_for(app, { phase = "compacting", since = os.time() * 1000 - 600000 })
+	expect(app:tree("#compaction-wait"):find("· 10:0", 1, true) ~= nil).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
 

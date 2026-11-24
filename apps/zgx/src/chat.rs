@@ -181,6 +181,8 @@ struct Chats {
     /// footprint, once the app has rested, counts.
     let_go_turn: Cell<u64>,
     compacting: RefCell<HashSet<String>>,
+    // (Kept here, not by the view: a chat opened again counts on from it.)
+    compacting_since: RefCell<HashMap<String, f64>>,
     compaction_probed: RefCell<HashSet<String>>,
     compaction_unsupported: RefCell<HashMap<String, String>>,
     reminder: Cell<Option<u64>>,
@@ -1743,6 +1745,7 @@ impl Chats {
         listening.push(engine::lists::listen(rpc, "WatchSessions", move |frame| {
             let Some(me) = weak.upgrade() else { return };
             frame.apply_to_map(&mut me.sessions.borrow_mut());
+            me.stamp_compacting();
             me.follow_asks();
             me.publish_views();
             review::sessions_changed();
@@ -2603,6 +2606,17 @@ impl Chats {
     fn chat_compacting(&self, id: &str) -> bool {
         self.compacting.borrow().contains(id)
             || self.sessions.borrow().get(id).is_some_and(|s| s["compacting"].as_bool() == Some(true))
+    }
+
+    fn stamp_compacting(&self) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0., |d| d.as_millis() as f64);
+        let mut since = self.compacting_since.borrow_mut();
+        since.retain(|id, _| self.chat_compacting(id));
+        let sessions = self.sessions.borrow();
+        let heard = sessions.iter().filter(|(_, s)| s["compacting"].as_bool() == Some(true)).map(|(id, _)| id);
+        for id in self.compacting.borrow().iter().chain(heard) {
+            since.entry(id.clone()).or_insert(now);
+        }
     }
 
     /// `model`'s name in `harness`'s catalog; with none, its first model's
@@ -5021,9 +5035,11 @@ async fn compact(args: Value) -> Result<Value, String> {
         params["focus"] = json!(focus);
     }
     chats.compacting.borrow_mut().insert(id.clone());
+    chats.stamp_compacting();
     chats.publish_views();
     let answer = engine::get().call("CompactChat", params).await;
     chats.compacting.borrow_mut().remove(&id);
+    chats.stamp_compacting();
     chats.publish_views();
     match answer {
         Ok(reply) => compact_outcome_notice(&reply).map_or(Ok(Value::Nil), Err),
@@ -7527,11 +7543,11 @@ fn compaction_wait(chats: &Chats, open: &Open) -> Value {
         .collect();
     durations.sort_unstable();
     let usual = durations.get(durations.len() / 2).map_or(Value::Nil, |ms| Value::Num(((ms + 500) / 1000) as f64));
-    let phase = match wait {
-        CompactionWait::Queued => "queued",
-        CompactionWait::Compacting => "compacting",
+    let (phase, since) = match wait {
+        CompactionWait::Queued => ("queued", None),
+        CompactionWait::Compacting => ("compacting", chats.compacting_since.borrow().get(&open.id).copied()),
     };
-    Value::record([("usual", usual), ("phase", Value::from(phase))])
+    Value::record([("usual", usual), ("phase", Value::from(phase)), ("since", since.map_or(Value::Nil, Value::Num))])
 }
 
 /// Why compacting this chat is refused now, as gpui's `compact_disabled_reason` (a key; the agent's own words when it can't).
@@ -11701,6 +11717,13 @@ mod tests {
         let compacting = wait(&open);
         assert_eq!(field(&compacting, "phase"), "compacting");
         assert_eq!(compacting.field("usual").and_then(Value::as_f64), Some(53.), "the median of what compactions here took");
+        assert!(compacting.field("since").and_then(Value::as_f64).is_none(), "not heard to start: the view counts from now");
+        chats.stamp_compacting();
+        let began = wait(&open).field("since").and_then(Value::as_f64);
+        assert!(began.is_some_and(|at| at > 0.), "heard compacting: when");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        chats.stamp_compacting();
+        assert_eq!(wait(&open).field("since").and_then(Value::as_f64), began, "the same compaction, the same start");
         session(json!({ "compactPlan": { "kind": "copy", "since": 1_700_000_000_000i64, "ready": true } }));
         assert!(matches!(wait(&open), Value::Nil), "an older peer's background copy is nothing to wait on");
         let blocked = compact_blocked(&chats, &open, "claude-code");
