@@ -482,7 +482,16 @@ local function fresh_words(item: any): string
 	return (item.ask.question or {}).text or ""
 end
 
-local FRESH_MS, FRESH_W = 4000, 640
+local FRESH_MS, FRESH_W, ASKER = 4000, 640, 34
+
+local function asker(title: string): string
+	return if (utf8.len(title) or 0) > ASKER then string.sub(title, 1, (utf8.offset(title, ASKER + 1) :: number) - 1) .. "…" else title
+end
+
+-- P.Pill's padding and border on both sides.
+local CHROME = 22
+-- A shrink this far over a neighbour's leaves the neighbour whole: a text that loses a hair of a pixel shows an ellipsis.
+local GIVES = 1e12
 local known: { [string]: boolean } = {}
 
 function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> string? }): Node
@@ -502,6 +511,7 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 	local fresh = ui.use_state(nil :: any)
 	local alive = ui.use_state(false)
 	local wide = ui.use_state(false)
+	local head_w = ui.use_state(0)
 	local turn = 0
 	local function fold()
 		turn += 1
@@ -577,13 +587,30 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 		on_click = function()
 			props.open:set(not props.open:peek())
 		end,
-		ui.div { mr = ui.raw(4, "background.rs pill_leading"), shrink = 0, color = "$warning", Icon { name = "clock-circle", size = 14 } },
-		ui.text { function(): string
-			return tostring(#items:get())
-		end, id = "pills-waiting-count", shrink = 0, weight = "$font.weight.semibold", color = "$warning", tabular = true, wrap = false },
-		ui.text { function(): string
-			return waiting_words(items:get())
-		end, id = "pills-waiting-words", literal = true, shrink = 0, color = "$warning", wrap = false },
+		ui.row {
+			items = "center",
+			gap = ui.raw(4, "background.rs pill_frame"),
+			shrink = 0,
+			on_resize = function(size: { w: number, h: number })
+				head_w:set(size.w)
+			end,
+			ui.div { mr = ui.raw(4, "background.rs pill_leading"), shrink = 0, color = "$warning", Icon { name = "clock-circle", size = 14 } },
+			ui.text { function(): string
+				return tostring(#items:get())
+			end, id = "pills-waiting-count", shrink = 0, weight = "$font.weight.semibold", color = "$warning", tabular = true, wrap = false },
+			ui.text { function(): string
+				return waiting_words(items:get())
+			end, id = "pills-waiting-words", literal = true, shrink = 0, color = "$warning", wrap = false },
+			ui.show(function(): boolean
+				local here = props.elsewhere_of()
+				for _, it in items:get() do
+					if it.kind == "plan_approval" and it.chat == here then
+						return true
+					end
+				end
+				return false
+			end, ui.text { locale.t("ds.pills.approve_plan"), id = "pills-waiting-plan-here", ml = ui.raw(4, "the mockup's waiting pill"), wrap = false }),
+		},
 		ui.show(function(): boolean
 			return alive:get()
 		end, ui.row {
@@ -600,23 +627,20 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 				return if wide:get() then 1 else 0
 			end), { duration = if quick then 120 else 150 }),
 			ui.div { w = 1, h = 12, mx = ui.raw(4, "the mockup's rule"), shrink = 0, bg = "$border.strong" },
-			ui.text { of_fresh(function(item: any): string
-				return item.title or locale.s("ds.pills.untitled")
-			end), literal = true, wrap = false, truncate = true, min_w = 0, max_w = ui.raw(220, "the mockup's asker"), shrink = 0, weight = "$font.weight.medium", color = "$text.primary" },
-			ui.text { of_fresh(function(item: any): string
-				return locale.s(`ds.pills.fresh_{kind_of(item)}`)
-			end), literal = true, wrap = false, shrink = 0, color = "$text.secondary" },
-			ui.text { of_fresh(fresh_words), literal = true, wrap = false, truncate = true, min_w = 0, max_w = ui.raw(400, "the mockup's question"), shrink = 1, color = "$text.secondary" },
+			ui.rich {
+				ui.span { of_fresh(function(item: any): string
+					return asker(item.title or locale.s("ds.pills.untitled"))
+				end), literal = true, weight = "$font.weight.medium", color = "$text.primary" },
+				ui.span { of_fresh(function(item: any): string
+					return ` {locale.s(`ds.pills.fresh_{kind_of(item)}`)} {fresh_words(item)}`
+				end), literal = true },
+				wrap = false,
+				truncate = true,
+				min_w = 0,
+				shrink = 1,
+				color = "$text.secondary",
+			},
 		}),
-		ui.show(function(): boolean
-			local here = props.elsewhere_of()
-			for _, it in items:get() do
-				if it.kind == "plan_approval" and it.chat == here then
-					return true
-				end
-			end
-			return false
-		end, ui.text { locale.t("ds.pills.approve_plan"), id = "pills-waiting-plan-here", ml = ui.raw(4, "the mockup's waiting pill"), wrap = false }),
 	}
 	return ui.presence(function(): string
 		return if #items:get() > 0 then "waiting" else ""
@@ -643,7 +667,9 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 				end)
 			end,
 		})
-	end, { enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 150 }, exit = { opacity = 0, duration = 120 }, shrink = 1, min_w = 0 })
+	end, { enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 150 }, exit = { opacity = 0, duration = 120 }, shrink = GIVES, min_w = function(): number
+		return if #items:get() > 0 then head_w:get() + CHROME else 0
+	end })
 end
 
 return M

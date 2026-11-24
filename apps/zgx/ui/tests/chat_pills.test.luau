@@ -187,6 +187,18 @@ test("the waiting pill says what waits, and one that comes opens it out with who
 	app:set_state("test_waiting", { approval })
 	pop(app)
 	expect(app:text("#pills-waiting-words")).to_be("approval waiting")
+	app:set_state("test_subs", { sub("a", "running"), sub("b", "running") })
+	app:resize(520, 800)
+	pop(app, 40)
+	local working = box(app, "#pills-agents").w
+	app:set_state("test_waiting", { approval, asking("fourth", "A chat whose title runs long enough to want the room") })
+	pop(app, 40)
+	expect(app:has("#pills-waiting-fresh")).to_be(true)
+	local row, agents, pill = box(app, "#composer-pills"), box(app, "#pills-agents"), box(app, "#pills-waiting")
+	expect(agents.w).to_be(working)
+	expect(agents.x + agents.w <= pill.x).to_be(true)
+	expect(pill.x + pill.w <= row.x + row.w + 0.5).to_be(true)
+	expect(app:error()).to_be(nil)
 end)
 
 test("an answer goes to the chat that asked and leaves you where you are", function()
