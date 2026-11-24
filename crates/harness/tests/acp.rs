@@ -3378,11 +3378,12 @@ def handle_prompt(mid, text):
             "update": {"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Read file", "kind": "read", "status": "in_progress"}
         }})
         time.sleep(0.25)
+        # Set before the completion is sent: the harness's cancel answers it.
+        tool_done.set()
         send({"jsonrpc": "2.0", "method": "session/update", "params": {
             "sessionId": "agy-steer",
             "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "completed", "rawOutput": "ok"}
         }})
-        tool_done.set()
         cancel_event.wait(timeout=5.0)
         # Real agy_acp_server 1.5.0 emits this synthetic chunk on cancel.
         send({"jsonrpc": "2.0", "method": "session/update", "params": {
