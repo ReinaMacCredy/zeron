@@ -1529,13 +1529,18 @@ pub fn switches_native_subagents(id: HarnessId) -> bool {
 /// in JavaScript instead of emitting one JSON tool call per turn:
 /// - Codex (`features.code_mode = true` on `thread/start` and `thread/resume`)
 /// - Muse Code (`-c run.code_mode="additive"` on `muse serve`)
+/// - Claude Code (`CLAUDE_CODE_EXPERIMENTAL_CODE_MODE` in the `--settings`
+///   `env` block, launched without `CLAUDE_CODE_ENTRYPOINT`, from 2.1.331); a
+///   session keeps the mode it was created with, so a resume follows its
+///   transcript, not the switch
 ///
-/// Claude Code's experimental Code Mode is excluded because Claude Code
-/// refuses it outside an interactive terminal (`-p` / `stream-json`).
 /// OpenCode 2.x and Hermes enable their code-execution tools by default rather
 /// than behind an opt-in mode switch.
 pub fn supports_code_mode(id: HarnessId) -> bool {
-    matches!(id, HarnessId::Codex | HarnessId::Muse)
+    matches!(
+        id,
+        HarnessId::ClaudeCode | HarnessId::Codex | HarnessId::Muse
+    )
 }
 
 #[cfg(test)]
