@@ -629,6 +629,28 @@ impl EngineCore {
         sessions.set_device_hub(device_hub.clone());
         device_hub.provision_agent_in_background();
         plugins.start();
+        // A Bot's schedules and promises (plugins/bots.rs), sent to its chat when due.
+        {
+            let (host, dir) = (doc_host.clone(), repos.data_dir().to_path_buf());
+            doc_host.spawn_worker(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let due = tokio::task::spawn_blocking({
+                        let dir = dir.clone();
+                        move || crate::plugins::bots::take_due(&dir, now)
+                    })
+                    .await
+                    .unwrap_or_default();
+                    for (bot, prompt) in due {
+                        if let Err(err) = host.queue_thread_message(&bot, None, &prompt).await {
+                            tracing::warn!(bot = %bot, error = %err, "a Bot's schedule couldn't reach its chat");
+                        }
+                    }
+                }
+            });
+        }
         Ok(Self {
             sessions,
             doc_host,
