@@ -898,10 +898,21 @@ impl Actor {
         let presence = self.presence.clone();
         let stats = self.stats.clone();
         let busy = self.sync_busy.clone();
+        let shutdown = self.shutdown.clone();
+        // A dropped client aborts only the actor, so a closed channel means stop too.
+        let stopping = move || *shutdown.borrow() || shutdown.has_changed().is_err();
         tokio::spawn(async move {
+            if stopping() {
+                busy.store(false, Relaxed);
+                return;
+            }
             let batches: Vec<PendingBatch> = lock(&doc).take_pushable();
             let mut push_failed = false;
             for batch in &batches {
+                if stopping() {
+                    push_failed = true;
+                    break;
+                }
                 let body =
                     serde_json::json!({ "batch": batch.batch, "ops": batch.ops }).to_string();
                 match transport.push(body).await {
@@ -942,6 +953,10 @@ impl Actor {
                 // that until the next socket disconnect — un-mark so the
                 // next cycle (HTTP or WS) retries them.
                 lock(&doc).mark_disconnected();
+            }
+            if stopping() {
+                busy.store(false, Relaxed);
+                return;
             }
             let since = lock(&doc).cursor();
             match transport.fetch(since).await {
