@@ -251,6 +251,29 @@ test("a chat's plan waiting for approval says its steps, and Approve answers tha
 	expect(app:error()).to_be(nil)
 end)
 
+test("Dismiss takes a plan waiting for approval out of the card without answering, until its steps change", function()
+	local app = opened()
+	local function plan(chat: string, mark: string): any
+		return { key = `{chat}:plan`, chat = chat, request = "plan", title = chat, kind = "plan_approval", mark = mark, secret = false, steps = { "Add CSV export" } }
+	end
+	app:set_state("test_waiting", { plan("other", "s1"), plan("third", "s2") })
+	pop(app)
+	app:click("#pills-waiting")
+	pop(app)
+	app:click("#pills-waiting-dismiss")
+	pop(app)
+	expect(app:text("#pills-waiting-count")).to_be("1")
+	expect(app:has("#pills-waiting-card")).to_be(true)
+	app:click("#pills-waiting-dismiss")
+	gone(app)
+	expect(app:has("#pills-waiting")).to_be(false)
+	expect(string.find(app:state("calls"), "waiting_answer", 1, true)).to_be(nil)
+	app:set_state("test_waiting", { plan("other", "s1"), plan("third", "s9") })
+	pop(app)
+	expect(app:text("#pills-waiting-count")).to_be("1")
+	expect(app:error()).to_be(nil)
+end)
+
 test("a secret asked elsewhere isn't typed in the card", function()
 	local app = opened()
 	local item = asking("other", "Other chat")

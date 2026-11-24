@@ -447,14 +447,14 @@ pub(crate) fn steps() -> Vec<TaskStep> {
     THREADS.with(|t| t.steps.borrow().clone())
 }
 
-pub(crate) fn waiting_plans() -> Vec<(String, Vec<String>)> {
+pub(crate) fn waiting_plans() -> Vec<(String, Vec<(String, String)>)> {
     THREADS.with(|t| {
-        let mut out: Vec<(String, Vec<String>)> = t
+        let mut out: Vec<(String, Vec<(String, String)>)> = t
             .leads
             .borrow()
             .iter()
             .filter(|(_, lead)| lead.pending && !lead.steps.is_empty())
-            .map(|(id, lead)| (id.clone(), lead.steps.iter().map(|(_, title)| title.clone()).collect()))
+            .map(|(id, lead)| (id.clone(), lead.steps.clone()))
             .collect();
         out.sort();
         out
@@ -768,7 +768,7 @@ pub(crate) mod tests {
         assert_eq!(plan_of.field("order").unwrap().list().iter().map(text).collect::<Vec<_>>(), ["s1", "s2", "s3", "s4", "s5"]);
         assert_eq!(plan_of.field("progress").unwrap().field("total").and_then(Value::as_f64), Some(5.));
         join_for_tests(pending, plan("lead", &[]));
-        assert_eq!(waiting_plans(), [("lead".to_string(), TITLES.iter().map(|t| t.to_string()).collect::<Vec<_>>())]);
+        assert_eq!(waiting_plans(), [("lead".to_string(), TITLES.iter().enumerate().map(|(i, t)| (format!("s{}", i + 1), t.to_string())).collect::<Vec<_>>())]);
 
         let mut running = vec![chat("lead", json!({ "title": "Storefront", "plan": { "overview": "Four changes" } }))];
         running.extend(["k1", "k2", "k3", "k4"].map(|k| owned(k, "lead", "running")));

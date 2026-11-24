@@ -393,13 +393,14 @@ impl Chats {
                 ])))
             })
             .collect();
-        for (id, titles) in crate::threads::waiting_plans() {
+        for (id, plan) in crate::threads::waiting_plans() {
             let chat = chats.get(&id);
             if chat.is_none() && self.chats_heard.get() {
                 continue;
             }
             let key = format!("{id}:{}", crate::threads::PLAN_REQUEST);
-            let steps: Vec<Value> = titles.iter().map(|s| Value::from(s.as_str())).collect();
+            let steps: Vec<Value> = plan.iter().map(|(_, title)| Value::from(title.as_str())).collect();
+            let mark = plan.iter().map(|(step, _)| step.as_str()).collect::<Vec<_>>().join(",");
             rows.push((updated(&id), key.clone(), Value::record([
                 ("key", Value::from(key.as_str())),
                 ("chat", Value::from(id.as_str())),
@@ -407,6 +408,7 @@ impl Chats {
                 ("title", title(chat)),
                 ("project", project(chat)),
                 ("kind", Value::from("plan_approval")),
+                ("mark", Value::from(mark.as_str())),
                 ("secret", Value::Bool(false)),
                 ("steps", Value::List(steps.into())),
             ])));
@@ -761,6 +763,7 @@ pub(super) mod tests {
         assert_eq!(rows[0].field("request").map(text).as_deref(), Some(crate::threads::PLAN_REQUEST));
         assert_eq!(rows[0].field("title").map(text).as_deref(), Some("Storefront"));
         assert_eq!(rows[0].field("steps").unwrap().list().iter().map(text).collect::<Vec<_>>(), TITLES);
+        assert_eq!(rows[0].field("mark").map(text).as_deref(), Some("s1,s2,s3,s4,s5"), "the steps a dismissal is of");
         assert_eq!(page(&chats), Some(1.), "the question of another chat stays");
         assert!(approves_plan("lead", crate::threads::PLAN_REQUEST));
         assert!(!approves_plan("lead", "r") && !approves_plan("c", "r"), "a question is answered as before");

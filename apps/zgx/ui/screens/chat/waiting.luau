@@ -8,6 +8,7 @@ local locale = require("@ds/locale")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local store = require("@app/screens/chat/store")
+local shared = require("@app/screens/chat/shared")
 
 local M = {}
 
@@ -65,7 +66,7 @@ end
 function M.visible(here: string?): { any }
 	local out: { any } = {}
 	for _, item in list:get() do
-		if item.chat ~= here or item.kind == "plan_approval" then
+		if (item.chat ~= here or item.kind == "plan_approval") and not shared.plan_dismissed(item) then
 			table.insert(out, item)
 		end
 	end
@@ -270,9 +271,15 @@ local function plan_body(item: any): Node
 	table.insert(body, ui.text { locale.t("ds.pills.nothing_runs"), text_size = ui.raw(12, "waiting.rs plan"), color = "$zeron.composer.faint" })
 	table.insert(body, ui.row {
 		pt = "$space.1",
+		gap = ui.raw(6, "waiting.rs plan actions"),
 		ds.Button { locale.t("ds.pills.approve"), id = "pills-waiting-approve", size = "sm", on_click = function()
 			M.answer(item, { decision = "once" })
 		end },
+		if item.kind == "plan_approval" and item.mark
+			then ds.Button { locale.t("common.dismiss"), id = "pills-waiting-dismiss", tone = "secondary", size = "sm", on_click = function()
+				shared.dismiss_plan(item)
+			end }
+			else nil,
 	})
 	return ui.column(body)
 end

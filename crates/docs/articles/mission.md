@@ -72,7 +72,7 @@ Nothing runs until you approve. While the plan waits:
 
 - the card has **Edit plan** and **Approve and run**;
 - the **Plan** bar at the top of the Threads tab reads **Waiting for your approval. Nothing has started.**, with **Edit** and **Approve**;
-- the **Waiting** pill above the composer counts it, here as **Approve the plan** and in every other chat, where its card shows the steps with **Approve**.
+- the **Waiting** pill above the composer counts it, here as **Approve the plan** and in every other chat, where its card shows the steps with **Approve** and **Dismiss**. **Dismiss** takes the plan out of the pill on this Mac and approves nothing: it keeps waiting in the Threads tab, and shows in the pill again if the lead rewrites it.
 
 After you approve, the card reads **Approved**, the lead starts the steps, and each step moves from **Planned** to **Working** as its thread starts. The **Plan** bar counts the steps that are done, such as **Plan 2/5**.
 
