@@ -2,6 +2,53 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.3.18"
+date = "Nov 24"
+
+[[entry.features]]
+id = "bots"
+title = "Bots: agents that keep their own chat, memory and inbox"
+description = "A Bot is a pinned lead chat with its own notes, Inbox cards, task board and schedules. The Zeron Bot template swaps the sidebar for Bots, Needs you, Review and Sessions; the + button starts a Bot from a goal or a template."
+details = "A Bot's card opens over the window with Open Bot, Dismiss and Approve. Agents reach the same data through the bot_memory, bot_inbox, bot_board and bot_schedule tools. View > Use Zeron v3 switches back."
+
+[[entry.features]]
+id = "visuals-in-reply"
+title = "Visuals sit in the reply, and you can answer through them"
+description = "A chart, table or diagram an agent shows now draws in place in its reply, in a frame with its title, Reset and a caption. Visuals can carry a text field, a select, a disclosure and a quiz, keep their state across a restart, and send your press back to the agent."
+details = "A chart opens its data table. A visual still being built shows as a pending row."
+
+[[entry.features]]
+id = "ask-card"
+title = "An agent's question draws in the reply"
+description = "A single choice question from an agent appears as a card or quick chips inside the reply, with a note under each option and a Recommended mark. Approvals gain Request changes."
+details = "A question nobody answered in 25 minutes stays open while the chat is idle and closes when a new turn starts. What you were typing is set aside while the question is open and comes back afterwards."
+
+[[entry.features]]
+id = "python-run"
+title = "Run a Python block from a reply"
+description = "A python block in a reply has a Run button. It runs in a sandbox with no network, writes only to a scratch folder and is stopped after 10 seconds. Its output, figures and status sit under the block and survive a restart."
+
+[[entry.features]]
+id = "file-cards"
+title = "Files named in a reply show as cards"
+description = "A paragraph that only names files draws as cards. Press one to preview the head of the file, with Open in Files panel and Reveal in Finder. A file that has gone says so."
+
+[[entry.improvements]]
+text = "Zeron follows upstream 0.3.18: Antigravity runs on Google's unified CLI with a paste-code sign-in, Cloud side chats group under one Cloud header, submenus keep open while the pointer crosses to them, and list rows share one gap."
+
+[[entry.improvements]]
+text = "A Stop reaches the turn it names even when that turn's reply or your earlier sends landed first. A send held for the stopped turn stays in the paused queue and runs after your next message."
+
+[[entry.improvements]]
+text = "Text selected on a page an agent rendered, opened out or served from a server, can be attached as a mention."
+
+[[entry.improvements]]
+text = "The Side chat tab above the composer is gone; side chats and their shortcut are unchanged."
+
+[[entry.improvements]]
+text = "Fixed: a queued message could be sent before its attachments finished uploading and pause the queue for good; a worktree list could be read before its refresh was applied; a preview server found before its launcher started it was never scanned again; Cloud presence checks dialed the account's logical device."
+
+[[entry]]
 version = "0.3.5"
 date = "Nov 14"
 
