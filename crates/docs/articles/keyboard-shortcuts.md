@@ -47,7 +47,7 @@ These live in [Settings > General > Chat](zeron://settings/chat) and [Settings >
 - **Send messages with** (Chat): Enter or Cmd+Enter.
 - **Thinking level shortcut** (macOS only): press Cmd+- or Cmd+= to lower or raise the thinking level, or switch the modifier to **⌃ Control**. On other systems the keys are Ctrl+- and Ctrl+=.
 - **Stop active agent with Escape** (Chat): press Escape to stop the running agent when no dialog or menu is open. Off by default.
-- **Ctrl+Tab cycles tabs**: move straight to the next tab instead of opening the session switcher.
+- **Ctrl+Tab cycles tabs**: offer only the open tabs, most recently used first, instead of every session. A quick press goes back to the tab used before.
 
 ## Keys in other places
 

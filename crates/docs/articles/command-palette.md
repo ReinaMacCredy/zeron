@@ -43,7 +43,7 @@ Each card shows the last view of that session, its title, project and device, an
 
 - **Session switcher shows**: every session, or only those active within a window from **1h** to **7d**. The open session and any tab that is not idle always appear, whatever the window.
 - **Session switcher shows at most**: cap the number of cards at **All** or anywhere from 2 to 50.
-- **Ctrl+Tab cycles tabs**: move straight to the next tab instead of opening the switcher.
+- **Ctrl+Tab cycles tabs**: offer only the open tabs, most recently used first, instead of every session. A quick press goes back to the tab used before, and the two settings above do not apply.
 
 ## Type to focus
 

@@ -2364,7 +2364,7 @@
         },
         "cycles": {
           "label": "Ctrl+Tab cycles tabs",
-          "description": "Go through the tabs in the strip's order instead of the most recently used sessions. Hold Control to pick one from the cards."
+          "description": "Switch between the open tabs only, most recently used first, instead of every session in the sidebar. A quick press goes back to the tab used before; hold Control to pick one from the cards."
         }
       },
       "focused_pane": "Navigate within the focused pane.",

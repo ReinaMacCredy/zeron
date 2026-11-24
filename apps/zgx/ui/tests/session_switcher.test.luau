@@ -98,7 +98,7 @@ test("each press moves on in the order used, Shift back, as the keys come to it"
 	expect(app:error()).to_be_nil()
 end)
 
-test("the cards stand five a row: past the fifth the row turns to the next five, and Shift turns it back", function()
+test("the cards stand five a row: past the fifth the row turns to the next five, the last row still five, and Shift turns it back", function()
 	local app = shell()
 	app:command("arrive")
 	app:frames(5)
@@ -119,6 +119,7 @@ test("the cards stand five a row: past the fifth the row turns to the next five,
 	expect(app:state("shell_switcher_hi")).to_be(6)
 	expect(app:has(`#switcher-card-{list[6]}`)).to_be(true)
 	expect(app:has(`#switcher-card-{list[1]}`)).to_be(false)
+	expect(app:has(`#switcher-card-{list[2]}`)).to_be(true)
 	app:key("ctrl+shift+tab")
 	app:frames(5)
 	expect(app:state("shell_switcher_hi")).to_be(5)
@@ -216,45 +217,25 @@ test("the cards' order: most recent first, then the rest as they stand, a cap ke
 	expect(app:error()).to_be_nil()
 end)
 
-test("set to cycle the tabs, held it shows the strip's tabs as cards, one on from the one showing", function()
+test("set to cycle the tabs, held it shows only the strip's tabs as cards, most recently used first", function()
 	local app = shell()
 	app:set_state("shell_switcher_cycles_tabs", true)
 	open(app, "Fix the build")
 	open(app, "Write the docs")
 	open(app, "Tidy the tests")
+	open(app, "Fix the build")
 	app:hold("ctrl")
 	app:frames(3)
+	raise(app)
+	expect(app:state("shell_switcher_cards")).to_equal({ "a1", "a3", "a2" })
+	expect(app:state("shell_switcher_hi")).to_be(2)
 	app:command("shell.next_session")
-	app:frames(10)
-	expect(app:state("shell_switcher_cards")).to_equal({ "a1", "a2", "a3" })
-	expect(app:state("shell_switcher_hi")).to_be(1)
-	local seen: { number } = {}
-	for _ = 1, 7 do
-		app:command("shell.next_session")
-		app:frames(2)
-		table.insert(seen, app:state("shell_switcher_hi") :: number)
-	end
-	for _ = 1, 4 do
-		app:command("shell.previous_session")
-		app:frames(2)
-		table.insert(seen, app:state("shell_switcher_hi") :: number)
-	end
-	expect(table.concat(seen, " ")).to_be("2 3 1 2 3 1 2 1 3 2 1")
-	expect(route_has(app, "a3")).to_be(true)
+	app:frames(2)
+	expect(app:state("shell_switcher_hi")).to_be(3)
 	app:release()
 	app:frames(30)
 	expect(up(app)).to_be(false)
-	expect(route_has(app, "a1")).to_be(true)
-	app:hold("ctrl")
-	app:frames(3)
-	raise(app, "shell.previous_session")
-	expect(app:state("shell_switcher_hi")).to_be(3)
-	app:key("Escape")
-	app:frames(20)
-	expect(up(app)).to_be(false)
-	app:release()
-	app:frames(20)
-	expect(route_has(app, "a1")).to_be(true)
+	expect(route_has(app, "a2")).to_be(true)
 	-- From Settings, itself a modal; a command, as the menu bar's ⌃⇥ reaches it there.
 	app:command("shell.settings")
 	app:frames(30)
@@ -262,15 +243,15 @@ test("set to cycle the tabs, held it shows the strip's tabs as cards, one on fro
 	app:frames(3)
 	app:command("shell.next_session")
 	app:frames(10)
-	expect(app:state("shell_switcher_cards")).to_equal({ "a1", "a2", "a3" })
+	expect(app:state("shell_switcher_cards")).to_equal({ "a2", "a1", "a3" })
 	expect(app:state("shell_switcher_hi")).to_be(2)
 	app:release()
 	app:frames(30)
-	expect(route_has(app, "a2")).to_be(true)
+	expect(route_has(app, "a1")).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 
-test("set to cycle the tabs, a press let go each time steps the strip round after round, Shift back the same", function()
+test("set to cycle the tabs, a press let go each time goes between the two tabs used last, Shift to the one used longest ago", function()
 	local app = shell()
 	app:set_state("shell_switcher_cycles_tabs", true)
 	open(app, "Fix the build")
@@ -285,18 +266,13 @@ test("set to cycle the tabs, a press let go each time steps the strip round afte
 		end
 		return "?"
 	end
-	for _ = 1, 7 do
+	for _ = 1, 4 do
 		app:command("shell.next_session")
 		app:frames(5)
 		expect(up(app)).to_be(false)
 		table.insert(seen, at())
 	end
-	for _ = 1, 4 do
-		app:command("shell.previous_session")
-		app:frames(5)
-		table.insert(seen, at())
-	end
-	for _ = 1, 4 do
+	for _ = 1, 2 do
 		app:hold("ctrl")
 		app:frames(3)
 		app:command("shell.next_session")
@@ -305,7 +281,10 @@ test("set to cycle the tabs, a press let go each time steps the strip round afte
 		app:frames(10)
 		table.insert(seen, at())
 	end
-	expect(table.concat(seen, " ")).to_be("a1 a2 a3 a1 a2 a3 a1 a3 a2 a1 a3 a1 a2 a3 a1")
+	app:command("shell.previous_session")
+	app:frames(5)
+	table.insert(seen, at())
+	expect(table.concat(seen, " ")).to_be("a2 a3 a2 a3 a2 a3 a1")
 	expect(app:error()).to_be_nil()
 end)
 
@@ -318,15 +297,12 @@ test("set to cycle the tabs, a held draft's tab is one of them, after the last",
 	open(app, "Write the docs")
 	open(app, "Tidy the tests")
 	expect(app:has("#session-tab-draft")).to_be(true)
-	app:command("shell.next_session")
-	app:frames(20)
-	expect(app:state("shell_route_path")).to_be("/")
-	app:command("shell.next_session")
-	app:frames(20)
-	expect(route_has(app, "a1")).to_be(true)
 	app:command("shell.previous_session")
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/")
+	app:command("shell.next_session")
+	app:frames(20)
+	expect(route_has(app, "a3")).to_be(true)
 	expect(app:error()).to_be_nil()
 end)
 

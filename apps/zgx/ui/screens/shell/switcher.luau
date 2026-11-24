@@ -186,10 +186,11 @@ function M.order(recent: { string }, sidebar: { string }, live_tabs: { string },
 end
 
 local function order_now(sidebar: { string }, going_home: boolean): { string }
-	local list = M.order(tabs.recent:peek(), sidebar, strip(true), function(id: string): number?
+	local only_tabs = M.cycles_tabs:peek()
+	local list = M.order(tabs.recent:peek(), if only_tabs then {} else sidebar, strip(not only_tabs), function(id: string): number?
 		local c = chat_row(id)
 		return if c then c.updated else nil
-	end, cutoff(os.time()), M.limit:peek())
+	end, if only_tabs then nil else cutoff(os.time()), if only_tabs then 0 else M.limit:peek())
 	local home = going_home or route.chat:peek().name == "home"
 	local first = if home then tabs.tab_of(route.draft:peek()) else nil
 	if first then
@@ -298,23 +299,6 @@ function M.step(by: number): boolean
 	elseif where == "plugin" then
 		route.new_chat()
 	end
-	if M.cycles_tabs:peek() then
-		local strip_now = strip(false)
-		for _, key in tabs.drafts:peek() do
-			table.insert(strip_now, tabs.tab_of(key))
-		end
-		if #strip_now == 0 then
-			return true
-		end
-		local here = here_tab()
-		local at = if here then table.find(strip_now, here) else nil
-		if at and #strip_now == 1 then
-			return true
-		end
-		local i = if at then (at - 1 + by) % #strip_now + 1 elseif by > 0 then 1 else #strip_now
-		raise(strip_now, i, where)
-		return true
-	end
 	local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 	local order = order_now(if sidebar then sidebar.order:peek() else {}, where == "plugin")
 	if #order == 0 then
@@ -332,9 +316,12 @@ end
 local page = ui.computed(function(): number
 	return (hi:get() - 1) // PAGE
 end)
+local page_first = ui.computed(function(): number
+	return math.max(0, math.min(page:get() * PAGE, #card_list:get() - PAGE))
+end)
 local page_list = ui.computed(function(): { string }
 	local list = card_list:get()
-	local first = page:get() * PAGE
+	local first = page_first:get()
 	return table.move(list, first + 1, math.min(first + PAGE, #list), 1, {})
 end)
 
@@ -469,7 +456,7 @@ local function Row(): Node
 				border_color = "$zeron.switcher.plate_edge",
 				x = motion.tween(
 					ui.computed(function(): number
-						return (hi:get() - 1) % PAGE * (TILE_W + TILE_GAP)
+						return (hi:get() - 1 - page_first:get()) * (TILE_W + TILE_GAP)
 					end),
 					SLIDE
 				),
