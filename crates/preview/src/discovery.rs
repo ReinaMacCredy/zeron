@@ -354,9 +354,19 @@ const UNREADABLE_TRIES: u8 = 3;
 pub struct Owned {
     processes: HashMap<u32, Process>,
     pids: HashSet<u32>,
+    unsettled: bool,
 }
 
 impl Owned {
+    /// Whether a process this engine started has no verdict yet: its
+    /// environment read empty or not at all, and a later scan reads it
+    /// again. A server started through a launcher reads so until the
+    /// launcher has exec'd it (macOS shows no environment for its own
+    /// `/usr/bin/python3`), so with nothing else alive the scan that saw it
+    /// must not be the last.
+    pub fn unsettled(&self) -> bool {
+        self.unsettled
+    }
     pub fn is_empty(&self) -> bool {
         self.pids.is_empty()
     }
@@ -445,6 +455,7 @@ impl Origins {
     ) -> Owned {
         let engine = std::process::id();
         let mut roots = HashSet::new();
+        let mut unread = Vec::new();
         for (&pid, process) in &processes {
             if pid <= 1 || pid == engine || !mine.contains(&pid) {
                 continue;
@@ -473,11 +484,17 @@ impl Origins {
                         if *tries >= UNREADABLE_TRIES {
                             self.unreadable.remove(&key);
                             self.markers.insert(key, (None, false));
+                        } else {
+                            unread.push(pid);
                         }
                         continue;
                     }
                     None => {
-                        *self.unreadable.entry(key).or_default() += 1;
+                        let tries = self.unreadable.entry(key).or_default();
+                        *tries += 1;
+                        if *tries < UNREADABLE_TRIES {
+                            unread.push(pid);
+                        }
                         continue;
                     }
                 },
@@ -520,7 +537,19 @@ impl Origins {
             .collect();
         self.markers.retain(|key, _| alive.contains(key));
         self.unreadable.retain(|key, _| alive.contains(key));
-        Owned { processes, pids }
+        // (Only what this engine started: most of the user's other processes
+        // never show an environment, and new ones would keep the scan up.)
+        let unsettled = unread.into_iter().any(|mut pid| {
+            for _ in 0..64 {
+                match processes.get(&pid) {
+                    Some(process) if process.parent == engine => return true,
+                    Some(process) if process.parent > 1 && process.parent != pid => pid = process.parent,
+                    _ => return false,
+                }
+            }
+            false
+        });
+        Owned { processes, pids, unsettled }
     }
 
     /// Whether an ancestor of `pid` (its parent, and so on up to launchd or
@@ -1838,6 +1867,41 @@ mod tests {
         assert!(owned.pids.contains(&300), "still owned through its agent");
         assert_eq!(reads.borrow().iter().filter(|pid| **pid == 300).count(), empty_reads);
     }
+    /// A server this engine started, caught before its launcher exec'd it,
+    /// with nothing else alive: nothing is owned yet, and the scan says a
+    /// later one is due instead of resting on that. One that never shows an
+    /// environment stops asking once it is settled.
+    #[test]
+    fn a_process_of_this_engine_not_read_yet_keeps_the_scan_due() {
+        let engine = std::process::id();
+        let p = |parent, started_at| Process { parent, started_at };
+        // 100: the server. 200 → 201: started here, 201 never readable.
+        // 300: someone else's, never showing an environment.
+        let processes: HashMap<u32, Process> =
+            [(100, p(engine, 1)), (200, p(engine, 2)), (201, p(200, 3)), (300, p(1, 4))].into();
+        let mine: HashSet<u32> = processes.keys().copied().collect();
+        let accept = |origin: &str| origin == "chat:a";
+        let scan = std::cell::Cell::new(0);
+        let read = |pid: u32| match (pid, scan.get()) {
+            (100, 0) | (300, _) => Some(Vec::new()),
+            (100, _) => Some(environment(&["ZERON_ORIGIN=chat:a"])),
+            (201, _) => None,
+            _ => Some(environment(&["PATH=/bin"])),
+        };
+        let mut origins = Origins::default();
+        let server: HashMap<u32, Process> = [(100, p(engine, 1)), (300, p(1, 4))].into();
+        let owned = origins.owned(server.clone(), &mine, &accept, read);
+        assert!(owned.is_empty());
+        assert!(owned.unsettled());
+        scan.set(1);
+        let owned = origins.owned(server, &mine, &accept, read);
+        assert!(owned.pids.contains(&100));
+        assert!(!owned.unsettled(), "another's process never keeps it due");
+        let due = (0..UNREADABLE_TRIES + 2)
+            .filter(|_| origins.owned(processes.clone(), &mine, &accept, read).unsettled())
+            .count();
+        assert_eq!(due, UNREADABLE_TRIES as usize - 1);
+    }
     /// Owned = processes whose own marker is in scope, plus everything
     /// below them; never the engine or what it starts unmarked; each
     /// process's environment read once, an unreadable one a few times.
@@ -1880,6 +1944,7 @@ mod tests {
         pids.sort();
         assert_eq!(pids, [100, 101, 102, 110]);
         assert!(!reads.borrow().contains(&engine));
+        assert!(!owned.unsettled(), "the unreadable process is not this engine's");
         // The next sweep reads nothing new: every verdict is kept for the
         // process's lifetime, and an unreadable one is retried, not forever.
         for _ in 0..UNREADABLE_TRIES + 2 {

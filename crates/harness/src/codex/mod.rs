@@ -268,6 +268,15 @@ impl CodexHarness {
         app_server_command(exe, &self.launch)
     }
 
+    /// Claim thread writers apart from the process's other harnesses. For
+    /// tests: each fake app-server is a Codex of its own and they all name
+    /// their thread alike, so on the process-wide claims every run waits for
+    /// every other test's.
+    pub fn with_own_thread_writers(mut self) -> Self {
+        self.writers = ThreadWriters::default();
+        self
+    }
+
     /// Tune the interrupt→SIGTERM→SIGKILL escalation timing.
     pub fn with_graces(mut self, interrupt_grace: Duration, kill_grace: Duration) -> Self {
         self.interrupt_grace = interrupt_grace;

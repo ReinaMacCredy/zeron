@@ -280,7 +280,8 @@ def scripts():
     for dirpath, dirnames, filenames in os.walk(SCRIPTS):
         dirnames[:] = [d for d in dirnames if d not in (".zgx", "locales")]
         for n in filenames:
-            if n.endswith(".luau"):
+            # (files_snapshot.luau is this checkout's files as data, not a script.)
+            if n.endswith(".luau") and n != "files_snapshot.luau":
                 yield os.path.join(dirpath, n)
 
 

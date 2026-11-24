@@ -167,6 +167,7 @@ pub struct Status {
     in_flight: AtomicUsize,
     pending: AtomicUsize,
     last: Mutex<Instant>,
+    called: AtomicBool,
     ended: AtomicBool,
 }
 
@@ -176,6 +177,7 @@ impl Status {
             in_flight: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
             last: Mutex::new(Instant::now()),
+            called: AtomicBool::new(false),
             ended: AtomicBool::new(false),
         }
     }
@@ -192,6 +194,11 @@ impl Status {
     /// Since it last did anything.
     pub fn idle_for(&self) -> Duration {
         self.last.lock().unwrap_or_else(|e| e.into_inner()).elapsed()
+    }
+
+    /// Whether it was ever asked anything.
+    pub fn called(&self) -> bool {
+        self.called.load(Ordering::SeqCst)
     }
 
     pub fn ended(&self) -> bool {
@@ -259,6 +266,7 @@ impl Vm {
     pub fn call(&self, kind: Kind, name: &str, args: Json, call: Json) -> oneshot::Receiver<Reply> {
         let (reply, rx) = oneshot::channel();
         self.status.in_flight.fetch_add(1, Ordering::SeqCst);
+        self.status.called.store(true, Ordering::SeqCst);
         self.status.touch();
         let sent = self.tx.send(ToVm::Call {
             kind,

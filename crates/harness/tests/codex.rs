@@ -31,7 +31,16 @@ fn fixture_path() -> PathBuf {
     path
 }
 
+/// A harness on the fixture whose thread claims are its own: the fixture
+/// names every fresh thread `th-1`, and on the process-wide claims each test
+/// would wait for all the others' runs to end.
 fn harness() -> CodexHarness {
+    shared_harness().with_own_thread_writers()
+}
+
+/// A harness on the fixture with the process-wide thread claims, as the app
+/// builds them.
+fn shared_harness() -> CodexHarness {
     CodexHarness::new().with_executable(fixture_path())
 }
 
@@ -2005,11 +2014,12 @@ async fn retire_writer(harness: &CodexHarness, cwd: &std::path::Path) -> RunRequ
 #[tokio::test]
 async fn a_run_after_a_retired_one_resumes_its_thread_once_the_old_server_exits() {
     let temp = tempfile::tempdir().unwrap();
-    let harness = harness().with_graces(Duration::from_millis(20), Duration::from_millis(300));
+    let harness =
+        shared_harness().with_graces(Duration::from_millis(20), Duration::from_millis(300));
     let req = retire_writer(&harness, temp.path()).await;
     let (controls, _steer, _token) = controls("Yes");
     // A second harness object, as an edited provider instance builds.
-    let mut stream = self::harness().run(req, controls).await.unwrap();
+    let mut stream = shared_harness().run(req, controls).await.unwrap();
     let started = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let AgentEvent::SessionStarted { session_id, .. } =

@@ -377,15 +377,26 @@ describe("the public card", () => {
     await claim("user_limit_read", "limitread");
     const read = (ip: string, path = "/cards/limitread") =>
       SELF.fetch(`https://edge.test${path}`, { headers: { "cf-connecting-ip": ip } });
-    const statuses = [];
-    for (let i = 0; i < 60; i++) statuses.push((await read("203.0.113.7", i % 2 ? "/cards/limitread" : `/@probe${i}`)).status);
-    expect(statuses.filter((s) => s === 429)).toEqual([]);
-    const blocked = await read("203.0.113.7");
-    expect(blocked.status).toBe(429);
-    expect(blocked.headers.get("retry-after")).toBe("60");
-    expect(blocked.headers.get("cache-control")).toBe("no-store");
-    expect(await blocked.json()).toEqual({ error: "rate_limited" });
-    expect((await read("203.0.113.7", "/@limitread/player")).status).toBe(429);
+    // CARD_READS counts in minutes of the wall clock, each starting from
+    // zero: the reads that fill one and the reads past it have to fall in the
+    // same minute. A run that crossed into the next starts over as another IP.
+    const minute = () => Math.floor(Date.now() / 60_000);
+    for (let n = 7; ; n++) {
+      const ip = `203.0.113.${n}`;
+      const began = minute();
+      const statuses = [];
+      for (let i = 0; i < 60; i++) statuses.push((await read(ip, i % 2 ? "/cards/limitread" : `/@probe${i}`)).status);
+      const blocked = await read(ip);
+      const player = await read(ip, "/@limitread/player");
+      if (minute() !== began) continue;
+      expect(statuses.filter((s) => s === 429)).toEqual([]);
+      expect(blocked.status).toBe(429);
+      expect(blocked.headers.get("retry-after")).toBe("60");
+      expect(blocked.headers.get("cache-control")).toBe("no-store");
+      expect(await blocked.json()).toEqual({ error: "rate_limited" });
+      expect(player.status).toBe(429);
+      break;
+    }
     expect((await read("198.51.100.9")).status).toBe(200);
   });
 

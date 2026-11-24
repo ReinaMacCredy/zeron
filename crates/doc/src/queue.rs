@@ -123,7 +123,16 @@ impl QueuedMessage {
 
 impl SessionDoc {
     /// The queue in send order. Malformed rows skip rather than poison the read.
+    /// Waits for a row still being written (`queue_row_guard`): read half
+    /// written, a row with attachments on their way looked ready to send, and
+    /// the send that then failed paused the queue for good.
     pub fn read_queue(&self) -> Result<Vec<QueuedMessage>, DocError> {
+        let _row = self.queue_row_guard();
+        self.queue_rows_now()
+    }
+
+    /// [`Self::read_queue`] for a caller that holds `queue_row_guard`.
+    fn queue_rows_now(&self) -> Result<Vec<QueuedMessage>, DocError> {
         let raw = self
             .doc()
             .get_movable_list("queue")
@@ -155,8 +164,8 @@ impl SessionDoc {
     /// A row goes in one write at a time, and another thread can see it between
     /// them. Taken then, it left with its id and none of the rest (no
     /// `holdForTurnEnd`, no attachments), and the next write failed on a deleted
-    /// container: the send failed, or the row vanished. So taking a row waits for
-    /// whoever is still writing one.
+    /// container: the send failed, or the row vanished. So taking a row, and
+    /// reading the queue, wait for whoever is still writing one.
     fn queue_row_guard(&self) -> std::sync::MutexGuard<'_, ()> {
         self.queue_rows
             .lock()
@@ -333,7 +342,10 @@ impl SessionDoc {
         let Some(index) = index_of(&queue, id) else {
             return Ok(None);
         };
-        let item = self.read_queue()?.into_iter().find(|item| item.id == id);
+        let item = self
+            .queue_rows_now()?
+            .into_iter()
+            .find(|item| item.id == id);
         // Delivery gates are a model invariant, not merely a UI/engine
         // convention. This keeps future take call sites from accidentally
         // sending a row that is being edited or awaiting review.
@@ -521,6 +533,33 @@ mod tests {
                 doc.push_queued(&row).unwrap();
             }
             taker.join().unwrap();
+        });
+    }
+
+    /// A drain reads the queue to decide whether its head can go out.
+    #[test]
+    fn a_row_is_whole_the_moment_anything_can_read_it() {
+        const ROWS: usize = 400;
+        let doc = doc();
+        let written = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                while !written.load(std::sync::atomic::Ordering::Acquire) {
+                    for row in doc.read_queue().unwrap() {
+                        assert!(row.hold_for_turn_end, "read half written: {row:?}");
+                        assert_eq!(row.attachments, ["a.png"], "read half written");
+                    }
+                }
+            });
+            for n in 0..ROWS {
+                let mut row = item(&format!("row-{n}"), "text");
+                row.hold_for_turn_end = true;
+                row.attachments = vec!["a.png".into()];
+                doc.push_queued(&row).unwrap();
+                doc.take_queued(&row.id).unwrap();
+            }
+            written.store(true, std::sync::atomic::Ordering::Release);
+            reader.join().unwrap();
         });
     }
 

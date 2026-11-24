@@ -142,6 +142,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// One repo's refreshes: they run one at a time, and a pass serves every
+/// request made before it began.
+#[derive(Default)]
+struct RepoRefresh {
+    requested: std::sync::atomic::AtomicU64,
+    served: tokio::sync::Mutex<u64>,
+}
+
 #[derive(Clone)]
 pub struct WorkTrees {
     inner: Arc<Inner>,
@@ -152,8 +160,7 @@ struct Inner {
     workspace: WorkspaceHost,
     device_id: String,
     listings: Mutex<HashMap<PathBuf, Vec<Worktree>>>,
-    refreshing: Mutex<HashMap<PathBuf, bool>>,
-    refreshed: tokio::sync::Notify,
+    refreshing: Mutex<HashMap<PathBuf, Arc<RepoRefresh>>>,
     shell_starts: Mutex<HashMap<String, Vec<Worktree>>>,
     base_watches: Mutex<HashMap<PathBuf, Vec<FsWatch>>>,
     turn_diff: std::sync::OnceLock<CheckoutDiffSync>,
@@ -168,7 +175,6 @@ impl WorkTrees {
                 device_id: device_id.to_string(),
                 listings: Mutex::new(HashMap::new()),
                 refreshing: Mutex::new(HashMap::new()),
-                refreshed: tokio::sync::Notify::new(),
                 shell_starts: Mutex::new(HashMap::new()),
                 base_watches: Mutex::new(HashMap::new()),
                 turn_diff: std::sync::OnceLock::new(),
@@ -406,57 +412,25 @@ impl WorkTrees {
         }
     }
 
-    /// Returns once a pass that began after the call has recorded its result.
+    /// Returns once the chats reflect a listing taken after the call: a
+    /// caller that arrives during another's pass waits for one that began
+    /// after its own request, and runs it if nobody has.
     async fn refresh_repo(&self, main: &Path) {
-        let joined = {
-            let mut refreshing = lock(&self.inner.refreshing);
-            match refreshing.get_mut(main) {
-                Some(again) => {
-                    *again = true;
-                    true
-                }
-                None => {
-                    refreshing.insert(main.to_path_buf(), false);
-                    false
-                }
-            }
-        };
-        if joined {
-            // The caller already refreshing runs one more pass for this call.
-            loop {
-                let done = self.inner.refreshed.notified();
-                tokio::pin!(done);
-                done.as_mut().enable();
-                if !lock(&self.inner.refreshing).contains_key(main) {
-                    return;
-                }
-                done.await;
-            }
+        use std::sync::atomic::Ordering;
+        let repo = lock(&self.inner.refreshing)
+            .entry(main.to_path_buf())
+            .or_default()
+            .clone();
+        let request = repo.requested.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut served = repo.served.lock().await;
+        if *served >= request {
+            return;
         }
-        // Also when this future is dropped mid-pass, or the joined callers would wait forever.
-        struct Done<'a>(&'a Inner, &'a Path, bool);
-        impl Drop for Done<'_> {
-            fn drop(&mut self) {
-                if !self.2 {
-                    lock(&self.0.refreshing).remove(self.1);
-                }
-                self.0.refreshed.notify_waiters();
-            }
+        let serving = repo.requested.load(Ordering::SeqCst);
+        if let Err(error) = self.refresh_pass(main).await {
+            tracing::debug!(repo = %main.display(), %error, "work trees: refresh failed");
         }
-        let mut done = Done(&self.inner, main, false);
-        loop {
-            if let Err(error) = self.refresh_pass(main).await {
-                tracing::debug!(repo = %main.display(), %error, "work trees: refresh failed");
-            }
-            let mut refreshing = lock(&self.inner.refreshing);
-            if refreshing.get(main).copied().unwrap_or(false) {
-                refreshing.insert(main.to_path_buf(), false);
-                continue;
-            }
-            refreshing.remove(main);
-            done.2 = true;
-            break;
-        }
+        *served = serving;
     }
 
     async fn refresh_pass(&self, main: &Path) -> Result<(), EngineError> {

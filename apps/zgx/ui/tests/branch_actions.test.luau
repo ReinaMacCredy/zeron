@@ -4,7 +4,16 @@ local function open_b1(app: any)
 	app:frames(30)
 end
 
+-- A test's time moves a frame at a time. `app:wait` with a timeout gives up by
+-- the wall clock, so a busy machine fit too few frames in it: the edit's send,
+-- which follows its card's collapse, had not gone out when the test looked.
 local function wait(app: any, ms: number)
+	app:frames(math.ceil(ms * 60 / 1000))
+end
+
+-- A tooltip's delay is the one thing here on the wall clock: time for one
+-- that should not show.
+local function rest(app: any, ms: number)
 	app:wait("#never-shown", { timeout_ms = ms })
 end
 
@@ -183,14 +192,13 @@ test("branch actions: a refused action is dimmed, its reason its tooltip, and a 
 	app:hover('~"Friendlier, with shipping"')
 	app:frames(20)
 	app:hover('role:button "Fork from here"')
-	wait(app, 500)
+	rest(app, 500)
 	expect(app:has('~"Wait for the reply to finish."')).to_be(false)
 	expect(app:has('~"Stop the running turn before rewinding."')).to_be(false)
 	app:hover('~"Make it friendlier"')
 	app:frames(20)
 	app:hover('role:button "Edit message"')
-	wait(app, 500)
-	expect(app:has('~"Stop the running turn before rewinding."')).to_be(true)
+	expect(app:wait('~"Stop the running turn before rewinding."')).to_be(true)
 	app:click('role:button "Edit message"')
 	wait(app, 300)
 	expect(app:has("#message-edit")).to_be(false)
@@ -204,8 +212,7 @@ test("branch actions: an agent that can't branch dims all three, saying so", fun
 	app:frames(20)
 	expect(app:state("calls")).to_contain("branching:claude-code")
 	app:hover('role:button "Fork from here"')
-	wait(app, 500)
-	expect(app:has('~"cannot fork or rewind a session."')).to_be(true)
+	expect(app:wait('~"cannot fork or rewind a session."')).to_be(true)
 end)
 
 local function y_of(app: any, words: string): number?

@@ -64,8 +64,45 @@ async fn deleting_a_cloud_chat_deletes_its_cloud_children() {
             .unwrap();
     };
     chat("main", "cloud-main", None);
-    chat("delegate", "cloud-delegate", Some("main"));
-    chat("side", "cloud-main", Some("main"));
+    core.workspace
+        .create_delegated_chat(
+            "delegate",
+            None,
+            Some("cloud-delegate"),
+            None,
+            Some("/home/user/app".into()),
+            zeron_proto::Delegation {
+                delegated_by_chat_id: "main".into(),
+                depth: 1,
+                anchor: "task".into(),
+                client_request_id: None,
+                owner_turn_started_at: None,
+                wake: zeron_proto::DelegationWake::Always,
+                status: zeron_proto::DelegationStatus::Running,
+                cancel_requested: false,
+                delivery: None,
+                summary: None,
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+                finding_outcomes: Default::default(),
+                findings_handed: Default::default(),
+                findings_announced: Default::default(),
+                route: None,
+            },
+        )
+        .unwrap();
+    core.workspace
+        .create_child_chat(
+            "side",
+            None,
+            Some("cloud-main"),
+            None,
+            Some("/home/user/app".into()),
+            Some("main"),
+            Some(zeron_proto::ChildKind::Side),
+        )
+        .unwrap();
+    chat("thread", "cloud-thread", Some("main"));
     chat("other", "cloud-other", None);
     let client = memory_client(core.rpc_service());
     let _: serde_json::Value = client
@@ -78,5 +115,9 @@ async fn deleting_a_cloud_chat_deletes_its_cloud_children() {
     for gone in ["main", "delegate", "side"] {
         assert!(core.workspace.chat(gone).unwrap().is_none(), "{gone} survived");
     }
+    assert!(
+        core.workspace.chat("thread").unwrap().is_some(),
+        "a thread its agent opened is the person's to keep"
+    );
     assert!(core.workspace.chat("other").unwrap().is_some(), "another main chat is untouched");
 }
