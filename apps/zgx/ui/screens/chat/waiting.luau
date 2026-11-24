@@ -518,11 +518,12 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 		for _, item in items:get() do
 			shown[item.key] = item
 		end
+		local here = props.elsewhere_of()
 		local now: { [string]: boolean } = {}
 		local came: any = nil
 		for _, item in list:get() do
 			now[item.key] = true
-			if not known[item.key] and shown[item.key] and not came then
+			if not known[item.key] and shown[item.key] and item.chat ~= here and not came then
 				came = item
 			end
 		end

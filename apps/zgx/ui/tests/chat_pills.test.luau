@@ -194,6 +194,7 @@ test("an answer goes to the chat that asked and leaves you where you are", funct
 	app:set_state("test_waiting", { asking("other", "Other chat"), asking("third", "Third chat") })
 	pop(app)
 	expect(app:text("#pills-waiting-count")).to_be("2")
+	expect(app:text("#pills-waiting-words")).to_be("questions waiting")
 	local route_before = app:state("test_route_session")
 	app:click("#pills-waiting")
 	pop(app)
