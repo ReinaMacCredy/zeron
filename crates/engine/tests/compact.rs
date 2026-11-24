@@ -862,8 +862,19 @@ async fn a_stopped_auto_continue_keeps_its_caption() {
     core.doc_host
         .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .expect("stop");
+    wait_for(|| !core.sessions.turn_in_flight(CHAT), "the turn stops").await;
 
-    wait_for(|| entries(&core).iter().any(|e| e.id == row), "the cancelled row's entry").await;
+    let queued = core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap();
+    assert_eq!(
+        queued.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        [row.as_str()],
+        "the Stop holds it in the queue"
+    );
+    assert_eq!(queued[0].from_chat_id.as_deref(), Some(CHAT));
+    assert!(!entries(&core).iter().any(|e| e.id == row), "not in the transcript unrun");
+
+    assert!(core.doc_host.send_queued_now(CHAT, &row).await.expect("send it now"));
+    wait_for(|| entries(&core).iter().any(|e| e.id == row), "the sent row's entry").await;
     let entry = entries(&core).into_iter().find(|e| e.id == row).unwrap();
     assert_eq!(entry.from_chat_id.as_deref(), Some(CHAT));
 }

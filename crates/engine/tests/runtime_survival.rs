@@ -570,11 +570,11 @@ async fn a_send_held_for_the_turn_end_runs_as_sent_without_a_ping() {
     rig.core.sessions.shutdown().await;
 }
 
-/// A Stop cancels what was sent during the turn it stops: a send held for
-/// that turn's end never runs — not even after the user's next message
-/// thaws the queue.
+/// A Stop holds back what was sent during the turn it stops: a send held
+/// for that turn's end stays in the paused queue, unrun, and goes out only
+/// after the user's next message thaws it.
 #[tokio::test]
-async fn stop_cancels_sends_held_for_the_stopped_turn() {
+async fn stop_holds_sends_held_for_the_stopped_turn() {
     let rig = rig_full(false, true);
     rig.core
         .sessions
@@ -606,11 +606,16 @@ async fn stop_cancels_sends_held_for_the_stopped_turn() {
         .queue_command(CHAT, SessionCommandPayload::Interrupt { teardown: false })
         .unwrap();
     wait_for(
-        || status(&rig.core) == Some(SessionStatus::Idle) && queued(&rig).is_empty(),
-        "the stop to cancel the held send",
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "the stop to end the turn",
     )
     .await;
     assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0, "no teardown");
+    assert_eq!(
+        queued(&rig),
+        ["held before the stop"],
+        "the Stop holds it in the queue"
+    );
     rig.core
         .doc_host
         .queue_command(
@@ -628,21 +633,23 @@ async fn stop_cancels_sends_held_for_the_stopped_turn() {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|(p, _)| p == "after the stop")
+                .any(|(p, _)| p.contains("held before the stop"))
         },
-        "the next message to run",
+        "the held send to follow the next message",
     )
     .await;
-    settle(&rig, 2).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !rig.ledger
-            .prompts
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(p, _)| p.contains("held before the stop")),
-        "a send held for the stopped turn ran after the Stop"
+    let prompts: Vec<String> = rig
+        .ledger
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.clone())
+        .collect();
+    assert_eq!(
+        prompts,
+        ["wait: first", "after the stop", "held before the stop"],
+        "the held send waited for the next message"
     );
     rig.core.sessions.shutdown().await;
 }
