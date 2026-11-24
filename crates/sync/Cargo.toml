@@ -10,7 +10,6 @@ zeron-doc.workspace = true
 loro.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
-loro-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
