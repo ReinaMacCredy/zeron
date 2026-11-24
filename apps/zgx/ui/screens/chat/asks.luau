@@ -16,6 +16,7 @@
 -- for, and its chat).
 
 local store = require("@app/screens/chat/store")
+local shared = require("@app/screens/chat/shared")
 local queued = require("@app/screens/chat/queued")
 local Dock = require("@ds/composer_dock")
 local Carried = require("@app/screens/chat/carried")
@@ -190,6 +191,21 @@ function M.bind(b: Bind): { [string]: any }
 	local approval = ui.computed(function(): any
 		local a = ask:get()
 		return if a and a.kind == "approval" then a.approval else nil
+	end)
+	-- A question has the composer for its answer: the draft written so far
+	-- is set aside as it's asked, and back once it's answered or gone
+	-- (shared.set_aside), so what was typed before it isn't its answer.
+	ui.effect(function()
+		local s, id = b.session(), b.id()
+		local asked = question:get() ~= nil
+		if not (s and id) or (s.id ~= nil and s.id ~= id) then
+			return
+		end
+		if asked then
+			shared.set_aside(id)
+		else
+			shared.put_back(id)
+		end
 	end)
 	-- (Fresh for another question of the same chat: moving to another
 	-- chat brings its own picks with its draft, screens/chat/shared.)

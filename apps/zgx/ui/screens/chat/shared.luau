@@ -194,6 +194,8 @@ end)
 -- the key of the one shown.
 local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
 local here = ui.shared("chat.composer.here", "")
+-- A chat's words set aside while it's asked a question (`set_aside`).
+local aside = ui.shared("chat.composer.aside", {} :: { [string]: string })
 
 local function cargo_in(key: string): { any }
 	if here:peek() == key then
@@ -430,7 +432,8 @@ function M.show(key: string)
 	ui.batch(function()
 		local all = table.clone(kept:peek())
 		local text, cargo, quotes, chosen, refused = M.text:peek(), M.cargo:peek(), M.quotes:peek(), M.chosen:peek(), M.refused:peek()
-		if text ~= "" or #cargo > 0 or next(chosen) ~= nil or refused ~= nil then
+		-- (One whose words are set aside keeps what they quote.)
+		if text ~= "" or #cargo > 0 or next(chosen) ~= nil or refused ~= nil or aside:peek()[was] ~= nil then
 			all[was] = { text = text, cargo = cargo, quotes = quotes, chosen = chosen, refused = refused }
 		else
 			all[was] = nil
@@ -2244,6 +2247,36 @@ function M.set_draft_of(key: string, field: string, value: any)
 	d[field] = value
 	all[key] = d
 	kept:set(all)
+end
+
+-- A chat's draft while it is asked a question, by its id. The composer is
+-- the answer's then, so the words written before it are set aside as it's
+-- asked (`set_aside`) and back once it's answered or gone (`put_back`):
+-- never sent as its answer. (Its chips stay: an answer carries none.)
+function M.set_aside(key: string)
+	if aside:peek()[key] ~= nil then
+		return
+	end
+	local text = M.peek_text_of(key)
+	ui.batch(function()
+		aside:set_key({ key }, text)
+		if text ~= "" then
+			M.set_draft_of(key, "text", "")
+		end
+	end)
+end
+-- (Over an answer left unsent, as the draft was there first.)
+function M.put_back(key: string)
+	local text = aside:peek()[key]
+	if text == nil then
+		return
+	end
+	ui.batch(function()
+		aside:set_key({ key }, nil)
+		if text ~= "" then
+			M.set_draft_of(key, "text", text)
+		end
+	end)
 end
 
 -- A chip taken off chat `key`'s draft, wherever the draft is.

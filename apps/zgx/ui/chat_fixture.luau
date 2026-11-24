@@ -857,6 +857,8 @@ stub.answer = function(id: string, request: string, answer: any?): any
 	local a = answer or {}
 	note(`answered:{id}:{request}:{table.concat(a.values or {}, "+")}:{a.note or ""}:{a.text or ""}`)
 	if not INLINE[request] then
+		-- (A question answered is gone.)
+		publish(id, { ask = ui.null })
 		return settled(nil)
 	end
 	local function land()
