@@ -1,5 +1,9 @@
 pub const IMAGES: &[(&str, &[u8])] = &[
     (
+        "visuals-in-reply.jpg",
+        include_bytes!("../../../assets/whats_new/visuals-in-reply.jpg"),
+    ),
+    (
         "agent-secret-card.jpg",
         include_bytes!("../../../assets/whats_new/agent-secret-card.jpg"),
     ),

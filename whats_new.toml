@@ -4,6 +4,7 @@
 [[entry]]
 version = "0.3.18"
 date = "Nov 24"
+hero = "visuals-in-reply.jpg"
 
 [[entry.features]]
 id = "bots"
