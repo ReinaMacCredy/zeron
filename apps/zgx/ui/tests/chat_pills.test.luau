@@ -164,31 +164,6 @@ local function asking(chat: string, title: string): any
 	}
 end
 
-test("the waiting pill says what waits, and one that comes opens it out with who asks and what", function()
-	local app = opened()
-	app:set_state("test_waiting", { asking("other", "Other chat") })
-	pop(app, 40)
-	expect(app:text("#pills-waiting-words")).to_be("question waiting")
-	expect(app:tree("#pills-waiting-fresh")).to_contain("Other chat")
-	expect(app:tree("#pills-waiting-fresh")).to_contain("asks:")
-	expect(app:tree("#pills-waiting-fresh")).to_contain("Where, Other chat?")
-	app:click("#pills-waiting")
-	pop(app)
-	expect(app:has("#pills-waiting-fresh")).to_be(false)
-	app:click("#pills-waiting")
-	gone(app)
-	local approval = asking("third", "Third chat")
-	approval.ask = { request = "r1", kind = "approval", approval = { title = "Run this command?", command = "ls" } }
-	app:set_state("test_waiting", { approval, asking("other", "Other chat") })
-	pop(app, 40)
-	expect(app:text("#pills-waiting-count")).to_be("2")
-	expect(app:text("#pills-waiting-words")).to_be("waiting for you")
-	expect(app:tree("#pills-waiting-fresh")).to_contain("needs approval:")
-	app:set_state("test_waiting", { approval })
-	pop(app)
-	expect(app:text("#pills-waiting-words")).to_be("approval waiting")
-end)
-
 test("an answer goes to the chat that asked and leaves you where you are", function()
 	local app = opened()
 	app:set_state("test_waiting", { asking("other", "Other chat"), asking("third", "Third chat") })

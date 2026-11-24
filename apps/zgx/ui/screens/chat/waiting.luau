@@ -9,7 +9,6 @@ local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local store = require("@app/screens/chat/store")
 local shared = require("@app/screens/chat/shared")
-local motion = require("@ds/motion")
 
 local M = {}
 
@@ -452,39 +451,6 @@ local Card = ui.component(function(props: { items: any, on_close: () -> () }): N
 	}
 end)
 
-local function kind_of(item: any): string
-	if item.kind == "plan" or item.kind == "plan_approval" then
-		return "plan"
-	end
-	return if item.ask and item.ask.kind == "approval" then "approval" else "question"
-end
-
-local function waiting_words(items: { any }): string
-	local kind: string? = nil
-	for _, item in items do
-		local k = kind_of(item)
-		if kind and kind ~= k then
-			return locale.s("ds.pills.waiting_mixed")
-		end
-		kind = k
-	end
-	return locale.s(`ds.pills.waiting_{kind or "question"}`, { n = #items })
-end
-
-local function fresh_words(item: any): string
-	local kind = kind_of(item)
-	if kind == "plan" then
-		return item.steps[1] or locale.s("ds.pills.approve_plan")
-	end
-	if kind == "approval" then
-		return item.ask.approval.title or ""
-	end
-	return (item.ask.question or {}).text or ""
-end
-
-local FRESH_MS, FRESH_W = 4000, 640
-local known: { [string]: boolean } = {}
-
 function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> string? }): Node
 	local items = ui.computed(function(): { any }
 		return M.visible(props.elsewhere_of())
@@ -499,71 +465,9 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 			props.open:set(true)
 		end
 	end)
-	local fresh = ui.use_state(nil :: any)
-	local alive = ui.use_state(false)
-	local wide = ui.use_state(false)
-	local turn = 0
-	local function fold()
-		turn += 1
-		local mine = turn
-		wide:set(false)
-		ui.after(260, function()
-			if mine == turn then
-				alive:set(false)
-			end
-		end)
-	end
-	ui.effect(function()
-		local shown: { [string]: any } = {}
-		for _, item in items:get() do
-			shown[item.key] = item
-		end
-		local now: { [string]: boolean } = {}
-		local came: any = nil
-		for _, item in list:get() do
-			now[item.key] = true
-			if not known[item.key] and shown[item.key] and not came then
-				came = item
-			end
-		end
-		known = now
-		if not came or props.open:peek() then
-			return
-		end
-		turn += 1
-		local mine = turn
-		fresh:set(came)
-		alive:set(true)
-		ui.after(0, function()
-			if mine == turn then
-				wide:set(true)
-			end
-		end)
-		ui.after(FRESH_MS, function()
-			if mine == turn then
-				fold()
-			end
-		end)
-	end)
-	ui.effect(function()
-		if props.open:get() and alive:peek() then
-			turn += 1
-			wide:set(false)
-			alive:set(false)
-		end
-	end)
-	local quick = motion.reduced_now()
-	local function of_fresh(read: (any) -> string): () -> string
-		return function(): string
-			local item = fresh:get()
-			return if item then read(item) else ""
-		end
-	end
 	local pill = P.Pill {
 		id = "pills-waiting",
 		class = "pills-pill",
-		shrink = 1,
-		min_w = 0,
 		label = function(): string
 			return locale.s("ds.pills.waiting_label", { n = #items:get() })
 		end,
@@ -576,37 +480,11 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 		on_click = function()
 			props.open:set(not props.open:peek())
 		end,
-		ui.div { mr = ui.raw(4, "background.rs pill_leading"), shrink = 0, color = "$warning", Icon { name = "clock-circle", size = 14 } },
+		ui.div { mr = ui.raw(4, "background.rs pill_leading"), color = "$warning", Icon { name = "clock-circle", size = 14 } },
 		ui.text { function(): string
 			return tostring(#items:get())
-		end, id = "pills-waiting-count", shrink = 0, weight = "$font.weight.semibold", color = "$warning", tabular = true, wrap = false },
-		ui.text { function(): string
-			return waiting_words(items:get())
-		end, id = "pills-waiting-words", literal = true, shrink = 0, color = "$warning", wrap = false },
-		ui.show(function(): boolean
-			return alive:get()
-		end, ui.row {
-			id = "pills-waiting-fresh",
-			items = "center",
-			gap = ui.raw(4, "background.rs pill_frame"),
-			min_w = 0,
-			shrink = 1,
-			overflow = "hidden",
-			max_w = ui.tween(ui.computed(function(): number
-				return if wide:get() then FRESH_W else 0
-			end), { duration = if quick then 1 else 240, ease = "out(3)" }),
-			opacity = ui.tween(ui.computed(function(): number
-				return if wide:get() then 1 else 0
-			end), { duration = if quick then 120 else 150 }),
-			ui.div { w = 1, h = 12, mx = ui.raw(4, "the mockup's rule"), shrink = 0, bg = "$border.strong" },
-			ui.text { of_fresh(function(item: any): string
-				return item.title or locale.s("ds.pills.untitled")
-			end), literal = true, wrap = false, truncate = true, min_w = 0, max_w = ui.raw(220, "the mockup's asker"), shrink = 0, weight = "$font.weight.medium", color = "$text.primary" },
-			ui.text { of_fresh(function(item: any): string
-				return locale.s(`ds.pills.fresh_{kind_of(item)}`)
-			end), literal = true, wrap = false, shrink = 0, color = "$text.secondary" },
-			ui.text { of_fresh(fresh_words), literal = true, wrap = false, truncate = true, min_w = 0, max_w = ui.raw(400, "the mockup's question"), shrink = 1, color = "$text.secondary" },
-		}),
+		end, id = "pills-waiting-count", weight = "$font.weight.semibold", color = "$warning", tabular = true, wrap = false },
+		ui.text { locale.t("ds.pills.waiting"), color = "$warning", wrap = false },
 		ui.show(function(): boolean
 			local here = props.elsewhere_of()
 			for _, it in items:get() do
@@ -642,7 +520,7 @@ function M.Pill(props: { open: any, width: () -> number, elsewhere_of: () -> str
 				end)
 			end,
 		})
-	end, { enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 150 }, exit = { opacity = 0, duration = 120 }, shrink = 1, min_w = 0 })
+	end, { enter = { opacity = { 0, 1 }, y = { 4, 0 }, duration = 150 }, exit = { opacity = 0, duration = 120 }, shrink = 0 })
 end
 
 return M
