@@ -52,8 +52,14 @@ pub struct Official {
 
 /// Every official template, in the order the Templates page lists them
 /// (after the default).
-pub const OFFICIAL: &[Official] =
-    &[Official { id: "zeron-v2", name: "Zeron v2", description: "The single-page layout from before Zeron v3." }];
+pub const OFFICIAL: &[Official] = &[
+    Official { id: "zeron-v2", name: "Zeron v2", description: "The single-page layout from before Zeron v3." },
+    Official {
+        id: "zeron-bot",
+        name: "Zeron Bot",
+        description: "Bots first: your Bots, what needs you, and sessions by folder.",
+    },
+];
 
 /// The default template's name and description (its id is `live::BUILTIN`).
 pub const DEFAULT_NAME: &str = "Zeron v3";
@@ -391,6 +397,45 @@ mod tests {
         assert!(ui().join("screens/shell/split.luau").is_file());
     }
 
+    const BOT: Official = OFFICIAL[1];
+
+    /// Zeron Bot's staleness guard, as v2's: the default files it lays a copy
+    /// over, hashed as they were when it was last brought in step. Record it
+    /// with `ZERON_BOT_BLESS=1 cargo test --bin zeron-zgx zeron_bot_is_in_step`.
+    #[test]
+    fn zeron_bot_is_in_step_with_the_default() {
+        let src = source(&ui(), &BOT);
+        let base_path = src.join(BASE);
+        let base: BTreeMap<String, String> = serde_json::from_slice(&std::fs::read(&base_path).unwrap_or_default()).unwrap_or_default();
+        let now: BTreeMap<String, String> = live::files(&src, |_| true)
+            .into_keys()
+            .map(|rel| {
+                let bytes = std::fs::read(ui().join(&rel)).unwrap_or_default();
+                let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+                (rel, live::hash(text.as_bytes()))
+            })
+            .collect();
+        if std::env::var_os("ZERON_BOT_BLESS").is_some() {
+            let mut json = serde_json::to_vec_pretty(&now).unwrap();
+            json.push(b'\n');
+            std::fs::write(&base_path, json).unwrap();
+            return;
+        }
+        assert_eq!(base, now, "The default changed under Zeron Bot's copies (ui/templates/zeron-bot/); bring it over, then ZERON_BOT_BLESS=1");
+    }
+
+    /// Zeron Bot swaps the sessions sidebar for the Bots one and keeps the rest.
+    #[test]
+    fn zeron_bot_mounts_the_bots_sidebar() {
+        let files: Vec<String> = live::files(&source(&ui(), &BOT), |_| true).into_keys().collect();
+        assert_eq!(files, ["ds/tokens.luau", "screens/shell/bots.luau", "screens/shell/init.luau", "theme.luau"], "Zeron Bot's files");
+        let shell = std::fs::read_to_string(source(&ui(), &BOT).join("screens/shell/init.luau")).unwrap();
+        assert!(shell.contains("\"@app/screens/shell/bots\""));
+        for rel in &files {
+            assert!(!live::never_templated(rel), "{rel}");
+        }
+    }
+
     #[test]
     fn zeron_v2_installs_as_zeron_s_and_never_over_yours() {
         let t = dir("install");
@@ -398,7 +443,7 @@ mod tests {
         write(&t, "zeron-v2/zeron-template.json", r#"{"name":"My v2","author":"you"}"#);
         write(&t, "zeron-v2/screens/shell/page.luau", "-- mine");
         let ids = install(&ui(), &t);
-        assert_eq!(ids, ["zeron-v2-2"]);
+        assert_eq!(ids, ["zeron-v2-2", "zeron-bot"]);
         assert_eq!(std::fs::read_to_string(t.join("zeron-v2/screens/shell/page.luau")).unwrap(), "-- mine", "yours, untouched");
         assert!(verified_at(&ui(), &t.join("zeron-v2")).is_none());
         let at = t.join("zeron-v2-2");
@@ -439,7 +484,7 @@ mod tests {
         assert!(!missing(&ui(), &gone));
         std::fs::remove_dir_all(gone.join("zeron-v2")).unwrap();
         assert!(missing(&ui(), &gone));
-        assert_eq!(install(&ui(), &t), ["zeron-v2-3"]);
+        assert_eq!(install(&ui(), &t), ["zeron-v2-3", "zeron-bot"]);
         assert_eq!(std::fs::read_to_string(at.join("screens/extra.luau")).unwrap(), "-- an agent's");
     }
 
@@ -480,7 +525,7 @@ mod tests {
         std::fs::remove_file(t.join("zeron-v2/.imported.json")).unwrap();
         write(&t, ".zeron/zeron-template.json", r#"{"name":"Zeron v3","author":"Zeron"}"#);
         let listed = live::installed(&t);
-        assert_eq!(listed.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), [live::BUILTIN, "zeron-v2", "my-v2"], "the default, Zeron's, then the rest");
+        assert_eq!(listed.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), [live::BUILTIN, "zeron-v2", "zeron-bot", "my-v2"], "the default, Zeron's, then the rest");
         assert_eq!(listed[1].official, Some(V2));
     }
 }

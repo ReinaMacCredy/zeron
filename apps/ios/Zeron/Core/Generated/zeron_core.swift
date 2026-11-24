@@ -1786,6 +1786,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func assignTask(taskId: String, chatId: String, send: Bool) async throws 
     
+    /**
+     * A Bot's memory, Inbox, board or schedules (`method`: `BotMemory`,
+     * `BotInbox`, `BotBoard`, `BotSchedule`), its params and answer as JSON.
+     */
+    func botCallJson(deviceId: String, method: String, paramsJson: String) async throws  -> String
+    
     func createTask(deviceId: String, draft: TaskDraft) async throws  -> String
     
     func deleteTask(taskId: String) async throws 
@@ -3902,6 +3908,26 @@ open func assignTask(taskId: String, chatId: String, send: Bool)async throws   {
             completeFunc: ffi_zeron_mobile_rust_future_complete_void,
             freeFunc: ffi_zeron_mobile_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * A Bot's memory, Inbox, board or schedules (`method`: `BotMemory`,
+     * `BotInbox`, `BotBoard`, `BotSchedule`), its params and answer as JSON.
+     */
+open func botCallJson(deviceId: String, method: String, paramsJson: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_bot_call_json(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(method),FfiConverterString.lower(paramsJson)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -40248,6 +40274,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_assign_task() != 21718) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_bot_call_json() != 4818) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_create_task() != 33272) {

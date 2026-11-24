@@ -34,6 +34,7 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcClient, methods};
 
+mod bots;
 mod docs;
 mod plugins;
 mod themes;
@@ -104,6 +105,7 @@ pub fn tool_list() -> Value {
         }
         list.extend(plugins::tools());
         list.extend(themes::tools());
+        list.extend(bots::tools());
     }
     tools
 }
@@ -979,6 +981,7 @@ impl ThreadTools {
             themes::UPDATE_THEME => self.theme(methods::UPDATE_THEME, args).await,
             themes::DELETE_THEME => self.theme(methods::DELETE_THEME, args).await,
             themes::USE_THEME => self.theme(methods::USE_THEME, args).await,
+            bots::BOT_MEMORY | bots::BOT_INBOX | bots::BOT_BOARD | bots::BOT_SCHEDULE => self.bot_files(name, args).await,
             plugin if plugins::is_plugin_tool_name(plugin) => {
                 self.call_plugin_tool(plugin, args).await
             }
@@ -3883,14 +3886,17 @@ async fn respond(request: &Value, tools: &ThreadTools) -> Option<Value> {
     }
     let id = request.get("id").filter(|id| !id.is_null())?.clone();
     Some(match request["method"].as_str().unwrap_or("") {
-        "initialize" => ok(
-            id,
-            json!({
+        "initialize" => {
+            let mut reply = json!({
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION),
                 "capabilities": { "tools": { "listChanged": true } },
                 "serverInfo": { "name": "zeron", "version": env!("CARGO_PKG_VERSION") },
-            }),
-        ),
+            });
+            if let Some(said) = tools.bot_instructions().await {
+                reply["instructions"] = json!(said);
+            }
+            ok(id, reply)
+        }
         "ping" => ok(id, json!({})),
         "tools/list" => ok(id, json!({ "tools": tools.tools().await })),
         "tools/call" => {
@@ -4117,7 +4123,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 53] = [
+    const THREAD_TOOLS: [&str; 57] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -4171,6 +4177,10 @@ mod tests {
         "update_theme",
         "delete_theme",
         "use_theme",
+        "bot_memory",
+        "bot_inbox",
+        "bot_board",
+        "bot_schedule",
     ];
 
     fn chat(id: &str, space: Option<&str>, archived: bool, created_by: Option<&str>) -> Value {
@@ -4611,6 +4621,9 @@ mod tests {
                         .push((method.to_string(), params.clone()));
                     Ok(RpcReply::Value(json!({ "profiles": [] })))
                 }
+                methods::BOT_MEMORY if params["botId"] == "bot" => Ok(RpcReply::Value(json!({ "content": "# Memory\n- Skip vendored code." }))),
+                methods::BOT_INBOX if params["botId"] == "bot" => Ok(RpcReply::Value(json!({ "items": [{ "id": "c1", "kind": "review", "urgency": "important", "title": "Review the dead-code PR" }] }))),
+                methods::BOT_MEMORY | methods::BOT_INBOX => Ok(RpcReply::Value(json!({}))),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -4727,6 +4740,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_bot_starts_told_its_memory_and_open_cards() {
+        let fake = Arc::new(fixture());
+        let bot = ThreadTools::new(memory_client(fake.clone()), "bot").with_run_secret(None);
+        let said = bot.bot_instructions().await.unwrap();
+        assert!(said.contains("Skip vendored code."), "{said}");
+        assert!(said.contains("c1 (review, important): Review the dead-code PR"), "{said}");
+        let plain = ThreadTools::new(memory_client(fake), "a").with_run_secret(None);
+        assert!(plain.bot_instructions().await.is_none(), "a chat with no memory nor cards is told nothing");
     }
 
     #[tokio::test]

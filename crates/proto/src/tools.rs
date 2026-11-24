@@ -186,6 +186,22 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "Request interruption of an active delegated task.",
                 "delegate_task",
             ),
+            tool(
+                "bot_memory",
+                "Read and write a Bot's memory notes, kept between its conversations.",
+            ),
+            tool(
+                "bot_inbox",
+                "File, update and close the cards for what only the Bot's owner can do.",
+            ),
+            tool(
+                "bot_board",
+                "Claim a Bot's tasks and set their status, folder and note.",
+            ),
+            tool(
+                "bot_schedule",
+                "Keep a Bot's schedules and promises, fired by the engine when due.",
+            ),
         ],
     },
     ToolGroupInfo {

@@ -1148,6 +1148,11 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_host_page(uint64_t ptr, RustBu
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_assign_task(uint64_t ptr, RustBuffer task_id, RustBuffer chat_id, int8_t send
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_BOT_CALL_JSON
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_BOT_CALL_JSON
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_bot_call_json(uint64_t ptr, RustBuffer device_id, RustBuffer method, RustBuffer params_json
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CREATE_TASK
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_CREATE_TASK
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_create_task(uint64_t ptr, RustBuffer device_id, RustBuffer draft
@@ -4378,6 +4383,12 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_host_page(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_ASSIGN_TASK
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_ASSIGN_TASK
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_assign_task(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_BOT_CALL_JSON
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_BOT_CALL_JSON
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_bot_call_json(void
     
 );
 #endif

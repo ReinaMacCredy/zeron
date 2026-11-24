@@ -27,6 +27,9 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
         let tasks = UITab(title: "Tasks", image: UIImage(named: "tab-tasks"), identifier: "tasks") { [app] _ in
             Self.nav(TasksViewController(app: app))
         }
+        let bots = UITab(title: "Bots", image: UIImage(systemName: "person.2"), identifier: "bots") { [app] _ in
+            Self.nav(BotsViewController(app: app))
+        }
         let more = UITab(title: "Settings", image: UIImage(named: "tab-settings"), identifier: "more") { [app] _ in
             Self.nav(MoreViewController(app: app))
         }
@@ -34,7 +37,7 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, U
             Self.nav(SearchViewController(app: app))
         }
         search.automaticallyActivatesSearch = true
-        tabs = [sessions, tasks, more, search]
+        tabs = [sessions, bots, tasks, more, search]
         updateTasksBadge()
         selectedTab = sessions
         if let settings = more.viewController {
