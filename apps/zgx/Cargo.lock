@@ -8132,7 +8132,6 @@ dependencies = [
 name = "zeron-rpc"
 version = "0.3.4"
 dependencies = [
- "anyhow",
  "async-trait",
  "futures",
  "getrandom 0.4.3",
