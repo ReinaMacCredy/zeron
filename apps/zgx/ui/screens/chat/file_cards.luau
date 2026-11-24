@@ -58,33 +58,61 @@ local function ask(where: files.Target, scope: string, path: string)
 	end)
 end
 
+local function probe(where: files.Target, scope: string, path: string)
+	local key = `{scope}\0{path}`
+	if asking[key] then
+		return
+	end
+	asking[key] = { path }
+	local function settled(f: FileCard.File | false)
+		asking[key] = nil
+		if not f then
+			missed[key] = ui.now()
+		end
+		known:set_key(key, f)
+	end
+	files.read(where, path):after(function(r: any)
+		local file = type(r) == "table" and r.readonly ~= "notRegularFile"
+		settled(if file then { path = path, name = base_name(path), size = r.size, outside = true } else false)
+	end, function()
+		settled(false)
+	end)
+end
+
 return function(session: () -> any?): FileCard.Files
-	local function place(target: string): (files.Target?, string, string)
+	local function place(target: string): (files.Target?, string, string, boolean)
 		local s = session()
 		local cwd = if s then s.cwd else nil
 		local r = if s and cwd then FileLinks.resolve(target, cwd) else nil
-		if not (s and cwd and r) or r.outside then
-			return nil, "", ""
+		if not (s and cwd and r) then
+			return nil, "", "", false
 		end
-		return { chat = s.id, device = s.device, root = cwd }, r.path, `{s.id}\0{cwd}`
+		return { chat = s.id, device = s.device, root = cwd }, r.path, `{s.id}\0{cwd}`, r.outside == true
+	end
+	local function look(where: files.Target, scope: string, path: string, outside: boolean)
+		if outside then
+			probe(where, scope, path)
+		else
+			ask(where, scope, path)
+		end
 	end
 	return {
 		find = function(target: string): FileCard.File | false | nil
-			local where, path, scope = place(target)
+			local where, path, scope, outside = place(target)
 			if not where then
 				return false
 			end
 			local key = `{scope}\0{path}`
 			local f = known:get()[key]
 			if f == nil or (f == false and ui.now() - (missed[key] or 0) > STALE_MS) then
-				ask(where, scope, path)
+				look(where, scope, path, outside)
 			end
 			return f
 		end,
 		check = function(target: string)
-			local where, path, scope = place(target)
+			local where, path, scope, outside = place(target)
 			if where then
-				ask(where, scope, path)
+				look(where, scope, path, outside)
 			end
 		end,
 		read = function(target: string): any
@@ -99,8 +127,8 @@ return function(session: () -> any?): FileCard.Files
 			return files.read(where, path)
 		end,
 		reveal = function(target: string)
-			local where, path = place(target)
-			if not where then
+			local where, path, _, outside = place(target)
+			if not where or outside then
 				return
 			end
 			files.reveal(where, path):after(function() end, function()

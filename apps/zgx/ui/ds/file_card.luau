@@ -8,7 +8,7 @@ local locale = require("@self/locale")
 
 local M = {}
 
-export type File = { path: string, name: string, size: number? }
+export type File = { path: string, name: string, size: number?, outside: boolean? }
 export type Files = {
 	find: (target: string) -> File | false | nil,
 	check: (target: string) -> (),
@@ -172,7 +172,7 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 	local function body(): Node
 		if picture then
 			local pictures = props.row.pictures
-			if not pictures or pictures.resolve(file.path) == nil then
+			if file.outside or not pictures or pictures.resolve(file.path) == nil then
 				return quiet(locale.s("ds.file_card.more_in_panel"))
 			end
 			local entry = { src = file.path, alt = file.name }
@@ -249,7 +249,9 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 						locale.t("ds.file_card.open_in_panel"),
 					}
 					else nil,
-				ui.show(files.here, Button {
+				ui.show(function(): boolean
+					return not file.outside and files.here()
+				end, Button {
 					tone = "ghost",
 					size = "xs",
 					class = "md-file-reveal",
