@@ -157,6 +157,10 @@ impl ChatRelayState {
         self.caught_up.load(Ordering::Acquire)
     }
 
+    pub(super) fn heal_settled(&self) -> bool {
+        !self.heal_owed.load(Ordering::Acquire) && self.healed.load(Ordering::Acquire)
+    }
+
     /// The room refused a checkpoint. Too big won't change by retrying. Stale means
     /// the room holds something this doc doesn't: read it before posting again.
     pub(super) fn checkpoint_refused(&self, status: u16, body: &str, handle: Option<&ChatDocHandle>) {
@@ -1436,6 +1440,10 @@ mod tests {
         *lock(&handle.relay) = Some(state.clone());
         host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
         settle("the heal", || state.healed.load(Ordering::Acquire)).await;
+        assert_eq!(uploads.load(Ordering::SeqCst), 1);
+        settle("the in-flight flag", || !handle.checkpointing.load(Ordering::Acquire)).await;
+        host.spawn_chat2_checkpoint(&handle, HEAL_REASON);
+        settle("the in-flight flag", || !handle.checkpointing.load(Ordering::Acquire)).await;
         assert_eq!(uploads.load(Ordering::SeqCst), 1);
         // The next heal goes straight to the upload.
         state.healed.store(false, Ordering::Release);

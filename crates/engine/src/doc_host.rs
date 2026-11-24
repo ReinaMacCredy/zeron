@@ -4193,6 +4193,10 @@ impl DocHost {
         let reset = ResetFlag(in_flight);
         self.spawn_worker(async move {
             let _reset = reset;
+            // Asked for while another heal was in flight, which may have landed it.
+            if reason == relay::HEAL_REASON && relay_state.as_ref().is_some_and(|state| state.heal_settled()) {
+                return;
+            }
             // A heal the room's stored checkpoint already covers needs no upload: a
             // host back from a legacy hold that relayed nothing since its last
             // checkpoint would otherwise send the whole chat again for each old reader.
