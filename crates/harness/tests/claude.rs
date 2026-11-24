@@ -2841,3 +2841,58 @@ async fn live_unrestorable_session_relaunches_fresh() {
     )));
     assert_eq!(done(&events).0, DoneStatus::Errored);
 }
+
+#[tokio::test]
+#[ignore = "spawns the real claude CLI"]
+async fn live_code_mode_session_keeps_its_mode_on_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+    let turn = |code_mode: bool, resume: Option<String>| {
+        let mut req =
+            request("Run `wc -l a.txt`, then create b.txt holding that number. Use your tools.");
+        req.cwd = dir.path().to_string_lossy().into_owned();
+        req.model = Some("claude-haiku-5-5".into());
+        req.code_mode = code_mode;
+        req.resume = resume;
+        async move {
+            // Held: a closed steering channel closes the CLI's stdin, and with it the permission answers.
+            let (controls, _steer, _token) = controls("A");
+            let mut stream = ClaudeHarness::new()
+                .run(req, controls)
+                .await
+                .expect("run starts");
+            let mut events = Vec::new();
+            while let Some(event) = tokio::time::timeout(Duration::from_secs(120), stream.next())
+                .await
+                .expect("event in time")
+            {
+                let event = event.expect("stream event");
+                let done = matches!(event, AgentEvent::Done { .. });
+                events.push(event);
+                if done {
+                    break;
+                }
+            }
+            eprintln!("{events:#?}");
+            events
+        }
+    };
+    let scripted = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCall { id, .. } if id.starts_with("toolu_cc_")))
+    };
+    let first = turn(true, None).await;
+    assert!(scripted(&first));
+    assert!(dir.path().join("b.txt").exists());
+    let session = first
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("session started");
+    let resumed = turn(false, Some(session)).await;
+    assert!(scripted(&resumed));
+    assert_eq!(done(&resumed).0, DoneStatus::Completed);
+}

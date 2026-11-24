@@ -2334,29 +2334,31 @@ mod tests {
         test_slot(&registry, HarnessId::Codex, true);
         test_slot(&registry, HarnessId::Muse, true);
         test_slot(&registry, HarnessId::Opencode, true);
+        assert!(!registry.code_mode(HarnessId::ClaudeCode));
         assert!(!registry.code_mode(HarnessId::Codex));
         assert!(!registry.code_mode(HarnessId::Muse));
         assert_eq!(
             registry.code_mode_settings().supported,
-            vec![HarnessId::Codex, HarnessId::Muse]
+            vec![HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Muse]
         );
         assert!(registry.code_mode_settings().enabled.is_empty());
 
         // Unsupported harnesses are refused.
-        assert!(registry.set_code_mode(HarnessId::ClaudeCode, true).is_err());
         assert!(registry.set_code_mode(HarnessId::Opencode, true).is_err());
 
         registry.set_code_mode(HarnessId::Codex, true).unwrap();
         registry.set_code_mode(HarnessId::Codex, true).unwrap();
         registry.set_code_mode(HarnessId::Muse, true).unwrap();
+        registry.set_code_mode(HarnessId::ClaudeCode, true).unwrap();
         assert!(registry.code_mode(HarnessId::Codex));
         assert!(registry.code_mode(HarnessId::Muse));
+        assert!(registry.code_mode(HarnessId::ClaudeCode));
 
         let reloaded = HarnessRegistry::new();
         reloaded.load_prefs(dir.path());
         assert_eq!(
             reloaded.code_mode_settings().enabled,
-            vec![HarnessId::Codex, HarnessId::Muse]
+            vec![HarnessId::Codex, HarnessId::Muse, HarnessId::ClaudeCode]
         );
         assert!(reloaded.code_mode(HarnessId::Codex));
         assert!(reloaded.code_mode(HarnessId::Muse));
@@ -2366,8 +2368,8 @@ mod tests {
         assert!(reloaded.code_mode(HarnessId::Muse));
 
         // Only a harness that supports Code Mode ever runs with it.
-        *reloaded.prefs() = serde_json::from_str(r#"{"codeModeOn":["claude-code"]}"#).unwrap();
-        assert!(!reloaded.code_mode(HarnessId::ClaudeCode));
+        *reloaded.prefs() = serde_json::from_str(r#"{"codeModeOn":["opencode"]}"#).unwrap();
+        assert!(!reloaded.code_mode(HarnessId::Opencode));
         assert!(reloaded.code_mode_settings().enabled.is_empty());
     }
 }

@@ -1627,9 +1627,18 @@ local function file_refs(list: { MarkdownRun }, out: { FileCard.Item }, seen: { 
 				return false
 			end
 		else
-			for word in string.gmatch(r.x, "%S+") do
-				if not string.find(word, "[./]") or not add(word, word) then
-					return false
+			for line in string.gmatch(r.x, "[^\n]+") do
+				local whole = string.match(line, "^%s*(/.-)%s*$")
+				if whole and string.find(whole, "%s") and not string.find(whole, "%s/") and string.match(whole, "%.%w+$") then
+					if not add(whole, whole) then
+						return false
+					end
+				else
+					for word in string.gmatch(line, "%S+") do
+						if not string.find(word, "[./]") or not add(word, word) then
+							return false
+						end
+					end
 				end
 			end
 		end

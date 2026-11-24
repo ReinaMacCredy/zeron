@@ -24,12 +24,31 @@ local TEXT: { [string]: string } = {
 	["notes.txt"] = "one\ntwo\n",
 }
 local SIZES: { [string]: number } = { ["checkout-latency-report.md"] = 4100, ["checkout-latency.csv"] = 5200, ["chart.png"] = 81000, ["notes.txt"] = 8 }
+local OUTSIDE: { [string]: { size: number, text: string? } } = {
+	["/tmp/scratch/shot.png"] = { size = 52000 },
+	["/tmp/scratch/findings.md"] = { size = 21, text = "# Findings\n\nAll good.\n" },
+	["/tmp/scratch/page.html"] = { size = 54000, text = "<!doctype html>\n<title>Options</title>\n" },
+	["/tmp/scratch/My Notes/plan.md"] = { size = 12, text = "Plan: ship.\n" },
+}
 
-local function later(value: any): any
+-- (Answered from the script's own timer: one a reply's block started would go with that block's next run, as no host call does.)
+local due: { () -> () } = {}
+ui.every(30, function()
+	local now = due
+	due = {}
+	for _, answer in now do
+		answer()
+	end
+end)
+local function later(value: any, failed: boolean?): any
 	return {
-		after = function(_self: any, ok: (any) -> (), _err: any)
-			ui.after(30, function()
-				ok(value)
+		after = function(_self: any, ok: (any) -> (), err: (any) -> ())
+			table.insert(due, function()
+				if failed then
+					err(value)
+				else
+					ok(value)
+				end
 			end)
 		end,
 	}
@@ -50,6 +69,14 @@ files_stub.list = function(_target: any, dir: string): any
 	return later({ can_move = false, can_delete = false, truncated = false, entries = entries })
 end
 files_stub.read = function(_target: any, path: string): any
+	calls:push(`read:{path}`)
+	if string.sub(path, 1, 1) == "/" then
+		local f = OUTSIDE[path]
+		if not f or table.find(gone:peek(), path) then
+			return later("file not found", true)
+		end
+		return later({ path = path, text = f.text, size = f.size, encoding = if f.text then "utf8" else "binary", readonly = if f.text then "outsideWorkspace" else "binary", truncated = false })
+	end
 	return later({ path = path, text = TEXT[path], size = SIZES[path], encoding = "utf8", truncated = false })
 end
 files_stub.reveal = function(target: any, path: string): any
@@ -106,6 +133,9 @@ return ui.scroll {
 		end,
 		pictures = {
 			resolve = function(src: string): any
+				if string.sub(src, 1, 1) == "/" then
+					return { state = "failed", error = "Image is outside the chat's folder, or behind a link", path = src, here = true }
+				end
 				return if src == "chart.png" then { state = "ready", src = "assets/composer/shell.png", path = src, here = true } else nil
 			end,
 			fetch = function(_src: string) end,
