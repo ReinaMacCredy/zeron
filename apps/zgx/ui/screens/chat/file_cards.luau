@@ -79,7 +79,7 @@ local function probe(where: files.Target, scope: string, path: string)
 	end)
 end
 
-return function(session: () -> any?): FileCard.Files
+return function(session: () -> any?, shows: ((chat: string, path: string) -> boolean)?): FileCard.Files
 	local function place(target: string): (files.Target?, string, string, boolean)
 		local s = session()
 		local cwd = if s then s.cwd else nil
@@ -134,6 +134,14 @@ return function(session: () -> any?): FileCard.Files
 			files.reveal(where, path):after(function() end, function()
 				ds.toast.show { title = ui.t("files.workspace.not_revealed", { name = base_name(path) }), tone = "danger" }
 			end)
+		end,
+		shown = function(target: string): boolean
+			local where, path = place(target)
+			return where ~= nil and shows ~= nil and shows(where.chat :: string, path)
+		end,
+		root = function(): string?
+			local s = session()
+			return if s then s.cwd else nil
 		end,
 		here = function(): boolean
 			local s = session()

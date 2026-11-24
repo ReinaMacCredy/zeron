@@ -2,6 +2,7 @@ ui.theme.strict("warn")
 local ds = require("@ds")
 ds.setup()
 local Markdown = require("@ds/markdown")
+local Links = require("@ds/links")
 local files_stub = (require :: any)("@app/screens/files/api")
 local FileCards = require("@app/screens/chat/file_cards")
 
@@ -9,6 +10,7 @@ local calls = ui.state("test_calls", {} :: { string })
 local gone = ui.state("test_gone", {} :: { string })
 local live = ui.state("test_live", false)
 local extra = ui.state("test_extra", {} :: { string })
+local shown = ui.state("test_shown", "")
 
 local REPORT = { "# Checkout latency, week 47", "", "p95 rose from 180 ms to 240 ms on Wednesday." }
 for i = 4, 40 do
@@ -131,6 +133,17 @@ return ui.scroll {
 		open = function(target: string)
 			calls:push(`open:{target}`)
 		end,
+		link_menu = function(target: string): any
+			return Links.file {
+				open = function()
+					calls:push(`menu-open:{target}`)
+				end,
+				reveal = function()
+					calls:push(`menu-reveal:{target}`)
+				end,
+				path = target,
+			}
+		end,
 		pictures = {
 			resolve = function(src: string): any
 				if string.sub(src, 1, 1) == "/" then
@@ -142,6 +155,8 @@ return ui.scroll {
 		},
 		file_cards = FileCards(function(): any
 			return session
+		end, function(_chat: string, path: string): boolean
+			return shown:get() == path
 		end),
 	},
 }

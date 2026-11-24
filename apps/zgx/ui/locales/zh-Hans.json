@@ -1351,13 +1351,18 @@
       "link_not_ready": "此聊天的链接尚未就绪"
     },
     "file_card": {
-      "open_in_panel": "在文件面板中打开",
       "gone": "已不在这台电脑上",
-      "detail": "{kind}，{size}",
+      "detail": "{kind} · {size}",
       "more_lines": "{n, plural, other {还有 # 行}}",
       "more_in_panel": "更多内容在文件面板中",
       "text": "文本",
-      "file": "文件"
+      "file": "文件",
+      "open_in_pane": "在右侧面板中打开",
+      "open_file_in_pane": "在右侧面板中打开 {name}",
+      "quick_look": "快速查看",
+      "quick_look_file": "快速查看 {name}",
+      "close_preview": "关闭预览",
+      "count": "{n, plural, other {# 个文件}}"
     },
     "emoji_picker": {
       "search": "搜索表情",

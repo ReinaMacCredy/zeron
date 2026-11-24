@@ -1,5 +1,8 @@
 local FileIcon = require("@self/file_icons")
 local Button = require("@self/button")
+local Icon = require("@self/icon")
+local IconButton = require("@self/icon_button").IconButton
+local Links = require("@self/links")
 local DataTable = require("@self/data_table")
 local Csv = require("@self/csv")
 local ReplyPicture = require("@self/reply_picture")
@@ -15,6 +18,8 @@ export type Files = {
 	read: (target: string) -> any,
 	reveal: (target: string) -> (),
 	here: () -> boolean,
+	shown: ((target: string) -> boolean)?,
+	root: (() -> string?)?,
 }
 export type Item = { target: string, words: string }
 export type RowProps = {
@@ -22,14 +27,17 @@ export type RowProps = {
 	items: { Item },
 	open: ((target: string) -> ())?,
 	pictures: ReplyPicture.Pictures?,
+	menu: ((target: string) -> { Links.Entry }?)?,
 	group: string?,
 }
 
-local HEAD_LINES, CSV_ROWS = 12, 3
+local HEAD_LINES, CSV_ROWS = 8, 3
 local LINE_MOST = 400
 local READ_MOST = 2 * 1024 * 1024
 local PICTURE = { png = true, jpg = true, jpeg = true, gif = true, webp = true }
 local OPEN_MOVE = { duration = 200, ease = "cubicBezier(.2,.8,.2,1)" }
+local HOVER_MOVE = { duration = 100, ease = "linear" }
+local ROW_H, LIST_MOST = 38, 560
 
 M.shown = {} :: { [string]: boolean }
 local shown_count = 0
@@ -72,6 +80,14 @@ end
 local function base_name(words: string): string
 	local bare = string.gsub(string.gsub(words, "^zeron%-file:", ""), "[:#].*$", "")
 	return string.match(bare, "([^/]+)$") or words
+end
+
+local function dir_of(path: string): string
+	return string.match(path, "^(.*)/[^/]+$") or ""
+end
+
+local function leaf(path: string): string
+	return string.match(path, "([^/]+)/*$") or path
 end
 
 local function head(text: string, most: number): (string, number)
@@ -156,7 +172,7 @@ local function text_body(text: string, truncated: boolean): Node
 	}
 end
 
-local Preview = ui.component(function(props: { row: RowProps, item: Item, file: File, measured: State<number> }): Node
+local Preview = ui.component(function(props: { row: RowProps, item: Item, file: File, measured: State<number>, close: () -> () }): Node
 	local files, item, file = props.row.files, props.item, props.file
 	local ext = ext_of(file.name)
 	local picture = PICTURE[ext] == true
@@ -224,20 +240,22 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 		end,
 		ui.column {
 			w_full = true,
+			max_w = LIST_MOST,
 			min_w = 0,
-			gap = "$space.2",
-			pt = "$space.2",
-			px = "$space.3",
-			pb = "$zeron.space.snug",
-			rounded = ui.raw(10, "the mockup's file preview corner"),
+			rounded = ui.raw(12, "the mockup's file list corner"),
 			border = 1,
 			border_color = "$border",
+			overflow = "hidden",
 			ui.row {
 				w_full = true,
 				min_w = 0,
-				gap = "$space.1",
+				h = ROW_H,
+				gap = "$space.2",
 				items = "center",
-				ui.text { file.name, literal = true, truncate = true, grow = 1, min_w = 0, text_size = "$font.size.sm", color = "$text.tertiary" },
+				pl = "$space.3",
+				pr = "$zeron.space.tight",
+				ui.row { shrink = 0, aria_hidden = true, FileIcon { name = file.name, size = 14 } },
+				ui.text { file.name, literal = true, truncate = true, grow = 1, min_w = 0, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
 				if open
 					then Button {
 						tone = "ghost",
@@ -246,28 +264,26 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 						on_click = function()
 							open(item.target)
 						end,
-						locale.t("ds.file_card.open_in_panel"),
+						Icon { name = "split-columns", size = 14 },
+						locale.t("ds.file_card.open_in_pane"),
 					}
 					else nil,
-				ui.show(function(): boolean
-					return not file.outside and files.here()
-				end, Button {
-					tone = "ghost",
-					size = "xs",
-					class = "md-file-reveal",
-					on_click = function()
-						files.reveal(item.target)
-					end,
-					locale.t("ds.links.reveal"),
-				}),
+				IconButton {
+					icon = "close-thin",
+					size = "md",
+					class = "md-file-close",
+					label = locale.t("ds.file_card.close_preview"),
+					on_click = props.close,
+				},
 			},
-			body(),
+			ui.div { w_full = true, h = 1, bg = "$border" },
+			ui.column { w_full = true, min_w = 0, p = "$space.3", body() },
 		},
 	}
 end)
 
 M.Row = ui.component(function(props: RowProps): Node
-	local files = props.files
+	local files, open, menu = props.files, props.open, props.menu
 	local open_at = ui.use_state(nil :: string?)
 	local laid = ui.use_state(nil :: string?)
 	local measured = ui.use_state(0)
@@ -299,67 +315,127 @@ M.Row = ui.component(function(props: RowProps): Node
 			end)
 		end
 	end)
-	local function card(item: Item): Node
+	local function peek(target: string)
+		if gone(target) then
+			return
+		end
+		files.check(target)
+		open_at:set(if open_at:peek() == target then nil else target)
+	end
+	local function folder(target: string): string
+		local f = file_of(target)
+		local dir = if f then dir_of(f.path) else ""
+		if f and f.outside then
+			return dir
+		end
+		local root = if files.root then files.root() else nil
+		return if dir ~= "" then dir elseif root then leaf(root) else ""
+	end
+	local first = props.items[1].target
+	local function line(item: Item): Node
 		local target = item.target
+		local over = ui.use_state(false)
+		local focused = ui.use_state(false)
+		local function focus()
+			focused:set(true)
+		end
+		local function blur()
+			focused:set(false)
+		end
 		local function name(): string
 			local f = file_of(target)
 			return if f then f.name else base_name(item.words)
 		end
-		local function is_open(): boolean
-			return opened() == target
-		end
 		local function faded(): number
 			return if gone(target) then 0.6 else 1
 		end
-		return ui.button {
-			class = "md-file-card",
-			label = name,
-			expanded = is_open,
-			disabled = function(): boolean
-				return gone(target)
-			end,
-			dim = false,
-			min_w = 216,
-			max_w = "100%",
-			gap = "$zeron.space.snug",
+		local function peeked(): boolean
+			return opened() == target
+		end
+		local function showing(): boolean
+			return files.shown ~= nil and not gone(target) and files.shown(target)
+		end
+		local function acting(): boolean
+			return not gone(target) and (over:get() or focused:get() or peeked() or showing())
+		end
+		return ui.row {
+			class = "md-file-line",
+			w_full = true,
+			min_w = 0,
+			h = ROW_H,
 			items = "center",
-			pt = "$space.2",
-			pb = "$space.2",
-			pl = "$zeron.space.snug",
 			pr = "$space.3",
-			rounded = ui.raw(10, "the mockup's file card corner"),
-			border = 1,
-			border_color = function(): string
-				return if is_open() then "$border.strong" else "$border"
-			end,
 			bg = function(): string
-				return if is_open() then "$zeron.secondary.bg" else "#00000000"
+				return if showing() then "$zeron.secondary.bg" elseif over:get() and not gone(target) then "$hover" else "#00000000"
 			end,
-			hover = { bg = "$hover" },
-			on_click = function()
-				if gone(target) then
-					return
-				end
-				files.check(target)
-				open_at:set(if open_at:peek() == target then nil else target)
+			on_hover = function(inside: boolean)
+				over:set(inside)
 			end,
-			ui.row {
-				w = 28,
-				h = 28,
-				shrink = 0,
-				items = "center",
-				justify = "center",
-				rounded = ui.raw(7, "the mockup's file icon tile"),
-				bg = "$zeron.secondary.bg",
-				opacity = faded,
-				aria_hidden = true,
-				FileIcon { name = name, size = 16 },
-			},
-			ui.column {
+			context_menu = if open or menu
+				then Links.menu_for(target, function(): { Links.Entry }?
+					local own = if menu then menu(target) else nil
+					if own ~= nil then
+						return own
+					end
+					return Links.other(target, if open
+						then function()
+							open(target)
+						end
+						else nil)
+				end)
+				else nil,
+			ui.button {
+				class = "md-file-card",
+				label = name,
+				disabled = function(): boolean
+					return gone(target)
+				end,
+				dim = false,
+				grow = 1,
 				min_w = 0,
-				items = "start",
-				opacity = faded,
-				ui.text { name, literal = true, truncate = true, text_size = "$font.size.md", line_height = "$font.line.md", weight = "$font.weight.medium", color = "$text.primary" },
+				h = ROW_H,
+				gap = "$zeron.space.snug",
+				items = "center",
+				justify = "start",
+				pl = "$space.3",
+				pr = "$space.2",
+				bg = "#00000000",
+				hover = { bg = "#00000000" },
+				active = { bg = "#00000000" },
+				on_click = function()
+					if gone(target) then
+						return
+					end
+					if open then
+						files.check(target)
+						open(target)
+					else
+						peek(target)
+					end
+				end,
+				ui.row { shrink = 0, opacity = faded, aria_hidden = true, FileIcon { name = name, size = 16 } },
+				ui.text { name, literal = true, truncate = true, min_w = 0, opacity = faded, text_size = "$font.size.md", line_height = "$font.line.md", weight = "$font.weight.medium", color = "$text.primary" },
+				ui.text {
+					function(): string
+						local here = folder(target)
+						return if here ~= folder(first) then here else ""
+					end,
+					literal = true,
+					truncate = true,
+					min_w = 0,
+					max_w = 180,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				},
+			},
+			ui.row {
+				relative = true,
+				shrink = 0,
+				min_w = 52,
+				h = ROW_H,
+				items = "center",
+				justify = "end",
 				ui.text {
 					function(): string
 						if gone(target) then
@@ -373,27 +449,130 @@ M.Row = ui.component(function(props: RowProps): Node
 						return kind
 					end,
 					literal = true,
-					truncate = true,
+					class = "md-file-detail",
 					text_size = "$font.size.sm",
 					line_height = "$font.line.sm",
 					color = function(): string
 						return if gone(target) then "$warning" else "$text.tertiary"
 					end,
+					opacity = motion.tween(ui.computed(function(): number
+						return if acting() then 0 else 1
+					end), HOVER_MOVE),
+				},
+				ui.row {
+					absolute = true,
+					top = 0,
+					bottom = 0,
+					right = ui.raw(-4, "the buttons' glyphs end where the detail's words do"),
+					items = "center",
+					gap = "$zeron.space.hair",
+					hidden = function(): boolean
+						return gone(target)
+					end,
+					opacity = motion.tween(ui.computed(function(): number
+						return if acting() then 1 else 0
+					end), HOVER_MOVE),
+					IconButton {
+						icon = "eye",
+						size = "md",
+						class = "md-file-peek",
+						label = function(): string
+							return locale.s("ds.file_card.quick_look_file", { name = name() })
+						end,
+						tooltip = locale.s("ds.file_card.quick_look"),
+						lit = peeked,
+						on_focus = focus,
+						on_blur = blur,
+						on_click = function()
+							peek(target)
+						end,
+					},
+					if open
+						then IconButton {
+							icon = "split-columns",
+							size = "md",
+							class = "md-file-pane",
+							label = function(): string
+								return locale.s("ds.file_card.open_file_in_pane", { name = name() })
+							end,
+							tooltip = locale.s("ds.file_card.open_in_pane"),
+							lit = showing,
+							on_focus = focus,
+							on_blur = blur,
+							on_click = function()
+								files.check(target)
+								open(target)
+							end,
+						}
+						else nil,
 				},
 			},
 		}
 	end
-	local cards: { Node } = {}
+	local lines: { Node } = {}
 	local by_target: { [string]: Item } = {}
-	for _, item in props.items do
+	for n, item in props.items do
 		by_target[item.target] = item
-		table.insert(cards, card(item))
+		if n > 1 then
+			table.insert(lines, ui.div { h = 1, bg = "$border", ml = ui.raw(38, "under the names, past the icons") })
+		end
+		table.insert(lines, line(item))
 	end
+	local many = #props.items > 1
 	return ui.column {
 		class = "md-file-cards",
 		w_full = true,
 		min_w = 0,
-		ui.row { w_full = true, min_w = 0, flex_wrap = true, gap = "$space.2", cards },
+		ui.column {
+			class = "md-file-list",
+			w_full = true,
+			max_w = LIST_MOST,
+			min_w = 0,
+			rounded = ui.raw(12, "the mockup's file list corner"),
+			border = 1,
+			border_color = "$border",
+			overflow = "hidden",
+			if many
+				then ui.row {
+					class = "md-file-head",
+					w_full = true,
+					min_w = 0,
+					h = 32,
+					items = "center",
+					gap = "$space.2",
+					pl = "$space.3",
+					pr = "$space.1",
+					ui.row { shrink = 0, color = "$text.tertiary", aria_hidden = true, Icon { name = "folder", size = 14 } },
+					ui.text {
+						function(): string
+							return leaf(folder(first))
+						end,
+						literal = true,
+						truncate = true,
+						min_w = 0,
+						text_size = "$font.size.sm",
+						weight = "$font.weight.medium",
+						color = "$text.primary",
+					},
+					ui.text { locale.t("ds.file_card.count", { n = #props.items }), shrink = 0, text_size = "$font.size.sm", color = "$text.tertiary" },
+					ui.div { grow = 1 },
+					ui.show(function(): boolean
+						local f = file_of(first)
+						return f ~= nil and not f.outside and not gone(first) and files.here()
+					end, Button {
+						tone = "ghost",
+						size = "xs",
+						class = "md-file-reveal",
+						on_click = function()
+							files.reveal(first)
+						end,
+						locale.t("ds.links.reveal"),
+					}),
+				}
+				else nil,
+			if many then ui.div { w_full = true, h = 1, bg = "$border" } else nil,
+			lines,
+		},
 		ui.column {
 			w_full = true,
 			min_w = 0,
@@ -414,7 +593,15 @@ M.Row = ui.component(function(props: RowProps): Node
 				if not item or not file then
 					return ui.div {}
 				end
-				return Preview { row = props, item = item, file = file, measured = measured }
+				return Preview {
+					row = props,
+					item = item,
+					file = file,
+					measured = measured,
+					close = function()
+						open_at:set(nil)
+					end,
+				}
 			end, { w_full = true, min_w = 0 }),
 		},
 	}
