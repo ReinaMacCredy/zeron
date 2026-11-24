@@ -1005,7 +1005,7 @@ local function stage_files(key: string, base: number, files: { any }, stats: { [
 	local items: { any } = {}
 	local refused: { string } = {}
 	for _, f in files do
-		local name = f.name or f.path or "file"
+		local name = AttachmentMentions.friendly_name(f.name or f.path or "file")
 		local stat = if stats and f.path then stats[f.path] else nil
 		if stat and not stat.readable then
 			table.insert(refused, locale.s("chat.composer.file_unreadable", { name = name }))

@@ -2614,6 +2614,7 @@ return ui.component(function(props: Props): Node
 		-- (The tray's slider and rows in the panel's foot corners.)
 		extra = ui.column {
 			w_full = true,
+			gap = "$zeron.list.gap",
 			theme = { radius = { md = corner, sm = control.nest(corner, "$zeron.space.hair") } },
 			table.unpack(tray),
 		},

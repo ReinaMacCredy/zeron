@@ -42,15 +42,17 @@ const UNSUPPORTED_ARCHIVES: &[&str] = &[
     ".dmg", ".pkg", ".msi",
 ];
 
-/// an archive release whose integrity is proven by a registry sha-256 digest
-/// and/or post-extraction verification (vendor code signature, version probe)
-/// rather than a sha-512 pinned in zeron's source.
+/// an archive or standalone binary release whose integrity is proven by a
+/// manifest SHA-512/SHA-256 digest and/or post-extraction verification (vendor
+/// code signature, version probe) rather than a pin hardcoded in zeron's source.
 pub struct VerifiedRelease<'a> {
     pub name: &'a str,
     pub version: &'a str,
     pub url: &'a str,
     pub entry: &'a str,
-    /// lowercase hex SHA-256 of the downloaded archive, verified when present.
+    /// lowercase hex SHA-512 of the downloaded artifact, verified when present.
+    pub sha512: Option<&'a str>,
+    /// lowercase hex SHA-256 of the downloaded artifact, verified when present.
     pub sha256: Option<&'a str>,
     /// written as the install marker once verification passes.
     pub marker: &'a str,
@@ -127,7 +129,7 @@ impl<'a> From<&'a ArchivePin> for Source<'a> {
             entry: pin.entry,
             sha512: Some(pin.sha512),
             sha256: None,
-            kind: ArchiveKind::Zip,
+            kind: ArchiveKind::from_url(pin.url),
             marker: pin.sha512,
         }
     }
@@ -140,9 +142,9 @@ impl<'a> From<&'a VerifiedRelease<'a>> for Source<'a> {
             version: release.version,
             url: release.url,
             entry: release.entry,
-            sha512: None,
+            sha512: release.sha512,
             sha256: release.sha256,
-            kind: ArchiveKind::Zip,
+            kind: ArchiveKind::from_url(release.url),
             marker: release.marker,
         }
     }
@@ -365,7 +367,15 @@ async fn download_and_extract(
     dir: &Path,
     display_name: &str,
 ) -> Result<(), HarnessError> {
-    let entry = dir.join(source.entry);
+    let entry = safe_relative(Path::new(source.entry))
+        .filter(|path| path.components().next().is_some())
+        .map(|path| dir.join(path))
+        .ok_or_else(|| {
+            HarnessError::Install(format!(
+                "the {display_name} entry path ({}) is unsafe",
+                source.entry
+            ))
+        })?;
     if source.kind == ArchiveKind::Raw {
         if let Some(parent) = entry.parent() {
             std::fs::create_dir_all(parent)?;
@@ -914,12 +924,13 @@ mod tests {
                 zip.write_all(b"#!/bin/sh\n").unwrap();
                 let bytes = zip.finish().unwrap().into_inner();
                 let digest = format!("{:x}", Sha256::digest(&bytes));
-                let url = serve(bytes).await;
+                let url = serve(bytes, "archive.zip").await;
                 let wrong_digest = VerifiedRelease {
                     name: "verified-acp",
                     version: "2.0.0",
                     url: &url,
                     entry: "server",
+                    sha512: None,
                     sha256: Some(&"0".repeat(64)),
                     marker: "registry-sha256",
                 };
@@ -947,6 +958,7 @@ mod tests {
                     version: "2.0.0",
                     url: &url,
                     entry: "server",
+                    sha512: None,
                     sha256: Some(&digest),
                     marker: "vendor-signature",
                 };
@@ -979,14 +991,67 @@ mod tests {
                     installed_entry_with_marker("verified-acp", "2.0.0", "server", "other"),
                     None
                 );
+
+                // Verify .tar.gz + SHA-512 path.
+                let mut tgz_buf = Vec::new();
+                {
+                    let enc = flate2::write::GzEncoder::new(
+                        &mut tgz_buf,
+                        flate2::Compression::default(),
+                    );
+                    let mut tar = tar::Builder::new(enc);
+                    let payload = b"#!/bin/sh\n";
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(payload.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    tar.append_data(&mut header, "antigravity", &payload[..])
+                        .unwrap();
+                    let enc = tar.into_inner().unwrap();
+                    enc.finish().unwrap();
+                }
+                let tgz_sha512 = format!("{:x}", Sha512::digest(&tgz_buf));
+                let tgz_url = serve(tgz_buf, "cli_linux_x64.tar.gz").await;
+                let tgz_release = VerifiedRelease {
+                    name: "verified-tgz",
+                    version: "1.5.15",
+                    url: &tgz_url,
+                    entry: "antigravity",
+                    sha512: Some(&tgz_sha512),
+                    sha256: None,
+                    marker: "sha512:ok",
+                };
+                let tgz_entry = install_verified(&tgz_release, "TestTgz", |_| async { Ok(()) })
+                    .await
+                    .unwrap();
+                assert_eq!(tgz_entry, root.join("verified-tgz/1.5.15/antigravity"));
+
+                // Verify standalone raw binary (.exe) + SHA-512 path.
+                let exe_bytes = b"MZ-fake-cli-binary".to_vec();
+                let exe_sha512 = format!("{:x}", Sha512::digest(&exe_bytes));
+                let exe_url = serve(exe_bytes.clone(), "cli_windows_x64.exe").await;
+                let exe_release = VerifiedRelease {
+                    name: "verified-exe",
+                    version: "1.5.15",
+                    url: &exe_url,
+                    entry: "antigravity.exe",
+                    sha512: Some(&exe_sha512),
+                    sha256: None,
+                    marker: "sha512:exe",
+                };
+                let exe_entry = install_verified(&exe_release, "TestExe", |_| async { Ok(()) })
+                    .await
+                    .unwrap();
+                assert_eq!(exe_entry, root.join("verified-exe/1.5.15/antigravity.exe"));
+                assert_eq!(std::fs::read(&exe_entry).unwrap(), exe_bytes);
             });
     }
 
     /// answer every request with `body`, returning the url to fetch it.
-    async fn serve(body: Vec<u8>) -> String {
+    async fn serve(body: Vec<u8>, filename: &str) -> String {
         use tokio::io::AsyncReadExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/archive.zip", listener.local_addr().unwrap());
+        let url = format!("http://{}/{filename}", listener.local_addr().unwrap());
         let body = std::sync::Arc::new(body);
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
@@ -1251,7 +1316,7 @@ mod tests {
             .block_on(async {
                 let bytes = compress(ArchiveKind::TarGz, &agent_tar());
                 let digest = format!("{:x}", Sha256::digest(&bytes));
-                let url = serve(bytes).await.replace("archive.zip", "agent.tar.gz");
+                let url = serve(bytes, "agent.tar.gz").await;
                 let root = adapters_root().unwrap();
                 let binary = |sha256| RegistryBinary {
                     name: "acp-registry/demo",
@@ -1287,9 +1352,7 @@ mod tests {
                     assert_eq!(mode & 0o111, 0o111);
                 }
 
-                let raw_url = serve(b"#!/bin/sh\necho raw\n".to_vec())
-                    .await
-                    .replace("/archive.zip", "/downloads/sigit-macos-arm64");
+                let raw_url = serve(b"#!/bin/sh\necho raw\n".to_vec(), "downloads/sigit-macos-arm64").await;
                 let raw = RegistryBinary {
                     name: "acp-registry/raw",
                     version: "2.0.0",

@@ -1,6 +1,6 @@
 # Zeron
 
-Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) locally by default, with optional multi-device sync.
+Control your coding agents (Claude Code, Codex, Cursor, OpenCode, Devin, Grok, Hermes, Pi, Antigravity, Muse Code, fx) locally by default, with optional multi-device sync.
 
 *English | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md)*
 
@@ -12,11 +12,11 @@ Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi,
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/ReinaMacCredy/zeron/releases/latest):
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
+- **macOS** (Apple silicon, macOS 13+) — `zeron-<version>-macos-arm64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
 
-No account or network connection is needed; sessions stay on your device. The app checks for updates and offers them in the sidebar; set `ZERON_AUTO_UPDATE=1` to download them in the background and install on quit.
+No account or network connection is needed; sessions stay on your device. The desktop app is built on [zgx](https://zgx.zeron.sh) (native Rust with a hot-reloading Luau UI supporting plugins, templates, and themes). It checks for updates and offers them in the sidebar; set `ZERON_AUTO_UPDATE=1` to download them in the background and install on quit.
 
 Fork builds are not Developer ID signed or notarized. On macOS, the first launch is blocked by Gatekeeper: right-click Zeron in Applications and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/Zeron.app`. Each update carries a new ad-hoc signature, so macOS asks for Screen Recording and Accessibility again after updating. On Windows, SmartScreen warns about an unknown publisher: choose **More info**, then **Run anyway**.
 
@@ -57,6 +57,6 @@ Thank you to [The Context Company](https://www.thecontextcompany.com/) for spons
 
 ---
 
-Developing or curious how it works? [Ask DeepWiki](https://deepwiki.com/zeronsh/zeron) or check out [ARCHITECTURE.md](ARCHITECTURE.md).
+Developing or curious how it works? [Ask DeepWiki](https://deepwiki.com/zeronsh/zeron), read [ARCHITECTURE.md](ARCHITECTURE.md), or see [CONTRIBUTORS.md](CONTRIBUTORS.md) and [apps/zgx/README.md](apps/zgx/README.md).
 
 Licensed under the [MIT License](LICENSE).
