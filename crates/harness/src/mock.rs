@@ -330,6 +330,7 @@ fn question_script() -> Vec<UserInputQuestion> {
     vec![
         UserInputQuestion {
             approval: false,
+            note: None,
             id: "q-sync".into(),
             header: "Question".into(),
             question: "Which sync strategy should the rewrite use?".into(),
@@ -349,6 +350,7 @@ fn question_script() -> Vec<UserInputQuestion> {
         },
         UserInputQuestion {
             approval: false,
+            note: None,
             id: "q-gates".into(),
             header: "Question".into(),
             question: "Which suites should gate the merge?".into(),

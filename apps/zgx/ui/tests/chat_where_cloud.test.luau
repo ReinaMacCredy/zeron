@@ -60,14 +60,10 @@ local function chosen(app: any, row: string): string
 	return table.concat(words, " ")
 end
 
+-- (The chip names the folder it works in: its project.)
 local function chip(app: any): string
 	rested(app)
-	-- (The chip: [tile] project › branch. The branch, in a project; else
-	-- what stands in its place, "No project".)
-	if app:has('role:button "Branch" >> #composer-place-branch') then
-		return app:text('role:button "Branch" >> #composer-place-branch[1]')
-	end
-	return app:text('role:button "Branch" >> #composer-place-project[1]')
+	return app:text("#composer-folder[1]")
 end
 local function close(app: any)
 	app:key("Escape")
@@ -110,7 +106,7 @@ test("on Cloud, the branches are GitHub's and there's no checkout to choose", fu
 	expect(chosen(app, "Device")).to_contain("Cloud")
 	expect(chosen(app, "Project")).to_contain("Atlas")
 	expect(cloud_calls(app)).to_contain("cloud.branches:acme/atlas")
-	expect(chip(app)).to_be("main")
+	expect(chip(app)).to_be("Atlas")
 	panel(app)
 	expect(showing(app, 'role:menuitem "Checkout"')).to_be(false)
 	expect(app:has('role:option "main Default"')).to_be(true)
@@ -136,7 +132,7 @@ test("a send on Cloud makes the chat there and runs it in its machine's checkout
 	app:command("cloud_stub.offer")
 	settle(app)
 	pick_in(app, "Device", "Cloud")
-	expect(chip(app)).to_be("main")
+	expect(chip(app)).to_be("Atlas")
 	close(app)
 	app:type('role:textbox "Message"', "Fix the flaky test")
 	app:key("Enter")

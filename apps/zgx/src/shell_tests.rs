@@ -327,7 +327,7 @@ fn the_places_plugins_target_are_there() {
     }
     assert!(app.find("#sidebar-actions >> role:button \"Search\"").is_some(), "Search isn't in #sidebar-actions");
     assert!(app.find("#sidebar-actions >> role:button \"New chat\"").is_none(), "New chat is the app rail's");
-    assert!(app.find("#app-rail >> role:button \"New chat\"").is_some(), "New chat isn't in #app-rail");
+    assert!(app.find("#app-rail >> role:button \"Home\"").is_some(), "Home isn't in #app-rail");
     assert!(app.find("#shell-sidebar >> #sidebar").is_some(), "#sidebar isn't the sidebar's");
     // (The rail is off: none.)
     assert!(app.find("#rail").is_none(), "a rail with the rail off");

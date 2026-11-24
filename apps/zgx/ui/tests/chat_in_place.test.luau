@@ -888,3 +888,61 @@ test("the conversation width setting widens the transcript and the composer", fu
 	local w = widest_reply()
 	expect(w > 660 + 24 and w <= 900 + 24).to_be(true)
 end)
+
+test("consecutive sends settle flush at the top with no upward scroll drift", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	local ys1, pill1, id1 = glide(app, "First turn here")
+	expect(eased(ys1)).to_be_nil()
+	expect(pill1).to_be(false)
+	local landed1 = ys1[#ys1]
+	settle(app)
+	expect(math.abs((y_of_id(app, id1 :: string) :: number) - landed1) <= 2).to_be(true)
+
+	app:command("engine_copy")
+	app:command("start_reply")
+	for _ = 1, 4 do
+		app:command("stream_words")
+		app:frames(2)
+	end
+	app:command("end_reply")
+	settle(app)
+
+	local ys2, pill2, id2 = glide(app, "Second turn right after")
+	expect(eased(ys2)).to_be_nil()
+	expect(pill2).to_be(false)
+	local landed2 = ys2[#ys2]
+	local _, list_y = box(app, "#transcript")
+	expect(landed2 >= list_y).to_be(true)
+	expect(landed2 - list_y < 60).to_be(true)
+	settle(app)
+	expect(math.abs((y_of_id(app, id2 :: string) :: number) - landed2) <= 2).to_be(true)
+end)
+
+test("sending while composer shrinks and clamps scroll offset downward never hangs", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("catalog_grows")
+	settle(app)
+	open(app, "s1")
+	-- Another model picked, and a multi-line draft so clearing the composer on
+	-- send shrinks the foot padding and clamps max_scroll downward while the
+	-- send's glide starts.
+	app:set_state("chat_model", "gpt")
+	settle(app)
+	app:type('role:textbox "Message"', "Line 1")
+	for i = 2, 5 do
+		app:key("Shift+Enter")
+		app:type('role:textbox "Message"', `Line {i}`)
+	end
+	app:key("Shift+Enter")
+	app:type('role:textbox "Message"', "Testing")
+	settle(app)
+	app:key("Enter")
+	-- Grow viewport taller immediately after send starts gliding so max_scroll
+	-- drops below `freeze_at` during the pre-rise window.
+	app:resize(900, 820)
+	settle(app)
+	expect(app:wait('~"Testing"', { timeout_ms = 1000 })).to_be(true)
+end)

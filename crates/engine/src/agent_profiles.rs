@@ -201,7 +201,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn normalize_draft(draft: AgentProfileDraft) -> Result<AgentProfileDraft, EngineError> {
+pub(crate) fn normalize_draft(draft: AgentProfileDraft) -> Result<AgentProfileDraft, EngineError> {
     let name = draft.name.trim().to_string();
     if name.is_empty() {
         return Err(EngineError::Other("Profile name is required".into()));

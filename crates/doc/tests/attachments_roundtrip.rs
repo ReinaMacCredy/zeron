@@ -18,6 +18,7 @@ fn run_request_attachments_survive_command_round_trip() {
         auto_approve: true,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: vec!["/tmp/a.png".into()],
         worktree: None,
         branch: None,

@@ -66,6 +66,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
                 auto_approve: true,
                 access: zeron_proto::AccessMode::FullAccess,
                 plan: false,
+                code_mode: false,
                 attachments: Vec::new(),
                 worktree: None,
                 branch: None,

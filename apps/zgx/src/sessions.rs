@@ -831,6 +831,7 @@ fn child_row(rows: &mut HashMap<String, Row>, c: &Json, id: &str, parent: &str, 
         ("parent", Value::from(parent)),
         ("title", Value::from(title)),
         ("device", Value::from(c["deviceId"].as_str().unwrap_or_default())),
+        ("project", opt(c["spaceId"].as_str())),
         ("status", status.map_or(Value::Nil, Value::from)),
         ("errored", Value::Bool(with.errored)),
         ("updated", Value::from(updated as f64)),
@@ -2087,6 +2088,12 @@ impl Sessions {
             me.publish();
         });
     }
+}
+
+/// Whether the person uses Cloud: a device of Cloud's (its logical device,
+/// or a chat's machine) is among theirs.
+pub(crate) fn uses_cloud() -> bool {
+    SESSIONS.with(|s| s.devices.borrow().as_array().into_iter().flatten().any(is_cloud))
 }
 
 /// A device row of Cloud's: the logical Cloud device or a session's machine

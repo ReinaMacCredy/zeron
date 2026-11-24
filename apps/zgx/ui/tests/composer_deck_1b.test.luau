@@ -277,11 +277,10 @@ test("the folded pill and the pill row stand over the notice line, never on it",
 	expect(failed:has(card)).to_be(true)
 	expect(failed:has(PILL)).to_be(true)
 	expect(apart(failed, PILL, card)).to_be(true)
-	expect(apart(failed, "#composer-side-chat", card)).to_be(true)
 	expect(failed:error()).to_be(nil)
 end)
 
-test("beside the side chat's tab the folded pill stops short of it, and Scroll to end still clears it", function()
+test("the composer carries no side chat tab; the folded pill and Scroll to end stand clear of each other", function()
 	for _, w in { 520, 700 } do
 		local app = mount("chat_fixture.luau")
 		app:resize(w, 700)
@@ -291,12 +290,11 @@ test("beside the side chat's tab the folded pill stops short of it, and Scroll t
 		app:frames(10)
 		patch(app, { queue = { { id = "q1", text = "Words" } }, todos = plan(0, 2) })
 		expect(app:tree(PILL)).to_contain("Plan 0/2")
-		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
+		expect(app:has("#composer-side-chat")).to_be(false)
 		app:scroll("#transcript", -900)
 		app:frames(60)
 		local jump = 'role:button "New reply"'
 		expect(app:has(jump)).to_be(true)
-		expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
 		expect(apart(app, PILL, jump)).to_be(true)
 		expect(app:error()).to_be(nil)
 	end
@@ -327,24 +325,21 @@ end
 -- (A test for each width: a test's mounts share its storage, so one after
 -- another that scrolled away opens where that one was left, not at its end.)
 for _, w in { 400, 460, 480, 600 } do
-	test(`at a narrow composer ({w} wide) the pills, the side chat's tab, the folded pill and Jump to latest never meet, and the conversation's end clears the pill row`, function()
-		local AGENTS, SHELLS, TAB, JUMP = "#pills-agents", "#pills-shells-pill", "#composer-side-chat", 'role:button "New reply"'
+	test(`at a narrow composer ({w} wide) the pills, the folded pill and Jump to latest never meet, and the conversation's end clears the pill row`, function()
+		local AGENTS, SHELLS, JUMP = "#pills-agents", "#pills-shells-pill", 'role:button "New reply"'
 		local app = busy(w)
 		expect(apart(app, AGENTS, SHELLS)).to_be(true)
-		expect(apart(app, AGENTS, TAB)).to_be(true)
-		expect(apart(app, SHELLS, TAB)).to_be(true)
 		expect(over(app, "#working-clock", "#composer-pills")).to_be(true)
 		app:command("queue_one")
 		app:frames(60)
 		for _, pill in { AGENTS, SHELLS } do
 			expect(apart(app, pill, PILL)).to_be(true)
-			expect(apart(app, pill, TAB)).to_be(true)
 		end
 		expect(over(app, "#working-clock", "#composer-pills")).to_be(true)
 		app:scroll("#transcript", -900)
 		app:frames(60)
 		expect(app:has(JUMP)).to_be(true)
-		for _, other in { AGENTS, SHELLS, PILL, TAB } do
+		for _, other in { AGENTS, SHELLS, PILL } do
 			expect(apart(app, JUMP, other)).to_be(true)
 		end
 		local left = box(app, "#composer-pills")
@@ -353,7 +348,7 @@ for _, w in { 400, 460, 480, 600 } do
 	end)
 end
 
-test("Jump to latest beside a folded pill held short of the side chat's tab stays over the composer, or stands over the pill when the two don't fit", function()
+test("Jump to latest beside a folded pill stays over the composer, or stands over the pill when the two don't fit", function()
 	for _, w in { 400, 450, 520 } do
 		local app = mount("chat_fixture.luau")
 		app:resize(w, 700)
@@ -371,15 +366,6 @@ test("Jump to latest beside a folded pill held short of the side chat's tab stay
 		local left = box(app, "#composer-pills")
 		expect(box(app, jump) >= left).to_be(true)
 		expect(apart(app, jump, PILL)).to_be(true)
-		expect(apart(app, jump, "#composer-side-chat")).to_be(true)
-		-- Wider than the room before the tab (whose shortcut reads "Ctrl+;"
-		-- off macOS, 27 wider than "⌘;"), the pill keeps the composer's left edge.
-		local px, _, pw = box(app, PILL)
-		if pw + 8 <= box(app, "#composer-side-chat") - left then
-			expect(apart(app, PILL, "#composer-side-chat")).to_be(true)
-		else
-			expect(px).to_be(left)
-		end
 		expect(app:error()).to_be(nil)
 	end
 end)

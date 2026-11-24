@@ -17,6 +17,7 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local Card = require("@app/screens/chat/card")
 local Draft = require("@ds/draft_text")
 local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
@@ -1259,6 +1260,9 @@ local function Composer(): Node
 			-- engine's) can reach the list before the glide is ready, and
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
+			local catalog = store.catalog:peek()
+			local from_h = T.session_harness(catalog, store.session:peek())
+			local sw = T.switch_row(catalog, from_h, req.harness, mid)
 			-- (To the transcript at its foot: in a split, the focused pane's,
 			-- which shows its lane's list, the prompt joining it there too.)
 			local lane = foot_lane(id)
@@ -1269,6 +1273,12 @@ local function Composer(): Node
 			T.send(function()
 				for _, list in lists do
 					if list:index_of("id", mid) == nil then
+						if sw and list:len() > 0 then
+							local tail = list:at(list:len())
+							if (not tail or tail.role ~= "switch") and list:index_of("id", sw.id) == nil then
+								list:push(sw)
+							end
+						end
 						list:push(if resume
 							then Outgoing.resumed(mid)
 							else {
@@ -1925,39 +1935,6 @@ local function Composer(): Node
 					lifted:set(n)
 				end
 			end,
-			side_tab = {
-				shown = function(): boolean
-					return session_id:get() ~= nil
-				end,
-				open = function(): boolean
-					local id = session_id:get()
-					return id ~= nil and Lanes.side_tab_open ~= nil and Lanes.side_tab_open(id)
-				end,
-				status = function(): string?
-					local now = os.time()
-					local newest: any = nil
-					for _, c in Lanes.side(session_id:get()) do
-						if (c.kind == nil or c.kind == "side_chat") and (c.expires == nil or c.expires > now) and (not newest or (c.created or 0) > (newest.created or 0)) then
-							newest = c
-						end
-					end
-					local status = newest and newest.status
-					if status == "working" then
-						return "$accent"
-					elseif status == "awaitingInput" then
-						return "$warning"
-					elseif status == "errored" then
-						return "$danger"
-					end
-					return nil
-				end,
-				hint = function(): string?
-					return ui.shortcut_text(side_chat_key())
-				end,
-				on_click = function()
-					open_side_chat(nil)
-				end,
-			},
 			caption = function(): string?
 				local s = open()
 				if not s or not running:get() or (s :: any).steers ~= false then
@@ -2503,7 +2480,7 @@ local function Composer(): Node
 			absolute = true,
 			pointer_events = "none",
 			left = 0,
-			right = 0,
+			right = Card.shift,
 			-- On a new chat by its top, from the page's middle: it moves with
 			-- the page as the page lays out, and what's written grows it down.
 			-- Docked, by its foot.

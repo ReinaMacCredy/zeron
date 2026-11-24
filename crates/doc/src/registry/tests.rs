@@ -4131,3 +4131,145 @@ fn a_broken_delta_chain_keeps_its_pending_writes() {
     let ids: Vec<String> = loaded.read_chats().unwrap().into_iter().map(|c| c.id).collect();
     assert_eq!(ids, ["after", "kept"], "the pending write after the break was lost");
 }
+
+fn bot(id: &str, name: &str, chat_id: &str, created_ms: i64) -> zeron_proto::Bot {
+    serde_json::from_value(json!({
+        "id": id, "name": name, "harness": "mock", "model": "mock-1", "instructions": "Keep the build green.",
+        "avatar": { "glyph": "rocket", "frame": "squircle", "color": "violet" },
+        "chatId": chat_id, "createdAt": ts(created_ms), "updatedAt": ts(created_ms),
+    }))
+    .unwrap()
+}
+
+fn bot_ids(doc: &RegistryDoc) -> Vec<String> {
+    doc.read_bots().unwrap().into_iter().map(|b| b.profile.id).collect()
+}
+
+#[test]
+fn a_bot_is_created_edited_archived_and_deleted_with_its_chat_across_devices() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    a.upsert_chat(&chat("bot-chat", "a")).unwrap();
+    assert!(a.create_bot(&bot("b1", "  Build keeper  ", "bot-chat", 2_000)).unwrap());
+    assert!(!a.create_bot(&bot("b1", "Retried", "other-chat", 2_001)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let synced = b.bot("b1").unwrap();
+    assert_eq!(synced.profile.name, "Build keeper", "names are stored trimmed");
+    assert_eq!(synced.profile.instructions, "Keep the build green.");
+    assert_eq!(synced.avatar.glyph, "rocket");
+    assert_eq!(synced.chat_id, "bot-chat");
+    assert!(!synced.pinned && !synced.archived && !synced.unread);
+    assert!(b.chat("bot-chat").unwrap().is_some(), "its chat came with it");
+
+    let mut draft: zeron_proto::AgentProfileDraft =
+        serde_json::from_value(json!({ "name": "Release keeper", "harness": "mock", "model": "mock-1", "instructions": "Keep the build green." })).unwrap();
+    let rename = zeron_proto::BotPatch { profile: Some(draft.clone()), ..Default::default() };
+    assert!(b.update_bot("b1", &rename, ts(5_000)).unwrap());
+    let mark = zeron_proto::BotPatch { pinned: Some(true), unread: Some(true), ..Default::default() };
+    assert!(a.update_bot("b1", &mark, ts(5_001)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    let merged = a.bot("b1").unwrap();
+    assert_eq!(merged, b.bot("b1").unwrap());
+    assert_eq!(merged.profile.name, "Release keeper");
+    assert!(merged.pinned && merged.unread);
+    assert_eq!(merged.profile.instructions, "Keep the build green.", "what the edit left alone stays");
+    let pending = a.pending_len();
+    draft.name = "Release keeper".into();
+    a.update_bot("b1", &zeron_proto::BotPatch { profile: Some(draft), pinned: Some(true), ..Default::default() }, ts(5_002)).unwrap();
+    assert_eq!(a.pending_len(), pending);
+
+    let archive = zeron_proto::BotPatch { archived: Some(true), ..Default::default() };
+    assert!(a.update_bot("b1", &archive, ts(6_000)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.bot("b1").unwrap().archived);
+    assert_eq!(bot_ids(&b), ["b1"]);
+    assert!(b.chat("bot-chat").unwrap().is_some());
+
+    let restarted = RegistryDoc::from_bytes(&a.to_bytes().unwrap(), "a").unwrap();
+    assert_eq!(restarted.bot("b1"), a.bot("b1"));
+
+    assert_eq!(a.delete_bot("b1", ts(10_000)).unwrap().as_deref(), Some("bot-chat"));
+    assert!(a.bot("b1").is_none());
+    assert!(a.read_bots().unwrap().is_empty());
+    assert!(a.chat("bot-chat").unwrap().is_none());
+    assert!(!a.update_bot("b1", &archive, ts(10_001)).unwrap());
+    assert!(!a.create_bot(&bot("b1", "Revived", "bot-chat", 10_002)).unwrap());
+    assert_eq!(a.delete_bot("b1", ts(10_003)).unwrap(), None);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.read_bots().unwrap().is_empty());
+    assert!(b.chat("bot-chat").unwrap().is_none());
+}
+
+#[test]
+fn pinned_bots_come_first_in_the_order_they_were_pinned_and_the_rest_newest_first() {
+    let mut doc = RegistryDoc::new("a");
+    for (i, id) in ["b1", "b2", "b3", "b4"].into_iter().enumerate() {
+        assert!(doc.create_bot(&bot(id, id, &format!("chat-{id}"), 2_000 + i as i64)).unwrap());
+    }
+    assert_eq!(bot_ids(&doc), ["b4", "b3", "b2", "b1"], "unpinned: newest first");
+
+    let pin = zeron_proto::BotPatch { pinned: Some(true), ..Default::default() };
+    doc.update_bot("b2", &pin, ts(3_000)).unwrap();
+    doc.update_bot("b4", &pin, ts(3_001)).unwrap();
+    doc.update_bot("b1", &pin, ts(3_002)).unwrap();
+    assert_eq!(bot_ids(&doc), ["b2", "b4", "b1", "b3"], "pinned: in the order they were pinned");
+
+    let key = |doc: &RegistryDoc, id: &str| doc.bot(id).unwrap().order_key;
+    let between = zeron_proto::pin_order_key_between(Some(&key(&doc, "b2")), Some(&key(&doc, "b4")), &hlc(4_000)).unwrap();
+    doc.update_bot("b1", &zeron_proto::BotPatch { order_key: Some(between), ..Default::default() }, ts(4_000)).unwrap();
+    assert_eq!(bot_ids(&doc), ["b2", "b1", "b4", "b3"]);
+
+    let unpin = zeron_proto::BotPatch { pinned: Some(false), ..Default::default() };
+    doc.update_bot("b2", &unpin, ts(5_000)).unwrap();
+    assert_eq!(bot_ids(&doc), ["b1", "b4", "b3", "b2"]);
+    doc.update_bot("b2", &pin, ts(5_001)).unwrap();
+    assert_eq!(bot_ids(&doc), ["b1", "b4", "b2", "b3"]);
+    let bad = zeron_proto::BotPatch { order_key: Some("not a key".into()), ..Default::default() };
+    assert!(doc.update_bot("b2", &bad, ts(5_002)).is_err());
+
+    let mut born = bot("b5", "b5", "chat-b5", 6_000);
+    born.pinned = true;
+    doc.create_bot(&born).unwrap();
+    assert_eq!(bot_ids(&doc), ["b1", "b4", "b2", "b5", "b3"]);
+}
+
+#[test]
+fn a_bots_image_travels_in_a_row_of_its_own_and_what_cannot_sync_is_refused() {
+    let mut a = RegistryDoc::new("a");
+    let mut b = RegistryDoc::new("b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let image = format!("data:image/png;base64,{}", "A".repeat(9_000));
+    let mut pictured = bot("b1", "Pictured", "chat-1", 2_000);
+    pictured.avatar.image = Some(image.clone());
+    pictured.profile.instructions = "x".repeat(12_000);
+    assert!(a.create_bot(&pictured).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(b.bot("b1").unwrap().avatar.image.as_deref(), Some(image.as_str()));
+    assert_eq!(b.read_bots().unwrap()[0].avatar.image.as_deref(), Some(image.as_str()));
+    for row in a.overlay_rows(KIND_BOTS).into_iter().chain(a.overlay_rows(KIND_BOT_AVATARS)) {
+        assert!(fits_op_budget(&row_to_seed_op(&row)), "{} would not re-seed", row.kind);
+    }
+
+    let glyph = zeron_proto::BotAvatar { glyph: "shield".into(), frame: "circle".into(), color: "amber".into(), image: None };
+    b.update_bot("b1", &zeron_proto::BotPatch { avatar: Some(glyph.clone()), ..Default::default() }, ts(3_000)).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut b, &mut a]);
+    assert_eq!(a.bot("b1").unwrap().avatar, glyph);
+
+    let refused = |doc: &mut RegistryDoc, bot: zeron_proto::Bot| doc.create_bot(&bot).unwrap_err().to_string();
+    let mut long = bot("b2", "Long", "chat-2", 2_001);
+    long.profile.instructions = "x".repeat(17_000);
+    assert!(refused(&mut a, long).contains("shorten its instructions"));
+    let mut huge = bot("b3", "Huge", "chat-3", 2_002);
+    huge.avatar.image = Some(format!("data:image/png;base64,{}", "A".repeat(20_000)));
+    assert!(refused(&mut a, huge).contains("avatar"));
+    let mut nameless = bot("b4", "   ", "chat-4", 2_003);
+    assert!(refused(&mut a, nameless.clone()).contains("name"));
+    nameless.profile.name = "n".repeat(81);
+    assert!(refused(&mut a, nameless).contains("name"));
+    assert!(refused(&mut a, bot("bad id", "Spaced", "chat-5", 2_004)).contains("ID"));
+    assert_eq!(bot_ids(&a), ["b1"]);
+}

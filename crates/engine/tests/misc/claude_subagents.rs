@@ -30,6 +30,7 @@ fn request(dir: &Path, scenario: &str) -> RunRequest {
         auto_approve: false,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: vec![],
         worktree: None,
         resume: None,

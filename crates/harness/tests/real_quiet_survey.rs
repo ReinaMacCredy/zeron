@@ -71,6 +71,7 @@ async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
         auto_approve: true,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,

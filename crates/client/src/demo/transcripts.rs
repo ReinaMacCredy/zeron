@@ -603,6 +603,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
 fn picker_questions() -> Vec<UserInputQuestion> {
     vec![
         UserInputQuestion {
+            note: None,
             approval: false,
             id: "q1".into(),
             header: "Catalog source".into(),
@@ -622,6 +623,7 @@ fn picker_questions() -> Vec<UserInputQuestion> {
             quick: false,
         },
         UserInputQuestion {
+            note: None,
             approval: false,
             id: "q2".into(),
             header: "Harnesses".into(),
@@ -648,6 +650,7 @@ const SHELF_QUESTION: &str = "req-shelf";
 
 fn shelf_questions() -> Vec<UserInputQuestion> {
     vec![UserInputQuestion {
+        note: None,
         id: "q1".into(),
         header: "Settle after".into(),
         question: "Where should the phone read settle_after_days from?".into(),
@@ -717,6 +720,7 @@ fn approval(
                     id: "req-approve".into(),
                     request_id: "req-approve".into(),
                     questions: vec![UserInputQuestion {
+                        note: None,
                         approval: true,
                         id: "approve".into(),
                         header: header.into(),
@@ -1084,6 +1088,7 @@ fn input(
         id: id.into(),
         request_id: id.into(),
         questions: vec![UserInputQuestion {
+            note: None,
             approval: false,
             id: question_id.into(),
             header: header.into(),
@@ -1892,6 +1897,7 @@ pub(crate) fn asking() -> Vec<Step> {
         Step::Text("Before I continue I need one decision:".into()),
         Step::Question(vec![UserInputQuestion {
             approval: false,
+            note: None,
             id: "q1".into(),
             header: "Scope".into(),
             question: "Should the fix cover Android too?".into(),

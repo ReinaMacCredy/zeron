@@ -14,6 +14,7 @@ local frame = require("@app/screens/shell/frame")
 local art = require("@app/screens/shell/art")
 local chat_shared = require("@app/screens/chat/shared")
 local AgentFan = require("@ds/agent_fan")
+local bots = require("@app/screens/bots/store")
 local Pills = require("@app/screens/chat/pills")
 require("@app/screens/shell/tab_rules")
 
@@ -543,7 +544,8 @@ end
 
 local function title(id: string): string
 	local c = chat_of(face(id))
-	return if c then c.title else ""
+	local bot = if c then bots.of_chat(c.id) else nil
+	return if bot then bot.name elseif c then c.title else ""
 end
 
 local function lead(id: string, hovered: any): Node

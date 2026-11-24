@@ -38,6 +38,7 @@ fn run_request(prompt: &str) -> RunRequest {
         auto_approve: true,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,
@@ -1692,6 +1693,7 @@ impl Harness for EchoAnswerHarness {
         tokio::spawn(async move {
             let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
                 approval: false,
+                note: None,
                 id: "q1".into(),
                 header: "Pick".into(),
                 question: "Which one?".into(),
@@ -1836,6 +1838,7 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
                 request_id: "req-dead".into(),
                 questions: vec![zeron_proto::UserInputQuestion {
                     approval: false,
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -2041,6 +2044,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
             tokio::spawn(async move {
                 let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
                     approval: false,
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -2242,6 +2246,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                     // being torn down, the stream then ends WITHOUT a Done.
                     let _ = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
                         approval: false,
+                        note: None,
                         id: "q1".into(),
                         header: "Pick".into(),
                         question: "Which one?".into(),
@@ -2397,6 +2402,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
             tokio::spawn(async move {
                 let question = zeron_proto::UserInputQuestion {
                     approval: false,
+                    note: None,
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -2773,6 +2779,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         auto_approve: false,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: vec![path],
         resume: None,
         worktree: None,

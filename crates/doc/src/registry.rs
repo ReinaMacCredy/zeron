@@ -47,6 +47,9 @@ pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
+pub const KIND_BOTS: &str = "bots";
+pub const KIND_BOT_AVATARS: &str = "botAvatars";
+mod bots;
 mod plans;
 mod repository_looks;
 mod row_cache;
@@ -55,6 +58,7 @@ mod sidebar_sections;
 mod task_steps;
 mod tasks;
 
+pub use bots::{BOT_NAME_MAX_CHARS, BOTS_MAX, check_bot_syncs};
 pub use tasks::{
     TASK_CONTEXT_MAX, TASK_DEPENDS_ON_MAX, TASK_IMAGES_MAX, TASK_NOTES_MAX_CHARS, TASK_STEPS_MAX,
     TASK_TITLE_MAX_CHARS, check_context, check_images, check_task_syncs,

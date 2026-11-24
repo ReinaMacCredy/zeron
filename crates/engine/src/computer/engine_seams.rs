@@ -125,6 +125,7 @@ pub fn consent_question(card: &ComputerConsentCard) -> UserInputQuestion {
     options.extend(always);
     options.push(COMPUTER_CONSENT_DECLINE.into());
     UserInputQuestion {
+        note: None,
         approval: false,
         id: "consent".into(),
         header: "Computer".into(),
@@ -163,6 +164,7 @@ pub fn consent_pending(card: &ComputerConsentCard, input_id: &str) -> ComputerPe
 
 pub fn foreground_question(app: Option<&ComputerConsentApp>) -> UserInputQuestion {
     UserInputQuestion {
+        note: None,
         approval: false,
         id: COMPUTER_FOREGROUND_QUESTION_ID.into(),
         header: "Computer".into(),

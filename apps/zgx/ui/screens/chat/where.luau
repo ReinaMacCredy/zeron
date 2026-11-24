@@ -434,7 +434,9 @@ function M.bind(c: Choices)
 		if not c.active() then
 			return
 		end
-		-- Another project: its own ref, chosen afresh.
+		-- Another project: its own ref, chosen afresh. The first project can
+		-- arrive with an inherited branch (a side chat's seed effect runs
+		-- after bind during mounting); that is initialization, not a move.
 		if id ~= project_was then
 			local had = project_was
 			project_was = id

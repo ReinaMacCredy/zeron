@@ -388,6 +388,8 @@ test("on a plugin's page it goes home first, as Zeron's, so the first press land
 	open(app, "Write the docs")
 	app:set_state("plugins.pages", { { plugin = "github", id = "pulls", title = "Pull requests", icon = "pull-request" } })
 	app:frames(10)
+	app:click("#rail-more")
+	app:frames(12)
 	app:click("#open-pull-requests")
 	app:frames(20)
 	expect(app:state("shell_route_path")).to_be("/plugin/github/pulls")

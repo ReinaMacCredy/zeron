@@ -17,6 +17,9 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local FolderChip = require("@app/screens/chat/folder_chip")
+local Card = require("@app/screens/chat/card")
+local Bots = require("@app/screens/bots/store")
 local Draft = require("@ds/draft_text")
 local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
@@ -881,7 +884,8 @@ local function Composer(): Node
 			return row ~= nil and row.offers_mission == true and not table.find(off, "mcp__zeron__plan") and not table.find(off, "mcp__zeron__delegate_task")
 		end
 		local s = open()
-		return s ~= nil and (s :: any).mission_offered == true
+		-- (A Bot's chat has no Mission: its work goes out as sessions.)
+		return s ~= nil and (s :: any).mission_offered == true and Bots.of_chat(s.id) == nil
 	end
 	-- What each trigger lists, as the agent's settings have it: with
 	-- "Separate / commands" off, `/` lists the skills after the commands
@@ -1259,6 +1263,9 @@ local function Composer(): Node
 			-- engine's) can reach the list before the glide is ready, and
 			-- the prompt is there once, whoever adds it first.
 			local mid = store.new_id()
+			local catalog = store.catalog:peek()
+			local from_h = T.session_harness(catalog, store.session:peek())
+			local sw = T.switch_row(catalog, from_h, req.harness, mid)
 			-- (To the transcript at its foot: in a split, the focused pane's,
 			-- which shows its lane's list, the prompt joining it there too.)
 			local lane = foot_lane(id)
@@ -1269,6 +1276,12 @@ local function Composer(): Node
 			T.send(function()
 				for _, list in lists do
 					if list:index_of("id", mid) == nil then
+						if sw and list:len() > 0 then
+							local tail = list:at(list:len())
+							if (not tail or tail.role ~= "switch") and list:index_of("id", sw.id) == nil then
+								list:push(sw)
+							end
+						end
 						list:push(if resume
 							then Outgoing.resumed(mid)
 							else {
@@ -1439,6 +1452,20 @@ local function Composer(): Node
 			end)
 		return false
 	end
+	local said_n = shared.said:peek().n
+	ui.effect(function()
+		local said = shared.said:get()
+		if said.n == said_n then
+			return
+		end
+		said_n = said.n
+		local kept = shared.text:peek()
+		shared.text:set(said.text)
+		send(said.text)
+		if kept ~= "" then
+			shared.text:set(kept)
+		end
+	end)
 
 	-- Where the open chat works, live: git's current branch in its own
 	-- folder (an agent may have made or switched one since it began; the
@@ -1507,6 +1534,35 @@ local function Composer(): Node
 			src = if project and s.project then (route.look(s.project) or {}).src else nil,
 			emoji = if project and s.project then (route.look(s.project) or {}).emoji else nil,
 		}
+	end
+	local function add_project()
+		local add: any = require("@app/screens/shell/boundary").load("@app/screens/shell/add_project")
+		if add then
+			add.open()
+		end
+	end
+	local function folder(): FolderChip.Folder
+		local s: any = open()
+		local now = sessions.now:get()
+		local want = if s then s.project else project:get()
+		for _, p in sessions.projects:get() do
+			if p.id == want then
+				local here = s == nil or s.device == nil or s.device == now.here
+				for _, d in now.devices or {} do
+					if s and d.id == s.device and d.here then
+						here = true
+					end
+				end
+				-- (A chat in a worktree works there, not in its project's own folder.)
+				local at: string? = if s then s.work_path or s.cwd else nil
+				return { name = p.name, path = FolderChip.short(at or p.path, if here then now.home else nil) }
+			end
+		end
+		local cwd: string? = if s then s.work_path or s.cwd else nil
+		if cwd then
+			return { name = string.match(cwd, "([^/\\]+)[/\\]*$"), path = FolderChip.short(cwd, now.home) }
+		end
+		return {}
 	end
 	local fx_o = ui.state("chat_composer_fx_o", 1)
 	local fx_y = ui.state("chat_composer_fx_y", 0)
@@ -1925,39 +1981,6 @@ local function Composer(): Node
 					lifted:set(n)
 				end
 			end,
-			side_tab = {
-				shown = function(): boolean
-					return session_id:get() ~= nil
-				end,
-				open = function(): boolean
-					local id = session_id:get()
-					return id ~= nil and Lanes.side_tab_open ~= nil and Lanes.side_tab_open(id)
-				end,
-				status = function(): string?
-					local now = os.time()
-					local newest: any = nil
-					for _, c in Lanes.side(session_id:get()) do
-						if (c.kind == nil or c.kind == "side_chat") and (c.expires == nil or c.expires > now) and (not newest or (c.created or 0) > (newest.created or 0)) then
-							newest = c
-						end
-					end
-					local status = newest and newest.status
-					if status == "working" then
-						return "$accent"
-					elseif status == "awaitingInput" then
-						return "$warning"
-					elseif status == "errored" then
-						return "$danger"
-					end
-					return nil
-				end,
-				hint = function(): string?
-					return ui.shortcut_text(side_chat_key())
-				end,
-				on_click = function()
-					open_side_chat(nil)
-				end,
-			},
 			caption = function(): string?
 				local s = open()
 				if not s or not running:get() or (s :: any).steers ~= false then
@@ -2064,12 +2087,15 @@ local function Composer(): Node
 			project = project,
 			projects = where.projects,
 			-- (The shell's New project palette.)
-			on_new_project = function()
-				local add: any = require("@app/screens/shell/boundary").load("@app/screens/shell/add_project")
-				if add then
-					add.open()
-				end
-			end,
+			on_new_project = add_project,
+			place = FolderChip.place {
+				folder = folder,
+				on_add = add_project,
+				keeps = function(fixed: boolean): boolean
+					local f = if fixed then branch_fixed() else nil
+					return not fixed or (f ~= nil and f.cloud == true and f.reach ~= nil)
+				end,
+			},
 			device = device,
 			devices = where.devices,
 			checkout = checkout,
@@ -2518,7 +2544,7 @@ local function Composer(): Node
 			absolute = true,
 			pointer_events = "none",
 			left = 0,
-			right = 0,
+			right = Card.shift,
 			-- On a new chat by its top, from the page's middle: it moves with
 			-- the page as the page lays out, and what's written grows it down.
 			-- Docked, by its foot.

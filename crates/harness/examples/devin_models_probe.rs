@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         auto_approve: true,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,

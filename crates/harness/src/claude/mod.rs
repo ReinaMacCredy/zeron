@@ -2506,6 +2506,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
             let (options, details) = crate::question_options(q);
             UserInputQuestion {
                 approval: false,
+                note: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 header: field(["header", "title"]).unwrap_or("Question").into(),
                 question: field(["question", "prompt"]).unwrap_or("").into(),
@@ -2587,6 +2588,7 @@ mod tests {
     fn an_instance_runs_in_its_own_config_dir_with_its_env_and_args() {
         let exe = PathBuf::from("/bin/claude");
         let request = RunRequest {
+            code_mode: false,
             prompt: String::new(),
             harness: None,
             model: None,
@@ -2660,6 +2662,7 @@ mod tests {
         let exe = PathBuf::from("/bin/claude");
         let build = |choice: Option<&str>| {
             let mut request = RunRequest {
+                code_mode: false,
                 prompt: String::new(),
                 harness: None,
                 model: Some("claude-fable-5-1".into()),
@@ -2721,6 +2724,7 @@ mod tests {
             options.insert("contextWindow".into(), json!(window));
             options.insert("autoCompact".into(), json!(compact));
             RunRequest {
+                code_mode: false,
                 prompt: String::new(),
                 harness: None,
                 model: Some("claude-opus-5-5".into()),
@@ -2791,6 +2795,7 @@ mod tests {
     #[test]
     fn disabled_tools_launch_as_disallowed_and_need_a_new_process() {
         let request = |tools: &[&str]| RunRequest {
+            code_mode: false,
             prompt: String::new(),
             harness: None,
             model: None,
@@ -2836,6 +2841,7 @@ mod tests {
         let exe = PathBuf::from("/bin/claude");
         let args = |mode: AccessMode| -> Vec<String> {
             let request = RunRequest {
+                code_mode: false,
                 prompt: String::new(),
                 harness: None,
                 model: None,
@@ -2963,6 +2969,7 @@ mod tests {
         let harness = ClaudeHarness::new();
         let exe = PathBuf::from("/usr/bin/true");
         let mut request = RunRequest {
+            code_mode: false,
             prompt: "again".into(),
             harness: None,
             model: None,
@@ -3049,6 +3056,7 @@ mod tests {
         let exe = PathBuf::from("/usr/bin/true");
         let at = "2026-09-22T17:30:00.000Z";
         let mut request = RunRequest {
+            code_mode: false,
             prompt: "again".into(),
             harness: None,
             model: None,
@@ -3273,6 +3281,7 @@ mod access_tests {
             auto_approve: false,
             access: permission_mode,
             plan,
+            code_mode: false,
             attachments: Vec::new(),
             worktree: None,
             branch: None,

@@ -204,6 +204,7 @@ export type Props = {
 	-- `on_reach` changes. Nil (a new chat): the picker.
 	branch_fixed: (() -> Fixed?)?,
 	on_reach: ((reach: string) -> ())?,
+	place: { line: (place: Place) -> { Child }, head: ((rest: Node?, fixed: boolean) -> Node?)?, width: number? }?,
 	-- On Cloud, what a new chat's machine reaches ("devices" | "isolated";
 	-- nil: `reach_default`, the account's). No default (an edge that can't
 	-- keep one), no choice.
@@ -980,7 +981,7 @@ end
 -- way first as room runs short, to a sliver, then the name, to
 -- PROJECT_MIN; folded, the glyph alone. Its ink is the chip's own (the
 -- chevron a step quieter), so the chip's hover lifts all of it.
-type Place = {
+export type Place = {
 	-- The device it runs on, by name (nil: none to say).
 	device: (() -> string?)?,
 	-- The project (nil: none named), and whether it works in one at all.
@@ -1944,7 +1945,16 @@ return ui.component(function(props: Props): Node
 		end
 		folded:set { level = level, access_at = at, model_at = chip_at }
 	end
+	-- (One made again, its measures kept: its first layout passes can run
+	-- narrower than it ends, and a fold taken for them needs more than its
+	-- room to undo. It folds again once its pill is back at its kept width,
+	-- or soon after if it never is.)
+	local settled = pill_w:peek() <= 0
+	local settle_w = pill_w:peek()
 	local function refold()
+		if not settled then
+			return
+		end
 		local level = level_now
 		local f, r, m = pill_w:peek(), right_w:peek(), model_w:peek()
 		-- (Not laid out yet: as it was.)
@@ -2020,6 +2030,15 @@ return ui.component(function(props: Props): Node
 		props.effort:get()
 		refold()
 	end)
+
+	if not settled then
+		ui.after(250, function()
+			if not settled then
+				settled = true
+				refold()
+			end
+		end)
+	end
 
 	local picker_open = props.model_open or ui.use_state(false)
 	local step_context = ui.use_state({ n = 0, by = 0 })
@@ -3177,6 +3196,9 @@ return ui.component(function(props: Props): Node
 				pill_shown:set(size.w > 0)
 				pill_narrow:set(is_narrow(size.w))
 			end
+			if not settled and math.abs(size.w - settle_w) < 0.5 then
+				settled = true
+			end
 			refold()
 		end,
 		relative = true,
@@ -3733,7 +3755,7 @@ return ui.component(function(props: Props): Node
 					hover = { bg = "$hover", color = "$text.secondary" },
 					active = { bg = "$pressed", color = "$text.secondary" },
 					on_click = menu.toggle,
-					table.unpack(place_line(place)),
+					table.unpack((if props.place then props.place.line else place_line)(place)),
 				}
 			end
 			local picker = Dropdown {
@@ -3744,8 +3766,9 @@ return ui.component(function(props: Props): Node
 				items = (props.branches or {}) :: any,
 				empty = props.branches_empty,
 				list_when = in_project,
-				width = 280,
-				head = head_node(),
+				width = if props.place and props.place.width then props.place.width else 280,
+				placement = if props.place then { side = side(), align = "start", offset = 8 } else nil,
+				head = if props.place and props.place.head then props.place.head(head_node(), false) else head_node(),
 				trigger = function(menu: Dropdown.Menu): Node
 					return chip(menu, locale.t("ds.composer.branch.label"), {
 						device = chosen_device,
@@ -3771,8 +3794,11 @@ return ui.component(function(props: Props): Node
 					list_when = function(): boolean
 						return false
 					end,
-					width = 280,
-					head = fixed_work_in(fixed, props.on_reach),
+					width = if props.place and props.place.width then props.place.width else 280,
+					placement = if props.place then { side = side(), align = "start", offset = 8 } else nil,
+					head = if props.place and props.place.head
+						then props.place.head(fixed_work_in(fixed, props.on_reach), true)
+						else fixed_work_in(fixed, props.on_reach),
 					trigger = function(menu: Dropdown.Menu): Node
 						return chip(menu, function(): string
 							local f = fixed()

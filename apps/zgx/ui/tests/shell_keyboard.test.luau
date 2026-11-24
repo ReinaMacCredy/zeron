@@ -70,7 +70,7 @@ test("Tab reads each part of the shell in its order: the sidebar's rows, the pag
 	app:click('#titlebar >> role:button "Panel"')
 	app:frames(60)
 	local stops = walk(app, 90)
-	local from = find(stops, '"New chat"') :: number
+	local from = find(stops, '"Home"') :: number
 	local round = table.move(stops, from, #stops, 1, {})
 	local function at(what: string): number
 		local i = find(round, what)
@@ -80,7 +80,7 @@ test("Tab reads each part of the shell in its order: the sidebar's rows, the pag
 		return i :: number
 	end
 	local order = {
-		'"New chat"',
+		'"Home"',
 		'"Fix the build"',
 		'textbox "Message"',
 		'"Browser"',

@@ -112,6 +112,10 @@ pub mod methods {
     /// (`{switchable, off}`; set with `{harness, enabled}`).
     pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
     pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
+    /// Which providers on this device have Code Mode enabled
+    /// (`{supported, enabled}`; set with `{harness, enabled}`).
+    pub const GET_CODE_MODE: &str = "GetCodeMode";
+    pub const SET_CODE_MODE: &str = "SetCodeMode";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
@@ -294,6 +298,7 @@ pub mod methods {
     pub const WATCH_SPACES: &str = "WatchSpaces";
     pub const WATCH_TASKS: &str = "WatchTasks";
     pub const WATCH_TASK_STEPS: &str = "WatchTaskSteps";
+    pub const WATCH_BOTS: &str = "WatchBots";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
     /// Params are tagged `{op: createChat|createSpace|renameSpace|setSpaceIcon|
     /// deleteSpace|renameChat|setChatArchived|deleteChat|renameDevice|removeDevice|

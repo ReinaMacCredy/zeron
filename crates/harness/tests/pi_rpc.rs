@@ -23,6 +23,7 @@ fn request(cwd: &std::path::Path, prompt: &str) -> RunRequest {
         auto_approve: true,
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
+        code_mode: false,
         resume: None,
         forked_at: None,
         attachments: vec![],

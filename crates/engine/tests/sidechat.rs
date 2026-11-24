@@ -180,6 +180,7 @@ fn entry_text(entry: &SessionMessageEntry) -> String {
 fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
+            code_mode: false,
             prompt: prompt.into(),
             harness: None,
             model: None,

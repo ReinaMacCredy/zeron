@@ -169,6 +169,9 @@ export type Props = {
 	-- What the trigger says instead of the chosen item, while it says
 	-- anything (a chip with nothing to choose: "No project").
 	say: (() -> (string | Message)?)?,
+	-- With `mark`: the mark the trigger shows while no item is chosen (the
+	-- model chip naming a model its catalog doesn't list: its agent's).
+	say_mark: (() -> Mark.Name?)?,
 	empty: ((query: string) -> Empty)?,
 	-- What it lists is still on its way: its chosen item's name and its rows
 	-- hold their shape rather than saying there's nothing.
@@ -789,7 +792,7 @@ return ui.component(function(props: Props): Node
 				return if item.svg then nil else item.mark
 			end
 		end
-		return nil
+		return if props.say_mark then props.say_mark() else nil
 	end
 	-- (A registry agent's icon, in the mark's place: its seed, then the SVG.)
 	local function chosen_svg(): string

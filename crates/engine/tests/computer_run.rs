@@ -197,6 +197,7 @@ impl Harness for ComputerHarness {
 
 fn plain_question(id: &str) -> UserInputQuestion {
     UserInputQuestion {
+        note: None,
         approval: false,
         id: id.into(),
         header: "Question".into(),
@@ -286,6 +287,7 @@ where
 
 fn request(prompt: &str, mode: AccessMode) -> RunRequest {
     RunRequest {
+        code_mode: false,
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -1049,6 +1051,7 @@ async fn auto_and_full_raise_no_card_and_never_disclose_in_the_transcript() {
 async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn() {
     let rig = rig();
     let consent = UserInputQuestion {
+        note: None,
         approval: false,
         id: "consent".into(),
         header: "Computer".into(),
@@ -1069,6 +1072,7 @@ async fn a_consent_card_left_open_by_a_dead_run_is_never_answered_as_a_new_turn(
         quick: false,
     };
     let visible = UserInputQuestion {
+        note: None,
         approval: false,
         id: "q1".into(),
         header: "Foreground".into(),
@@ -1595,6 +1599,7 @@ fn push_open_question(rig: &Rig, request_id: &str) {
                 id: request_id.into(),
                 request_id: request_id.into(),
                 questions: vec![UserInputQuestion {
+                    note: None,
                     approval: false,
                     id: "q1".into(),
                     header: "Foreground".into(),

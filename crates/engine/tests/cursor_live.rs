@@ -84,6 +84,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     auto_approve: true,
                     access: zeron_proto::AccessMode::FullAccess,
                     plan: false,
+                    code_mode: false,
                     attachments: vec![],
                     worktree: None,
                     branch: None,

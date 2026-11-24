@@ -574,7 +574,7 @@ return function(props: Props): Node
 	-- off, a quiet word. What's around it gives the page.
 	local function plugin_page(key: string): Node
 		local plugin, page = string.match(key, "^([^/]*)/(.*)$")
-		if plugin == "zeron" and (page == "tasks" or page == "inbox" or page == "skills") then
+		if plugin == "zeron" and (page == "tasks" or page == "inbox" or page == "skills" or page == "bots") then
 			return boundary.screen(boundary.named(`shell.boundary.screen.{page}`), `@app/screens/{page}`, function(screen): Node
 				return screen.Page()
 			end)
@@ -2049,8 +2049,10 @@ return function(props: Props): Node
 			end
 		end
 	end)
+	-- Off since the chat's card took its place; kept until the card is signed off.
+	local live_column = ui.state("live_column", false)
 	local function sidecar_shown(): boolean
-		return in_session() and not on_plugin() and not grouped() and not expanded()
+		return live_column:get() and in_session() and not on_plugin() and not grouped() and not expanded()
 	end
 	local sidecar = ui.div {
 		id = "sidecar-slot",

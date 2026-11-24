@@ -79,6 +79,20 @@ pub(crate) fn context(
                     .join("auth.json"),
             ]
         }
+        // Its file login (one Zeron signed it in to) and the method its
+        // settings choose: a sign-in is another account's catalog. (A
+        // Keychain login has no file to tell by.)
+        HarnessId::Antigravity => match crate::acp::antigravity_home() {
+            Ok(root) => {
+                let acp = root.join("antigravity-acp");
+                vec![
+                    acp.join("acp_token.json"),
+                    acp.join("acp_business_token.json"),
+                    acp.join("settings.json"),
+                ]
+            }
+            Err(_) => vec![],
+        },
         HarnessId::Devin => {
             let data = root("XDG_DATA_HOME", home.join(".local/share"));
             let mut files = vec![data.join("devin/credentials.toml")];
@@ -144,6 +158,8 @@ pub(crate) fn context(
     for arg in &launch.args {
         field(&mut hash, arg.as_bytes());
     }
+    // A Cloud machine's credential keys for this agent (none elsewhere).
+    crate::catalog_env::hash_into(&mut hash, id);
     Ok(ModelContext {
         hash: format!("{:x}", hash.finalize()),
         binary_path: binary,

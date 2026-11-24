@@ -1179,6 +1179,7 @@
       "use_reset": "Use a reset",
       "connect": "Connect a {name} account",
       "add_account": "Add account",
+      "how_it_signs_in": "How it signs in on Cloud",
       "signing_in_to": "Signing in to {name}",
       "signing_in_hint": "Waiting for you to finish in the browser. Nothing changes until you switch.",
       "signing_in": "Signing in",
@@ -2494,6 +2495,11 @@
         "terms": "subagent delegate side chats tasks spawn",
         "description": "Off, it delegates through side chats."
       },
+      "code_mode": {
+        "label": "Code mode",
+        "terms": "code mode javascript script tool calls programmatic",
+        "description": "Run multi-step tool calls as code in one turn."
+      },
       "update_policy": {
         "label": "Update policy",
         "terms": "automatic upgrade version cli"
@@ -2628,16 +2634,7 @@
       },
       "couldnt_switch": "Couldn't switch accounts",
       "cloud": "Cloud",
-      "cloud_keys": {
-        "title": "API keys",
-        "section_description": "Instead of signing in, Cloud can use an API key. A key saved here becomes the account its agent uses on every Cloud machine, from its next turn.",
-        "anthropic": "Anthropic API key",
-        "openai": "OpenAI API key",
-        "description": "For {agent} on Cloud. Kept in Zeron's vault, never on this computer.",
-        "placeholder": "Paste a key",
-        "save": "Save",
-        "saved": "{agent} on Cloud now uses this key"
-      }
+      "cloud_key_kept": "Kept in Zeron's vault for Cloud, never on this Mac. Every Cloud machine uses it from its next turn, wherever no sign-in is in use."
     },
     "devices": {
       "title": "Devices",
@@ -4131,7 +4128,8 @@
         "quick_capture": "Quick capture",
         "skills": "Skills",
         "update_prompt": "The update dialog",
-        "whats_new": "What's New"
+        "whats_new": "What's New",
+        "bots": "Bots"
       }
     },
     "title_bar": {
@@ -4399,7 +4397,10 @@
           "week": "Weekly",
           "day": "Daily"
         }
-      }
+      },
+      "home": "Home",
+      "search": "Search",
+      "more": "More"
     },
     "tabs": {
       "close": "Close tab",
@@ -4568,6 +4569,22 @@
     "get_started": "Get started"
   },
   "chat": {
+    "folder": {
+      "none": "No project",
+      "title": "Working directory",
+      "add": "Add folder…"
+    },
+    "card": {
+      "toggles": "Chat views",
+      "toggle_card": "Workspace card",
+      "toggle_terminal": "Terminal",
+      "toggle_panel": "Right panel",
+      "reveal": "Reveal in Finder",
+      "open_in": "Open in {app}",
+      "finder": "Finder",
+      "commit": "Commit, push & PR",
+      "changes": "Changes"
+    },
     "init": {
       "couldnt_show": "{what} couldn't be shown",
       "home": "The new chat page",
@@ -6420,6 +6437,216 @@
       "label": "Floating device preview",
       "open": "Open in right panel",
       "close": "Close floating preview"
+    }
+  },
+  "bots": {
+    "chat": {
+      "hello": "Hi, I'm {name}.",
+      "needs": "{n} needs you",
+      "work": "Put your {name} to work",
+      "answered": "Answered in the chat"
+    },
+    "title": "Bots",
+    "gallery": {
+      "blurb": "Pick a Bot to message, or create a new one.",
+      "open": "All Bots",
+      "create": "Create Bot",
+      "from_you": "From you",
+      "archived": "Archived",
+      "search": "Search",
+      "no_match": "No Bots match",
+      "none_archived": "No archived Bots",
+      "archived_tag": "Archived"
+    },
+    "menu": {
+      "label": "Bot actions",
+      "pin": "Pin to top",
+      "unpin": "Unpin from top",
+      "edit": "Edit",
+      "mark_unread": "Mark unread",
+      "mark_read": "Mark read",
+      "archive": "Archive",
+      "unarchive": "Unarchive",
+      "delete": "Delete",
+      "delete_confirm": "Delete this Bot and its chat?"
+    },
+    "status": {
+      "working": "Working",
+      "waiting": "Waiting",
+      "approval": "Needs approval",
+      "input": "Needs your answer",
+      "done": "Done"
+    },
+    "needs": {
+      "title": "Needs you",
+      "decisions": "Decisions"
+    },
+    "sessions": {
+      "title": "Sessions",
+      "empty": "Nothing in progress right now",
+      "done": "Done",
+      "no_folder": "No folder"
+    },
+    "properties": {
+      "title": "Properties",
+      "sort": "Sort",
+      "status": "Status",
+      "updated": "Last updated",
+      "group": "Group",
+      "folders": "Folders",
+      "compact": "Compact view",
+      "group_by": "Group by · Folders",
+      "no_folders": "No folders yet"
+    },
+    "edit": {
+      "title": "Edit Bot",
+      "name": "Name"
+    },
+    "add": {
+      "label": "New",
+      "create": "Create Bot"
+    },
+    "panel": {
+      "empty": "No Bots yet. Create one to get started."
+    },
+    "open_n": "Open Bot {i}",
+    "templates": {
+      "scratch": {
+        "name": "Start from scratch",
+        "tag": "A blank Bot",
+        "desc": "A blank Bot. You tell it the outcome you want after creating it.",
+        "hello": "I own one outcome for you: I plan the work, start sessions and keep going until it is done.",
+        "ask": "What outcome should I own?",
+        "pick1": "Own a goal end to end",
+        "pick1_line": "Describe the outcome and I plan the work",
+        "pick2": "Break a project into sessions",
+        "pick2_line": "I split it up and run the parts",
+        "pick3": "Draft a plan first",
+        "pick3_line": "Review it before anything starts"
+      },
+      "releases": {
+        "name": "Release keeper",
+        "tag": "Ships each release on schedule",
+        "desc": "Tracks what is ready to ship, prepares the notes and keeps a release moving until it is out.",
+        "hello": "I keep releases moving: what is ready, what is blocked, and the notes that go with them.",
+        "ask": "Which release should I start with?",
+        "pick1": "Prepare the next release",
+        "pick1_line": "List what is merged and what is missing",
+        "pick2": "Find what blocks the release",
+        "pick2_line": "Open work, failing checks, unreviewed changes",
+        "pick3": "Draft the release notes",
+        "pick3_line": "From the changes since the last tag"
+      },
+      "docs": {
+        "name": "Docs writer",
+        "tag": "Keeps the docs matching the code",
+        "desc": "Finds pages that drifted from the code, rewrites them and keeps the guides current.",
+        "hello": "I keep the docs in step with the code: I find what drifted and fix it.",
+        "ask": "Where should I look first?",
+        "pick1": "Find outdated pages",
+        "pick1_line": "Compare the docs with the code they describe",
+        "pick2": "Rewrite a guide",
+        "pick2_line": "Name the guide and what it should cover",
+        "pick3": "Document a new feature",
+        "pick3_line": "From its code and its tests"
+      },
+      "triage": {
+        "name": "Triage desk",
+        "tag": "Sorts incoming bugs and requests",
+        "desc": "Reads new reports, labels them, finds duplicates and says what needs you.",
+        "hello": "I sort what comes in: I label it, link duplicates and tell you what needs a decision.",
+        "ask": "What should I sort first?",
+        "pick1": "Label the open reports",
+        "pick1_line": "By area and by how bad they are",
+        "pick2": "Find duplicates",
+        "pick2_line": "Link reports that describe one problem",
+        "pick3": "Summarize this week's reports",
+        "pick3_line": "What came in and what is still open"
+      },
+      "upkeep": {
+        "name": "Upkeep crew",
+        "tag": "Dependencies, cleanup, small fixes",
+        "desc": "Keeps dependencies current, removes what is unused and handles the small fixes nobody schedules.",
+        "hello": "I do the upkeep: dependencies, unused code and the small fixes that never get scheduled.",
+        "ask": "What should I clean up first?",
+        "pick1": "Remove unused code",
+        "pick1_line": "Find it, check it and open small changes",
+        "pick2": "Update dependencies",
+        "pick2_line": "One safe upgrade at a time",
+        "pick3": "Clear stale branches",
+        "pick3_line": "List them and what each still holds"
+      },
+      "tests": {
+        "name": "Test tender",
+        "tag": "Watches and repairs the test suite",
+        "desc": "Watches the test suite, finds flaky tests and fills the gaps in coverage.",
+        "hello": "I look after the tests: I find the flaky ones, fix them and cover what is not covered.",
+        "ask": "Which tests should I look at?",
+        "pick1": "Find flaky tests",
+        "pick1_line": "From recent runs, with how often each fails",
+        "pick2": "Cover an untested module",
+        "pick2_line": "Name it and I write its tests",
+        "pick3": "Speed up the slowest tests",
+        "pick3_line": "Measure first, then change"
+      },
+      "reviews": {
+        "name": "Review partner",
+        "tag": "A first pass on every change",
+        "desc": "Reads each change before you do and points at what deserves a closer look.",
+        "hello": "I read changes before you do and point at what deserves your attention.",
+        "ask": "Which change should I read?",
+        "pick1": "Review the open changes",
+        "pick1_line": "A first pass with the risky parts marked",
+        "pick2": "Check a change for regressions",
+        "pick2_line": "What it could break and how to tell",
+        "pick3": "Summarize what merged this week",
+        "pick3_line": "By area, with what to watch"
+      },
+      "incidents": {
+        "name": "Incident scribe",
+        "tag": "Timelines and follow-ups",
+        "desc": "Writes the timeline while an incident runs and follows the fixes afterwards.",
+        "hello": "I write down what happens during an incident and follow the fixes afterwards.",
+        "ask": "What is happening?",
+        "pick1": "Start a timeline",
+        "pick1_line": "I note what happened and when",
+        "pick2": "Write the review",
+        "pick2_line": "Causes, what helped, what to change",
+        "pick3": "Track the follow-ups",
+        "pick3_line": "Until each one is done"
+      }
+    },
+    "create": {
+      "title": "Create Bot",
+      "close": "Close",
+      "goal": "What’s your goal?",
+      "goal_blurb": "Give a Bot an outcome to own. It plans the work, starts sessions and keeps going until it’s done",
+      "custom": "Your custom Bot",
+      "custom_blurb": "Create your own Bot and tell it the outcome you want",
+      "search": "Search templates",
+      "templates": "Templates",
+      "no_templates": "No templates match",
+      "next": "Continue",
+      "customize": "Customize your Bot",
+      "customize_blurb": "You can set this Bot’s behavior after creating it",
+      "name": "Name your Bot",
+      "icons": "Icons",
+      "upload": "Upload",
+      "shuffle": "Shuffle",
+      "glyphs": "Icon",
+      "frames": "Frame",
+      "colors": "Color",
+      "drop": "Drop an image here",
+      "kinds": "PNG, JPG, GIF or WebP, up to 5 MB",
+      "choose": "Choose image",
+      "images": "Images",
+      "back": "Back",
+      "create": "Create",
+      "default_name": "New Bot",
+      "too_large": "That image is over 5 MB. Choose a smaller one.",
+      "invalid": "That file isn’t an image Zeron can read.",
+      "failed": "Couldn’t create the Bot. Try again.",
+      "no_agent": "Pick a model in a new chat first, then create the Bot."
     }
   }
 }

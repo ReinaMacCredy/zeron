@@ -1,8 +1,5 @@
 local ds = require("@ds")
-local AgentMark = require("@ds/agent_mark")
 local Avatar = require("@ds/avatar")
-local context_usage = require("@ds/context_usage")
-local HoverCard = require("@ds/hover_card")
 local locale = require("@ds/locale")
 local Menu = require("@ds/menu")
 local motion = require("@ds/motion")
@@ -14,9 +11,10 @@ local auth = require("@account/auth")
 local boundary = require("@app/screens/shell/boundary")
 local keys = require("@app/screens/shell/keys")
 local route = require("@app/screens/shell/route")
+local view = require("@app/screens/shell/view")
 local art = require("@app/screens/shell/art")
 local tasks_store = require("@app/screens/tasks/store")
-local Builtins = require("@app/screens/plugins/builtins")
+local bots_store = require("@app/screens/bots/store")
 local updates = require("@app/screens/shell/updates")
 
 local M = {}
@@ -25,28 +23,22 @@ M.W = art.RAIL_W
 M.over = ui.state("shell_rail_over", false)
 
 local BUTTON, GLYPH, GAP, TOP, PAD = 34, 18, 6, 44, 8
-local RING_RADIUS, RING_STROKE, RING_GLYPH = 13, 2.5, 14
+local HOVER_MS, SWAP_MS = 150, 120
+local MENU_RADIUS, MENU_ROW = ui.raw(12, "the Bots menus' corner"), ui.raw(31, "the Bots menus' row")
 local AVATAR = 24
-local CARD_W = 290
 local HOVER_FADE = "cubicBezier(.4, 0, .2, 1)"
 local REPO = "https://github.com/zeronsh/comet"
 
 local PROVIDERS = {
-	{ id = "claude-code", name = "Claude Code", mark = "claude" },
-	{ id = "codex", name = "Codex", mark = "openai" },
-	{ id = "cursor", name = "Cursor", mark = "cursor" },
-	{ id = "grok", name = "Grok", mark = "grok" },
-	{ id = "devin", name = "Devin", mark = "devin" },
-	{ id = "opencode", name = "OpenCode", mark = "opencode" },
-	{ id = "pi", name = "Pi", mark = "pi" },
-	{ id = "hermes", name = "Hermes", mark = "hermes" },
-	{ id = "muse", name = "Muse Code", mark = "muse" },
-}
-
-local WINDOW_NAMES: { [string]: string } = {
-	Session = "shell.rail.usage.window.session",
-	Week = "shell.rail.usage.window.week",
-	Day = "shell.rail.usage.window.day",
+	{ id = "claude-code", name = "Claude Code" },
+	{ id = "codex", name = "Codex" },
+	{ id = "cursor", name = "Cursor" },
+	{ id = "grok", name = "Grok" },
+	{ id = "devin", name = "Devin" },
+	{ id = "opencode", name = "OpenCode" },
+	{ id = "pi", name = "Pi" },
+	{ id = "hermes", name = "Hermes" },
+	{ id = "muse", name = "Muse Code" },
 }
 
 local pages = ui.shared("plugins.pages", {} :: { any })
@@ -86,20 +78,71 @@ type ButtonProps = {
 	lit: (() -> boolean)?,
 	on_click: (() -> ())?,
 	expanded: (() -> boolean)?,
+	icon: string?,
+	bold: string?,
+	badge: Node?,
 	[number]: Child,
 }
+
+local function fade(target: any, ms: number, ease: string): any
+	return ui.tween(target, { duration = math.max(motion.ms(ms), 1), ease = ease })
+end
 
 -- ds.IconButton's hover snaps; this eases as gpui's rail does (motion::HOVER_FADE).
 local RailButton = ui.component(function(props: ButtonProps): Node
 	local over = ui.use_state(false)
+	local on = ui.computed(function(): number
+		return if props.lit ~= nil and props.lit() then 1 else 0
+	end)
 	local bright = ui.computed(function(): number
-		return if over:get() or (props.lit ~= nil and props.lit()) then 1 else 0
+		return if over:get() or on:get() == 1 then 1 else 0
+	end)
+	local wash = ui.computed(function(): number
+		return if over:get() and on:get() == 0 then 1 else 0
 	end)
 	local tip = if props.tooltip
 		then ui.show(function(): boolean
 			return props.quiet == nil or not props.quiet()
 		end, Tooltip { props.tooltip })
 		else nil
+	local function fill(bg: string, shown: any): Node
+		return ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			rounded = "$radius.lg",
+			bg = bg,
+			opacity = fade(shown, HOVER_MS, HOVER_FADE),
+			pointer_events = "none",
+		}
+	end
+	local glyph: Child = props[1]
+	if props.icon then
+		-- Each variant is mounted only while it shows: an image left at opacity 0 holds the shell's first frame after a route change back.
+		local ms = math.max(motion.ms(SWAP_MS), 1)
+		local outline, bold = props.icon, props.bold or props.icon
+		glyph = ui.div {
+			relative = true,
+			w = GLYPH,
+			h = GLYPH,
+			ui.presence(function(): string
+				return if on:get() == 1 then bold else outline
+			end, function(name: string): Node
+				return ds.Icon { name = name :: any, size = GLYPH }
+			end, {
+				absolute = true,
+				left = 0,
+				top = 0,
+				w = GLYPH,
+				h = GLYPH,
+				enter = { opacity = { 0, 1 }, duration = ms, ease = "outQuad" },
+				exit = { opacity = 0, duration = ms, ease = "outQuad" },
+			}),
+			props.badge,
+		}
+	end
 	return ui.button {
 		id = props.key,
 		label = props.label,
@@ -118,106 +161,177 @@ local RailButton = ui.component(function(props: ButtonProps): Node
 		hover = { bg = "#00000000" },
 		active = { bg = "$pressed" },
 		cursor = if props.on_click then "pointer" else nil,
-		color = ui.tween(bright, { from = "$text.secondary", to = "$text.primary", duration = math.max(motion.ms(150), 1), ease = HOVER_FADE }),
+		color = ui.tween(bright, { from = "$text.secondary", to = "$text.primary", duration = math.max(motion.ms(HOVER_MS), 1), ease = HOVER_FADE }),
 		on_hover = function(inside: boolean)
 			over:set(inside)
 		end,
 		on_click = props.on_click,
-		ui.div {
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			rounded = "$radius.lg",
-			bg = "$hover",
-			opacity = ui.tween(bright, { duration = math.max(motion.ms(150), 1), ease = HOVER_FADE }),
-			pointer_events = "none",
-		},
-		props[1],
+		fill("$zeron.selected.flat.bg", on),
+		fill("$hover", wash),
+		glyph,
 	}
 end)
 
-local function new_chat(): Node
+local function more_owns(c: any): boolean
+	if c.name ~= "plugin" then
+		return false
+	end
+	if c.plugin == "github" then
+		return c.page == "pulls"
+	end
+	return c.plugin == "zeron" and (c.page == "inbox" or c.page == "tasks" or c.page == "skills")
+end
+
+local function home(): Node
 	return RailButton {
 		key = "rail-new-chat",
 		label = function(): string
-			return locale.s("ds.sidebar.new_chat")
+			return locale.s("shell.rail.home")
 		end,
 		tooltip = function(): string
-			return with_key(locale.s("ds.sidebar.new_chat"), "shell.new_chat")
+			return with_key(locale.s("shell.rail.home"), "shell.new_chat")
 		end,
 		lit = function(): boolean
-			return route.current:get().name == "home"
+			local name = route.current:get().name
+			return (name == "home" or name == "session") and not bots_store.mode:get()
 		end,
 		on_click = function()
 			route.new_chat()
 		end,
-		ds.Icon { name = "pen-new-square", size = GLYPH },
+		icon = "home",
+		bold = "home-bold",
 	}
 end
 
-local function pull_requests(): Node
-	local function title(): string
-		local page = pulls_page()
-		return if page then page.title or "" else ""
-	end
-	return ui.show(function(): boolean
-		return pulls_page() ~= nil
-	end, RailButton {
-		key = "open-pull-requests",
-		label = title,
-		tooltip = title,
+local function bots(): Node
+	return RailButton {
+		key = "rail-bots",
+		label = function(): string
+			return locale.s("bots.title")
+		end,
+		tooltip = function(): string
+			return locale.s("bots.title")
+		end,
 		lit = function(): boolean
-			local c = route.current:get()
-			return c.name == "plugin" and c.plugin == "github" and c.page == "pulls"
+			return bots_store.mode:get()
 		end,
 		on_click = function()
-			route.plugin_page("github", "pulls")
+			route.plugin_page("zeron", "bots")
 		end,
-		ds.Icon { name = "pull-request", size = GLYPH },
+		icon = "bot",
+		bold = "bot-bold",
+	}
+end
+
+local function search(): Node
+	return RailButton {
+		key = "rail-search",
+		label = function(): string
+			return locale.s("shell.rail.search")
+		end,
+		tooltip = function(): string
+			return with_key(locale.s("shell.rail.search"), "shell.palette")
+		end,
+		on_click = function()
+			view.palette:set(not view.palette:peek())
+		end,
+		icon = "search",
+		bold = "search-bold",
+	}
+end
+
+local function tasks_badge(): Node
+	return ui.show(function(): boolean
+		return tasks_store.unseen:get() > 0
+	end, ui.text {
+		id = "rail-tasks-badge",
+		function(): string
+			return tostring(tasks_store.unseen:get())
+		end,
+		absolute = true,
+		top = -5,
+		right = -7,
+		min_w = 14,
+		h = 14,
+		px = ui.raw(3, "gpui badge"),
+		rounded = "$radius.full",
+		bg = "$accent",
+		color = ui.raw("#ffffff", "white on the accent, as gpui"),
+		text_size = ui.raw(9, "gpui badge"),
+		align = "center",
+		line_height = 14,
 	})
 end
 
--- Inbox, Tasks and Skills (app_rail.rs), built-in pages on the plugin route; Tasks counts unseen captures.
-local function page_entry(page: string, icon: string, word: string): Node
-	local count = if page == "tasks" then tasks_store.unseen else nil
-	return RailButton {
-		key = `rail-{page}`,
-		label = function(): string
-			return locale.s(word)
-		end,
-		tooltip = function(): string
-			return locale.s(word)
-		end,
-		lit = function(): boolean
-			local c = route.current:get()
-			return c.name == "plugin" and c.plugin == "zeron" and c.page == page
-		end,
-		on_click = function()
-			route.plugin_page("zeron", page)
-		end,
-		ui.div { relative = true, w = GLYPH, h = GLYPH, ds.Icon { name = icon, size = GLYPH }, if count then ui.show(function(): boolean
-			return count:get() > 0
-		end, ui.text {
-			id = "rail-tasks-badge",
-			function(): string
-				return tostring(count:get())
+local function more(): Node
+	local open = ui.use_state(false)
+	local shown = ui.computed(function(): number
+		return if open:get() then 1 else 0
+	end)
+	local function row(id: string, icon: any, label: any, go: () -> ()): Node
+		return Menu.Row {
+			id = id,
+			icon = icon,
+			label = label,
+			h = MENU_ROW,
+			on_click = function()
+				open:set(false)
+				go()
 			end,
-			absolute = true,
-			top = -5,
-			right = -7,
-			min_w = 14,
-			h = 14,
-			px = ui.raw(3, "gpui badge"),
-			rounded = "$radius.full",
-			bg = "$accent",
-			color = ui.raw("#ffffff", "white on the accent, as gpui"),
-			text_size = ui.raw(9, "gpui badge"),
-			align = "center",
-			line_height = 14,
-		}) else nil },
-	}
+		}
+	end
+	local function page(id: string, icon: string, word: string): Node
+		return row(`rail-{id}`, icon, ui.t(word), function()
+			route.plugin_page("zeron", id)
+		end)
+	end
+	return ui.popover(Menu.panel {
+		open = open,
+		anchor = RailButton {
+			key = "rail-more",
+			label = function(): string
+				return locale.s("shell.rail.more")
+			end,
+			tooltip = function(): string
+				return locale.s("shell.rail.more")
+			end,
+			quiet = function(): boolean
+				return open:get()
+			end,
+			lit = function(): boolean
+				return open:get() or more_owns(route.current:get())
+			end,
+			expanded = function(): boolean
+				return open:get()
+			end,
+			on_click = ui.toggle(open),
+			icon = "more-horizontal",
+			bold = "more-horizontal-bold",
+			badge = tasks_badge(),
+		},
+		label = function(): string
+			return locale.s("shell.rail.more")
+		end,
+		placement = { side = "right", align = "start", offset = 6 },
+		w = "$zeron.menu.width",
+		rounded = MENU_RADIUS,
+		origin = { 0, 0 },
+		opacity = ui.tween(shown, { duration = math.max(motion.ms(140), 1), ease = "cubicBezier(.2, .8, .2, 1)" }),
+		scale = ui.tween(shown, { from = 0.96, to = 1, duration = math.max(motion.ms(140), 1), ease = "cubicBezier(.2, .8, .2, 1)" }),
+		Menu.Group {
+			page("inbox", "inbox", "inbox.title"),
+			page("tasks", "tasks", "tasks.title"),
+			page("skills", "magic-stick", "skills.title"),
+			ui.show(function(): boolean
+				return pulls_page() ~= nil
+			end, row("open-pull-requests", "pull-request", function(): string
+				local p = pulls_page()
+				return if p then p.title or "" else ""
+			end, function()
+				route.plugin_page("github", "pulls")
+			end)),
+		},
+	})
 end
 
 type Live = { provider: any, account: any }
@@ -246,285 +360,6 @@ local function most_used(account: any): number
 end
 M.live_accounts = live_accounts
 M.most_used = most_used
-
-local function tightest(list: { Live }): Live?
-	local best: Live? = nil
-	for _, live in list do
-		if best == nil or most_used(live.account) >= most_used(best.account) then
-			best = live
-		end
-	end
-	return best
-end
-
-local function window_name(label: string): string
-	local key = WINDOW_NAMES[label]
-	return if key then locale.s(key) else label
-end
-
-local function percent(used: number): string
-	return `{math.floor(math.clamp(used, 0, 1) * 100 + 0.5)}%`
-end
-
-local function ring_label(): string
-	local shown = tightest(live_accounts())
-	if not shown then
-		local loading = agents.on_device:get()[""] == nil
-		return locale.s(if loading then "shell.rail.usage.loading" else "shell.rail.usage.none")
-	end
-	if most_used(shown.account) >= 1 then
-		return locale.s("shell.rail.usage.limit")
-	end
-	local parts: { string } = {}
-	for _, w in shown.account.windows do
-		table.insert(parts, `{window_name(w.label)} {percent(w.used)}`)
-	end
-	return locale.s("shell.rail.usage.line", { name = shown.provider.name, windows = table.concat(parts, ", ") })
-end
-
-local function window_row(w: any, binding: boolean): Node
-	local hot = w.used >= 1
-	local tone = if hot then "$danger" else "$text.secondary"
-	return ui.column {
-		gap = ui.raw(2, "a window's bar and the line under it, as gpui's card"),
-		ui.row {
-			items = "center",
-			gap = "$space.2",
-			ui.text { window_name(w.label), w = ui.raw(62, "gpui's window column"), shrink = 0, truncate = true, color = tone },
-			ds.ProgressBar {
-				value = function(): number
-					return math.clamp(w.used, 0, 1)
-				end,
-				tone = if w.used >= 0.95 then "danger" elseif w.used >= 0.8 then "warning" else "accent",
-				grow = 1,
-			},
-			ui.text {
-				percent(w.used),
-				w = ui.raw(44, "gpui's percent column"),
-				shrink = 0,
-				tabular = true,
-				align = "right",
-				color = if hot then "$danger" else "$text.primary",
-			},
-		},
-		if hot and binding
-			then ui.text {
-				ui.t("shell.rail.usage.limit_reached"),
-				pl = ui.raw(70, "under the bar: the name's column and its gap"),
-				color = tone,
-			}
-			else nil,
-	}
-end
-
-local function account_section(live: Live, binding: any): Node
-	local a = live.account
-	local rows: { any } = {
-		gap = "$space.2",
-		ui.row {
-			items = "center",
-			gap = "$zeron.space.tight",
-			AgentMark.Mark { label = live.provider.name, mark = live.provider.mark, seed = live.provider.id, size = 13, bare = true },
-			ui.text { live.provider.name, shrink = 0, weight = "$font.weight.medium", text_size = "$font.size.sm" },
-			if a.plan ~= "" then ui.text { a.plan, shrink = 0, color = "$text.secondary" } else nil,
-			ui.div { grow = 1 },
-			PrivateText { a.email, reveal = false, truncate = true, shrink = 1, min_w = 0, color = "$text.secondary", text_size = "$font.size.xs" },
-		},
-	}
-	if a.error then
-		table.insert(rows, ui.text { a.error, wrap = true, color = "$warning" })
-	end
-	for _, w in a.windows do
-		table.insert(rows, window_row(w, w == binding))
-	end
-	return ui.column(rows)
-end
-
-local function hover_card(): Node
-	return HoverCard.Card {
-		id = "rail-usage-hover-card",
-		w = function(): any
-			return if #live_accounts() > 0 then CARD_W else "auto"
-		end,
-		p = 0,
-		gap = 0,
-		text_size = "$font.size.xs",
-		ui.switch(function(): string
-			return if #live_accounts() > 0 then "accounts" else "none"
-		end, {
-			accounts = ui.column {
-				w_full = true,
-				gap = 0,
-				ui.column {
-					w_full = true,
-					p = "$space.2",
-					gap = "$space.3",
-					ui.row {
-						w_full = true,
-						items = "baseline",
-						justify = "between",
-						ui.text { ui.t("shell.rail.usage.title"), weight = "$font.weight.medium", text_size = "$font.size.sm" },
-						ui.text { ui.t("shell.rail.usage.used"), color = "$text.secondary" },
-					},
-					ui.column {
-						w_full = true,
-						gap = "$space.3",
-						ui.each(ui.computed(function(): { any }
-							local list = live_accounts()
-							local best = tightest(list)
-							local binding: any = nil
-							if best then
-								for _, w in best.account.windows do
-									if binding == nil or w.used > binding.used then
-										binding = w
-									end
-								end
-							end
-							local out: { any } = {}
-							for _, live in list do
-								table.insert(out, { live = live, binding = binding })
-							end
-							return out
-						end), function(item: any): Node
-							return account_section(item.live, item.binding)
-						end, {
-							key = function(item: any): string
-								return `{item.live.provider.id}:{item.live.account.id}`
-							end,
-							gap = "$space.3",
-						}),
-					},
-				},
-				Menu.Rule {},
-				ui.row {
-					w_full = true,
-					px = "$space.2",
-					py = "$space.2",
-					items = "center",
-					justify = "between",
-					color = "$text.secondary",
-					ui.text { ui.t("shell.rail.usage.open_page") },
-					ds.Icon { name = "alt-arrow-right", size = 12 },
-				},
-			},
-			none = ui.text { ring_label, px = "$space.2", py = "$space.1", color = "$text.primary", wrap = true },
-		}),
-	}
-end
-
-local function usage_ring(): Node
-	ui.effect(function()
-		agents.watch_device("")
-	end)
-	local over = ui.use_state(false)
-	local clicked = ui.use_state(false)
-	local function shown(): Live?
-		return tightest(live_accounts())
-	end
-	local function hot(): boolean
-		local s = shown()
-		return s ~= nil and most_used(s.account) >= 1
-	end
-	local function lit(): boolean
-		local c = route.current:get()
-		return c.name == "settings" and c.page == "usage"
-	end
-	local bright = ui.computed(function(): number
-		return if over:get() or lit() then 1 else 0
-	end)
-	local card = ui.show(function(): boolean
-		return not clicked:get()
-	end, hover_card())
-	return ui.button {
-		id = "rail-usage",
-		label = ring_label,
-		tooltip = card,
-		tooltip_placement = { side = "right", align = "end", offset = 6 },
-		tooltip_interactive = true,
-		tooltip_delay = 120,
-		relative = true,
-		w = BUTTON,
-		h = BUTTON,
-		shrink = 0,
-		p = 0,
-		items = "center",
-		justify = "center",
-		rounded = "$radius.lg",
-		bg = "#00000000",
-		hover = { bg = "#00000000" },
-		active = { bg = "$pressed" },
-		cursor = "pointer",
-		color = "$text.primary",
-		on_hover = function(inside: boolean)
-			over:set(inside)
-			if inside then
-				agents.refresh_device("")
-			else
-				clicked:set(false)
-			end
-		end,
-		on_click = function()
-			clicked:set(true)
-			route.settings("usage")
-		end,
-		ui.div {
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			rounded = "$radius.lg",
-			bg = "$hover",
-			opacity = ui.tween(bright, { duration = math.max(motion.ms(150), 1), ease = HOVER_FADE }),
-			pointer_events = "none",
-		},
-		ui.canvas {
-			absolute = true,
-			left = 0,
-			top = 0,
-			w = BUTTON,
-			h = BUTTON,
-			pointer_events = "none",
-			draw = function(c, w, h)
-				local s = shown()
-				local f = if hot() then 1 elseif s then most_used(s.account) else 0
-				c:stroke(ui.path():arc(w / 2, h / 2, RING_RADIUS, 0, 360), "$border", RING_STROKE)
-				if f > 0 then
-					local ink = if hot() then "$danger" else context_usage.usage_ink(f)
-					c:stroke(ui.path():arc(w / 2, h / 2, RING_RADIUS, -90, 360 * f), ink, RING_STROKE, { cap = "round" })
-				end
-			end,
-		},
-		ui.presence(function(): string
-			local s = shown()
-			return if s then s.provider.id else ""
-		end, function(id: string): Node
-			if id == "" then
-				return ui.div { opacity = 0.5, ds.Icon { name = "usage-chart", size = RING_GLYPH } }
-			end
-			for _, provider in PROVIDERS do
-				if provider.id == id then
-					return AgentMark.Mark { label = provider.name, mark = provider.mark, seed = id, size = RING_GLYPH, bare = true }
-				end
-			end
-			return ui.div {}
-		end),
-		ui.show(hot, ui.row {
-			id = "rail-usage-limit",
-			absolute = true,
-			top = ui.raw(1, "gpui's badge on the ring's corner"),
-			right = 0,
-			w = 12,
-			h = 12,
-			items = "center",
-			justify = "center",
-			rounded = "$radius.full",
-			bg = "$danger",
-			pointer_events = "none",
-			ui.text { "!", text_size = "$font.size.xs", weight = "$font.weight.bold", color = "$accent.text" },
-		}),
-	}
-end
 
 local function help_row(id: string, icon: any, label: string, on_click: () -> ()): Node
 	return Menu.Row { id = id, icon = icon, label = ui.t(label), on_click = on_click }
@@ -558,7 +393,8 @@ local function help(): Node
 				return open:get()
 			end,
 			on_click = ui.toggle(open),
-			ds.Icon { name = "lucide-circle-help", size = GLYPH },
+			icon = "lucide-circle-help",
+			bold = "question-circle-bold",
 		},
 		label = function(): string
 			return locale.s("shell.rail.help")
@@ -772,27 +608,23 @@ local function settings_entry(): Node
 				route.settings()
 			end
 		end,
-		ds.Icon { name = "settings", size = GLYPH },
+		icon = "settings",
+		bold = "settings-bold",
 	}
 end
 
 M.Rail = ui.component(function(): Node
 	-- Voice joins above Help.
 	local entries: { any } = {
-		new_chat(),
-		page_entry("inbox", "inbox", "inbox.title"),
-		page_entry("tasks", "tasks", "tasks.title"),
-		page_entry("skills", "magic-stick", "skills.title"),
-		pull_requests(),
+		home(),
+		bots(),
+		search(),
+		more(),
 		ui.div { grow = 1 },
-		-- (Built as Usage is on: off, its watch of the agents' limits goes with it.)
-		ui.presence(function(): string?
-			return if Builtins.on("usage") then "usage" else nil
-		end, usage_ring),
 		help(),
+		settings_entry(),
 		update_entry(),
 		account_entry(),
-		settings_entry(),
 	}
 	local rail: { [any]: any } = {
 		id = "app-rail",

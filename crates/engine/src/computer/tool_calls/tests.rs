@@ -123,6 +123,7 @@ async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        code_mode: false,
         prompt: prompt.into(),
         harness: None,
         model: None,

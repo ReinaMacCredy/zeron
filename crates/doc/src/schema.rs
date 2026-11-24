@@ -3083,6 +3083,7 @@ mod tests {
             issued_at: 1,
             edited_at: None,
             delivery_gate: None,
+            config: None,
         };
         a.push_queued(&row("q1")).unwrap();
         a.set_queued_text("q1", "later, edited", 2).unwrap();
@@ -4700,6 +4701,7 @@ mod computer_marker_tests {
     fn question() -> UserInputQuestion {
         UserInputQuestion {
             approval: false,
+            note: None,
             id: "q1".into(),
             header: "Foreground".into(),
             question: "Can I bring Safari to the front?".into(),
