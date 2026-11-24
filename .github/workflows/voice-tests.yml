@@ -108,6 +108,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Compile subscription bridge without audio hardware or provider access
         run: cargo check --locked -p zeron-harness -p zeron-engine
+      # The fake helper is a /usr/bin/python3 script, and a fresh macOS runner's
+      # first start of it can take longer than the helper's 5 s to answer.
+      - name: Start the fake helper's interpreter once
+        if: runner.os == 'macOS'
+        run: /usr/bin/python3 -c pass
       - name: Installed and development runtime resolution
         run: cargo test --locked -p zeron-voice-media --lib
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0

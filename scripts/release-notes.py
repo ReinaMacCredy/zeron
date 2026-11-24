@@ -10,7 +10,7 @@ import tomllib
 FORK = 'ReinaMacCredy/zeron'
 UPSTREAM = 'zeronsh/zeron'
 OWNER = 'ReinaMacCredy'
-WHATS_NEW = pathlib.Path(__file__).resolve().parent.parent / 'crates/ui/whats_new.toml'
+WHATS_NEW = pathlib.Path(__file__).resolve().parent.parent / 'whats_new.toml'
 
 
 def version(tag):
