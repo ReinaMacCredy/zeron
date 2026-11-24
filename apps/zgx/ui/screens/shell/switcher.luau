@@ -286,11 +286,13 @@ function M.step(by: number): boolean
 		end)
 		return true
 	end
-	local el = column and column.element
+	local where = route.current:peek().name
+	-- (Settings is a modal itself, left below: only what's over it keeps the press.)
+	local settings: any = if where == "settings" then boundary.load("@app/screens/shell/settings") else nil
+	local el = if settings then settings.inside.element else column and column.element
 	if view.palette:peek() or (el and el:overlaid()) then
 		return true
 	end
-	local where = route.current:peek().name
 	if where == "settings" then
 		route.leave_settings()
 	elseif where == "plugin" then

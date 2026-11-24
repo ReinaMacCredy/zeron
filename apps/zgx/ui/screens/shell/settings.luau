@@ -605,6 +605,7 @@ local SCRIM = { duration = 180, ease = "cubicBezier(0.2, 0.8, 0.2, 1)" }
 -- held in it, given back as it goes), its own dim made clear: the scrim is
 -- this one's and fades with the panel. Escape, a click on the scrim, the ×
 -- and ⌘, again close it (the route leaves); it stays up until it has gone.
+M.inside = ui.ref()
 M.Panel = ui.component(function(): Node
 	local function open(): boolean
 		return route.current:get().name == "settings"
@@ -689,6 +690,7 @@ M.Panel = ui.component(function(): Node
 				return ui.show(function(): boolean
 					return up:get()
 				end, ui.div {
+					ref = M.inside,
 					w_full = true,
 					h_full = true,
 					relative = true,
