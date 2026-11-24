@@ -3,6 +3,7 @@ local Button = require("@self/button")
 local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
 local Links = require("@self/links")
+local HtmlFile = require("@self/html_file")
 local DataTable = require("@self/data_table")
 local Csv = require("@self/csv")
 local ReplyPicture = require("@self/reply_picture")
@@ -37,6 +38,8 @@ local LINE_MOST = 400
 local READ_MOST = 2 * 1024 * 1024
 local PICTURE = { png = true, jpg = true, jpeg = true, gif = true, webp = true }
 local PAGE = { html = true, htm = true }
+local PROSE = { md = true, markdown = true }
+local PROSE_LINES, RENDER_MOST = 40, 360
 local OPEN_MOVE = { duration = 200, ease = "cubicBezier(.2,.8,.2,1)" }
 local HOVER_MOVE = { duration = 100, ease = "linear" }
 local ROW_H, LIST_MOST = 38, 560
@@ -174,12 +177,34 @@ local function text_body(text: string, truncated: boolean): Node
 	}
 end
 
+local function prose_body(text: string, truncated: boolean, row: RowProps): Node
+	local shown, more = head(text, PROSE_LINES)
+	local Markdown = (require :: any)("@self/markdown")
+	return ui.column {
+		w_full = true,
+		min_w = 0,
+		gap = "$space.2",
+		ui.column {
+			class = "md-file-prose",
+			w_full = true,
+			min_w = 0,
+			max_h = RENDER_MOST,
+			overflow = "hidden",
+			Markdown { text = shown, small = true, open = row.open, link_menu = row.menu },
+		},
+		more_of(more, truncated),
+	}
+end
+
 local Preview = ui.component(function(props: { row: RowProps, item: Item, file: File, measured: State<number>, close: () -> () }): Node
 	local files, item, file = props.row.files, props.item, props.file
 	local ext = ext_of(file.name)
 	local picture = PICTURE[ext] == true
+	local root = if files.root then files.root() else nil
+	local whole = if file.outside then file.path elseif root then `{(string.gsub(root, "/+$", ""))}/{file.path}` else nil
+	local page = PAGE[ext] == true and whole ~= nil and files.here() and (ui :: any).web ~= nil
 	local got = ui.use_state(nil :: any)
-	if not picture and (file.size or 0) <= READ_MOST then
+	if not picture and not page and (file.size or 0) <= READ_MOST then
 		files.read(item.target):after(function(r: any)
 			got:set(if type(r) == "table" then r else false)
 		end, function()
@@ -188,6 +213,22 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 		end)
 	end
 	local function body(): Node
+		if page then
+			return ui.column {
+				class = "md-file-page",
+				w_full = true,
+				h = RENDER_MOST,
+				rounded = ui.raw(8, "the page's corner inside the preview"),
+				overflow = "hidden",
+				HtmlFile.View {
+					path = whole :: string,
+					label = file.name,
+					saved = function(): string
+						return ""
+					end,
+				},
+			}
+		end
 		if picture then
 			local pictures = props.row.pictures
 			if file.outside or not pictures or pictures.resolve(file.path) == nil then
@@ -225,6 +266,8 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 			local r = got:peek()
 			if ext == "csv" or ext == "tsv" then
 				return csv_body(r.text, ext, r.truncated == true)
+			elseif PROSE[ext] then
+				return prose_body(r.text, r.truncated == true, props.row)
 			end
 			return text_body(r.text, r.truncated == true)
 		end, { w_full = true, min_w = 0 })
@@ -435,21 +478,6 @@ M.Row = ui.component(function(props: RowProps): Node
 					color = "$text.tertiary",
 				},
 			},
-			ui.show(page, IconButton {
-				icon = "global",
-				size = "md",
-				class = "md-file-browse",
-				mr = "$space.2",
-				label = function(): string
-					return locale.s("ds.file_card.open_file_in_browser", { name = name() })
-				end,
-				tooltip = locale.s("ds.html_card.open_in_browser"),
-				on_click = function()
-					if files.browse then
-						files.browse(target)
-					end
-				end,
-			}),
 			ui.row {
 				relative = true,
 				shrink = 0,
@@ -493,6 +521,22 @@ M.Row = ui.component(function(props: RowProps): Node
 					opacity = motion.tween(ui.computed(function(): number
 						return if acting() then 1 else 0
 					end), HOVER_MOVE),
+					ui.show(page, IconButton {
+						icon = "global",
+						size = "md",
+						class = "md-file-browse",
+						label = function(): string
+							return locale.s("ds.file_card.open_file_in_browser", { name = name() })
+						end,
+						tooltip = locale.s("ds.html_card.open_in_browser"),
+						on_focus = focus,
+						on_blur = blur,
+						on_click = function()
+							if files.browse then
+								files.browse(target)
+							end
+						end,
+					}),
 					IconButton {
 						icon = "eye",
 						size = "md",

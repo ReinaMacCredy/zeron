@@ -499,6 +499,21 @@ function M.tab_with_file(key: string, path: string, except: string?): string?
 	return nil
 end
 
+function M.shows_file(session: any, path: string, project: any?): boolean
+	local k = state.key(session, project)
+	local files = if shell_view then shell_view.files else nil
+	if not k or not files or files:get() ~= true then
+		return false
+	end
+	local s = state.of(k)
+	local active = if s.active then state.find(k, s.active) else nil
+	if not (active and active.kind == "files") then
+		return false
+	end
+	local shown = Files.tab_file(active.id)
+	return (shown or active.path) == path
+end
+
 -- Opens `path` in `session`'s panel (a file mentioned in a chat, the
 -- composer's): its tab if it's open already; else the file tab showing, by
 -- its rules (a clean file replaced, one with unsaved edits kept and this one
