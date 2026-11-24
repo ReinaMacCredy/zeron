@@ -13,10 +13,8 @@ pub mod denylist;
 pub mod desktop_operation_queue;
 pub mod element_identity;
 pub mod engine_seams;
-pub mod event_interests;
 #[cfg(test)]
 pub mod fake_backend;
-pub mod frame_route;
 pub mod geometry;
 pub mod host_wire;
 #[cfg(target_os = "macos")]
@@ -27,7 +25,6 @@ pub mod runtime;
 pub mod screenshot_frames;
 pub mod scroll_calibration;
 pub mod scroll_gearing_file;
-pub mod scroll_units;
 pub mod service;
 pub mod setup_signal;
 pub mod shield;
