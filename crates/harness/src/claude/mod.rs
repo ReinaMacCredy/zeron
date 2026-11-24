@@ -186,6 +186,18 @@ fn reports_background(version: Option<&semver::Version>) -> bool {
     version.is_some_and(|version| *version >= REPORTS_BACKGROUND_SINCE)
 }
 
+// The first Claude CLI live-verified to run Code Mode headless (`--print`, stream-json).
+const CODE_MODE_HEADLESS_SINCE: semver::Version = semver::Version::new(2, 1, 331);
+
+fn runs_code_mode_headless(version: Option<&semver::Version>) -> bool {
+    version.is_some_and(|version| *version >= CODE_MODE_HEADLESS_SINCE)
+}
+
+// Headless, the CLI reads the switch only from the `env` of `--settings`, and only with no entrypoint of ours.
+fn code_mode_env() -> Value {
+    serde_json::json!({ "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "1" })
+}
+
 /// Shown when a chat's Claude session could not be restored.
 const SESSION_LOST: &str = "The previous Claude session could not be restored, so this chat \
      continues in a new one without its earlier context.";
@@ -487,7 +499,7 @@ impl ClaudeHarness {
     /// The configuration arguments a run launches with — everything the
     /// process bakes in at spawn except the session to resume. Two requests
     /// with equal arguments (and cwd) are the same runtime.
-    fn launch_args(request: &RunRequest, hook: Option<&str>) -> Vec<String> {
+    fn launch_args(request: &RunRequest, hook: Option<&str>, code_mode: bool) -> Vec<String> {
         let mut args: Vec<String> = [
             "--print",
             "--input-format",
@@ -543,6 +555,9 @@ impl ClaudeHarness {
                 }] }),
             );
         }
+        if code_mode {
+            settings.insert("env".into(), code_mode_env());
+        }
         if !settings.is_empty() {
             args.push("--settings".into());
             args.push(Value::Object(settings).to_string());
@@ -566,6 +581,7 @@ impl ClaudeHarness {
             one_shot: None,
             tool_server: None,
             prompt_suggestions: false,
+            code_mode_headless: false,
         }
     }
 
@@ -881,7 +897,7 @@ impl Harness for ClaudeHarness {
     /// option spellings that launch the same flags are the same runtime.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         self.reconfigures_in_place(live, next)
-            && Self::launch_args(live, None) == Self::launch_args(next, None)
+            && Self::launch_args(live, None, false) == Self::launch_args(next, None, false)
     }
     /// Model, context window, effort, fast mode, thinking, ultracode and
     /// plan mode all change on the live process (`set_model`,
@@ -1077,6 +1093,14 @@ impl ClaudeHarness {
                 .await
                 .unwrap_or(false)
         };
+        launcher.code_mode_headless = one_shot.is_none() && request.code_mode && {
+            let exe = exe.clone();
+            tokio::task::spawn_blocking(move || {
+                runs_code_mode_headless(crate::executable::binary_version(&exe).as_ref())
+            })
+            .await
+            .unwrap_or(false)
+        };
         // A session whose transcript holds no conversation cannot be
         // resumed: the CLI says so and exits, every time. Start fresh
         // instead — the chat's history is gone either way, and the user is
@@ -1187,11 +1211,24 @@ struct Launcher {
     one_shot: Option<&'static str>,
     tool_server: Option<crate::ToolServer>,
     prompt_suggestions: bool,
+    code_mode_headless: bool,
 }
 
 impl Launcher {
     fn env(&self, request: &RunRequest) -> std::collections::BTreeMap<String, String> {
         launch_env(&self.overrides, &request.env)
+    }
+
+    fn code_mode(&self, request: &RunRequest) -> bool {
+        if self.one_shot.is_some() {
+            return false;
+        }
+        match &request.resume {
+            Some(session_id) => {
+                normalize::started_in_code_mode(&config_root(&self.env(request)), session_id)
+            }
+            None => request.code_mode && self.code_mode_headless,
+        }
     }
 
     fn command(&self, request: &RunRequest) -> Command {
@@ -1218,7 +1255,15 @@ impl Launcher {
         // from the user's own key, `GH_TOKEN`, …). Never a Claude.ai
         // subscription token: those stay inside the CLI's own login.
         crate::apply_run_env(&mut cmd, &request.env);
-        cmd.args(ClaudeHarness::launch_args(request, self.hook.as_deref()));
+        let code_mode = self.code_mode(request);
+        if code_mode {
+            cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+        }
+        cmd.args(ClaudeHarness::launch_args(
+            request,
+            self.hook.as_deref(),
+            code_mode,
+        ));
         if self.prompt_suggestions {
             cmd.arg("--prompt-suggestions=true");
         }
@@ -2748,7 +2793,7 @@ mod tests {
             }
         };
         let settings = |request: &RunRequest| {
-            let args = ClaudeHarness::launch_args(request, None);
+            let args = ClaudeHarness::launch_args(request, None, false);
             args.iter()
                 .position(|a| a == "--settings")
                 .map(|i| serde_json::from_str::<Value>(&args[i + 1]).unwrap())
@@ -2818,7 +2863,7 @@ mod tests {
             extra_mcp: Vec::new(),
         };
         let disallowed = |request: &RunRequest| {
-            let args = ClaudeHarness::launch_args(request, None);
+            let args = ClaudeHarness::launch_args(request, None, false);
             args.iter()
                 .position(|a| a == "--disallowedTools")
                 .map(|i| args[i + 1].clone())
@@ -3225,6 +3270,93 @@ mod tests {
     }
 
     #[test]
+    fn code_mode_launches_on_a_new_session_or_one_started_in_it() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects").join("p");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("marked.jsonl"),
+            concat!(
+                r#"{"type":"mode","mode":"normal","sessionId":"marked"}"#,
+                "\n",
+                r#"{"type":"repl-mode","replMode":true,"sessionId":"marked"}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("plain.jsonl"),
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let harness = ClaudeHarness::new();
+        let launch =
+            |resume: Option<&str>, switch: bool, headless: bool, one_shot: Option<&'static str>| {
+                let mut request = access_tests::request(zeron_proto::AccessMode::FullAccess, false);
+                request.env.insert(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    root.path().display().to_string(),
+                );
+                request.resume = resume.map(str::to_owned);
+                request.code_mode = switch;
+                let mut launcher = harness.launcher(std::path::Path::new("claude"));
+                launcher.hook = Some("hook".into());
+                launcher.code_mode_headless = headless;
+                launcher.one_shot = one_shot;
+                let cmd = launcher.command(&request);
+                let args: Vec<String> = cmd
+                    .as_std()
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                let settings: Vec<Value> = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| *a == "--settings")
+                    .map(|(i, _)| serde_json::from_str(&args[i + 1]).unwrap())
+                    .collect();
+                let entrypoint = cmd
+                    .as_std()
+                    .get_envs()
+                    .find(|(key, _)| *key == "CLAUDE_CODE_ENTRYPOINT")
+                    .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()));
+                (settings, entrypoint)
+            };
+        let code_mode = |(settings, entrypoint): (Vec<Value>, Option<Option<String>>)| {
+            assert_eq!(settings.len(), 1, "{settings:?}");
+            assert!(settings[0].get("hooks").is_some(), "{settings:?}");
+            assert_eq!(
+                settings[0].get("env"),
+                Some(&json!({ "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "1" }))
+            );
+            assert_eq!(entrypoint, Some(None));
+        };
+        let ordinary = |(settings, entrypoint): (Vec<Value>, Option<Option<String>>)| {
+            assert_eq!(settings.len(), 1, "{settings:?}");
+            assert!(settings[0].get("env").is_none(), "{settings:?}");
+            assert_eq!(entrypoint, Some(Some("zeron".to_owned())));
+        };
+
+        code_mode(launch(None, true, true, None));
+        ordinary(launch(None, true, false, None));
+        ordinary(launch(None, false, true, None));
+        code_mode(launch(Some("marked"), false, false, None));
+        ordinary(launch(Some("plain"), true, true, None));
+        ordinary(launch(Some("marked"), true, true, Some("title")));
+        ordinary(launch(None, true, true, Some("title")));
+
+        let version = |patch| Some(semver::Version::new(2, 1, patch));
+        assert!(!runs_code_mode_headless(None));
+        assert!(!runs_code_mode_headless(version(330).as_ref()));
+        assert!(runs_code_mode_headless(version(331).as_ref()));
+    }
+
+    #[test]
     fn a_chats_run_is_told_when_to_say_it_waits_and_nothing_else_is() {
         let request = access_tests::request(zeron_proto::AccessMode::FullAccess, false);
         let harness = ClaudeHarness::new();
@@ -3297,7 +3429,7 @@ mod access_tests {
     #[test]
     fn plan_mode_launches_over_the_access_mode() {
         let mode_of = |request: &RunRequest| {
-            let args = ClaudeHarness::launch_args(request, None);
+            let args = ClaudeHarness::launch_args(request, None, false);
             args.iter()
                 .position(|a| a == "--permission-mode")
                 .map(|i| args[i + 1].clone())

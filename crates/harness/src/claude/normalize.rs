@@ -2120,6 +2120,32 @@ fn session_file(config_root: &std::path::Path, session_id: &str) -> Option<std::
         })
 }
 
+pub(crate) fn started_in_code_mode(config_root: &std::path::Path, session_id: &str) -> bool {
+    use std::io::BufRead as _;
+    let Some(file) = session_file(config_root, session_id) else {
+        return false;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return false,
+            Ok(_) => {}
+        }
+        let Ok(record) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        match record.get("type").and_then(Value::as_str) {
+            Some("repl-mode") => {
+                return record.get("replMode").and_then(Value::as_bool) == Some(true);
+            }
+            Some("user" | "assistant") => return false,
+            _ => {}
+        }
+    }
+}
+
 const SUMMARY_TAIL_BYTES: u64 = 8 << 20;
 const SUMMARY_CHARS: usize = 6_000;
 
