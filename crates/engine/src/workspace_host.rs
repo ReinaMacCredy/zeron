@@ -2593,6 +2593,11 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
                 .into_iter()
                 .filter(|d| d.id != self_id)
                 .filter(|d| {
+                    !d.capabilities
+                        .iter()
+                        .any(|c| c == zeron_proto::CLOUD_ACCOUNT_CAPABILITY)
+                })
+                .filter(|d| {
                     let heard = seen
                         .get(&d.id)
                         .copied()

@@ -492,6 +492,20 @@ async fn changed_within(channel: &mut (impl futures::Stream<Item = Value> + Unpi
     out
 }
 
+// Not a window: on a busy machine a watch goes live seconds after it's asked for.
+async fn went_live(channel: &mut (impl futures::Stream<Item = Value> + Unpin)) -> Value {
+    use futures::StreamExt;
+    let live = async {
+        while let Some(event) = channel.next().await {
+            if event["event"] == "changed" {
+                return event["data"]["cwds"].clone();
+            }
+        }
+        panic!("the channel ended before the watch went live")
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), live).await.expect("the watch never went live")
+}
+
 #[tokio::test]
 async fn a_watched_checkout_says_when_it_moves_and_never_for_its_own_reads() {
     use std::time::Duration;
@@ -508,8 +522,7 @@ async fn a_watched_checkout_says_when_it_moves_and_never_for_its_own_reads() {
     let here = cwd(&repo);
     f.ok("status", json!({ "cwd": here, "watch": true })).await;
     // (As its watch goes live, once: what moved before it was unseen.)
-    let first = changed_within(&mut channel, Duration::from_millis(1500)).await;
-    assert!(first.len() <= 1, "{first:?}");
+    assert_eq!(went_live(&mut channel).await, json!([here]));
 
     // Its own asking (status, its snapshot's index and objects, changes,
     // history, a diff), again and again: nothing said.
@@ -567,7 +580,7 @@ async fn a_linked_worktree_is_told_of_its_own_branch_and_index() {
     };
     let here = cwd(&linked);
     f.ok("status", json!({ "cwd": here, "watch": true })).await;
-    let _ = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    went_live(&mut channel).await;
     // Its index is in the repository's git folder (worktrees/linked): a
     // file staged there is said.
     write(&linked, "b.txt", "b\n");

@@ -9699,8 +9699,18 @@ mod publication_eviction_tests {
         );
         drop(handle);
         host.open("overflow").unwrap();
-        host.evict_over_budget();
-        assert!(!lock(&host.inner.handles).contains_key("evicted"));
+        // A background pass can hold the handle for a moment, and eviction leaves a held one.
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                host.evict_over_budget();
+                if !lock(&host.inner.handles).contains_key("evicted") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the stopped chat is evicted");
         let before = store.pending_chat_updates("evicted").unwrap();
         let reopened = host.open("evicted").unwrap();
         assert_eq!(
