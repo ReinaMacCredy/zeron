@@ -923,29 +923,60 @@ async fn stop_cancels_the_agents_queued_compaction() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_running_turn_is_reminded_once_per_step_of_growth() {
+async fn a_running_turn_is_reminded_once_at_each_ask_stop() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, _harness, _requests) = engine_with_one_turn(tmp.path()).await;
+    let usage = |tokens: u64| {
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .update_context_usage(Some(tokens), Some(1_000_000))
+            .unwrap()
+    };
+    usage(900_000);
     assert_eq!(
         core.sessions.mid_turn_nudge(CHAT),
         None,
-        "far from the CLI's own compaction"
+        "without an ask point the CLI's own compaction is left to the PreCompact keep-list"
     );
-    core.doc_host
-        .open(CHAT)
-        .unwrap()
-        .doc()
-        .update_context_usage(Some(WINDOW * 85 / 100), Some(WINDOW))
-        .unwrap();
-    let first = core
-        .sessions
-        .mid_turn_nudge(CHAT)
-        .expect("at 85% of the threshold");
-    assert!(
-        first.starts_with("Context 170.0k of 200.0k (85%), and this turn is still running."),
-        "{first}"
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig",
+                "chatId": CHAT,
+                "config": {
+                    "harness": "mock",
+                    "model": null,
+                    "reasoning": null,
+                    "modelOptions": { "askAt": "300k" },
+                    "sandbox": "workspace-write",
+                },
+            }),
+        )
+        .await
+        .expect("setChatConfig");
+    let asked = "This chat has reached the point where it decides whether to carry its history further. If the step you just finished closes a piece of work and the rest needs only its conclusions, call compact with continueWith naming the remaining steps and end your turn. Otherwise keep going: nothing else is needed.";
+    usage(266_000);
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None, "below the ask point");
+    usage(270_000);
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT).as_deref(), Some(asked));
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None, "once per stop");
+    usage(380_000);
+    assert_eq!(
+        core.sessions.mid_turn_nudge(CHAT).as_deref(),
+        Some(asked),
+        "going on extends to the next stop, 367K"
     );
-    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None, "no growth since the last reminder");
+    usage(120_000);
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None);
+    usage(270_000);
+    assert_eq!(
+        core.sessions.mid_turn_nudge(CHAT).as_deref(),
+        Some(asked),
+        "a compaction starts the stops over"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

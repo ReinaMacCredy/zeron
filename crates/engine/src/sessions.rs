@@ -503,7 +503,8 @@ struct ContextReading {
     tokens: u64,
     baseline: u64,
     window: Option<u64>,
-    threshold: Option<u64>,
+    /// The highest ask stop this reading has reached (`model_options::ask_stop`).
+    stop: Option<u64>,
 }
 
 impl ContextReading {
@@ -522,13 +523,6 @@ impl ContextReading {
     fn past_floor(&self, nudge: u64) -> bool {
         zeron_proto::stats_view::reminder_floor(nudge, self.baseline.min(self.tokens), self.window)
             .is_some_and(|floor| self.tokens >= floor)
-    }
-
-    /// `threshold` is where the CLI compacts on its own (`chat_compact_threshold`), not the window.
-    fn at_ceiling(&self) -> bool {
-        self.threshold
-            .filter(|threshold| *threshold > 0)
-            .is_some_and(|threshold| self.tokens * 100 >= threshold * 85)
     }
 }
 
@@ -977,8 +971,8 @@ struct Inner {
     compact_owed: Mutex<HashMap<String, String>>,
     work_tree_owed: Mutex<HashMap<String, String>>,
     restart_owed: Mutex<HashMap<String, String>>,
-    /// Context size at each chat's last reminder: the mid-turn one waits for it to grow.
-    nudged_at: Mutex<HashMap<String, u64>>,
+    /// The last ask stop each chat reached (`reach_ask_stop`).
+    ask_stops: Mutex<HashMap<String, u64>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Per chat: session ids the provider said it no longer has. Never
@@ -1461,7 +1455,7 @@ impl SessionsEngine {
                 compact_owed: Mutex::new(HashMap::new()),
                 work_tree_owed: Mutex::new(HashMap::new()),
                 restart_owed: Mutex::new(HashMap::new()),
-                nudged_at: Mutex::new(HashMap::new()),
+                ask_stops: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 rejected_resumes: Mutex::new(HashMap::new()),
                 fresh_start_notices: Mutex::new(std::collections::HashSet::new()),
@@ -5657,13 +5651,14 @@ impl Inner {
     ) -> Option<ContextReading> {
         let handle = self.doc_host()?.open(chat_id).ok()?;
         let usage = handle.doc().context_usage()?;
+        let tokens = usage.tokens?;
         Some(ContextReading {
-            tokens: usage.tokens?,
+            tokens,
             baseline: handle.doc().context_baseline(),
             window: config
                 .and_then(zeron_proto::model_options::chat_budget)
                 .or(usage.window),
-            threshold: zeron_proto::model_options::chat_compact_threshold(config, usage.window),
+            stop: zeron_proto::model_options::ask_stop(config, usage.window, tokens),
         })
     }
 
@@ -5793,7 +5788,12 @@ impl Inner {
             let can_hand_off = chat.as_ref().is_some_and(|chat| chat.delegation.is_none())
                 && !self.tool_disabled(config, "delegate_task")
                 && !self.tool_disabled(config, "create_thread");
-            self.reminder_reading(chat_id, harness_id)
+            let reading = self.reminder_reading(chat_id, harness_id);
+            // The message itself asks, so a stop it arrives past is marked without a reminder.
+            if let Some(reading) = &reading {
+                self.reach_ask_stop(chat_id, reading);
+            }
+            reading
                 .filter(|reading| reading.past_floor(nudge))
                 .map(|_| {
                     if can_hand_off {
@@ -5836,30 +5836,32 @@ impl Inner {
         lock(&self.compact_owed).insert(chat_id.to_string(), note);
     }
 
-    /// Near the CLI's own compaction, once per `MID_TURN_NUDGE_STEP` of growth: a long run of
-    /// tool calls sees no new message.
-    /// No tags: the CLI wraps hook context in its own system reminder and escapes ours.
+    /// At each ask stop of a chat with an ask point, once: a long run of tool calls sees no new
+    /// message. Going on past it extends the chat to the next stop, so nothing else is asked of
+    /// the agent. No tags: the CLI wraps hook context in its own system reminder and escapes ours.
     fn mid_turn_nudge(&self, chat_id: &str) -> Option<String> {
         let harness_id = self.doc_host()?.harness_for(chat_id);
         let reading = self.reminder_reading(chat_id, harness_id)?;
-        let threshold = reading.threshold.filter(|_| reading.at_ceiling())?;
-        let tokens = reading.tokens;
-        let mut nudged = lock(&self.nudged_at);
-        let last = nudged.entry(chat_id.to_string()).or_insert(0);
-        // Smaller than at the last reminder: the chat compacted since.
-        if tokens < *last {
-            *last = tokens;
-            return None;
+        self.reach_ask_stop(chat_id, &reading).then(|| {
+            "This chat has reached the point where it decides whether to carry its history further. If the step you just finished closes a piece of work and the rest needs only its conclusions, call compact with continueWith naming the remaining steps and end your turn. Otherwise keep going: nothing else is needed.".to_string()
+        })
+    }
+
+    /// Whether `reading` reached an ask stop not reached before, marking it. A reading below the
+    /// last stop means the chat compacted since, which starts the stops over.
+    fn reach_ask_stop(&self, chat_id: &str, reading: &ContextReading) -> bool {
+        let mut reached = lock(&self.ask_stops);
+        let last = reached.entry(chat_id.to_string()).or_insert(0);
+        if reading.tokens < *last {
+            *last = 0;
         }
-        if *last > 0 && tokens < *last + MID_TURN_NUDGE_STEP {
-            return None;
+        match reading.stop {
+            Some(stop) if stop > *last => {
+                *last = stop;
+                true
+            }
+            _ => false,
         }
-        *last = tokens;
-        Some(format!(
-            "{}, and this turn is still running. At {} the chat compacts on its own, wherever the work is then. Keep going unless the step you just finished closes a piece of work and the rest needs only its conclusions. Then call compact with continueWith naming the remaining steps and end your turn: the chat compacts keeping what you name and resumes from continueWith.",
-            reading.line(),
-            format_tokens(threshold),
-        ))
     }
 
     fn wrapped_prompt(
@@ -7508,7 +7510,6 @@ fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>
     }
 }
 
-const MID_TURN_NUDGE_STEP: u64 = 50_000;
 
 fn format_tokens(tokens: u64) -> String {
     if tokens >= 1000 {
@@ -11137,13 +11138,13 @@ mod tests {
         tokens: u64,
         baseline: u64,
         window: Option<u64>,
-        threshold: Option<u64>,
+        stop: Option<u64>,
     ) -> ContextReading {
         ContextReading {
             tokens,
             baseline,
             window,
-            threshold,
+            stop,
         }
     }
 
@@ -11165,24 +11166,6 @@ mod tests {
             !reading(40_000, 90_000, None, None).past_floor(30_000),
             "a baseline above the reading frees nothing"
         );
-        assert!(!reading(900_000, 0, None, None).at_ceiling());
-    }
-
-    #[test]
-    fn the_ceiling_sits_below_the_clis_own_threshold() {
-        use zeron_proto::model_options::compact_threshold;
-        let small = compact_threshold("200k", "auto");
-        assert_eq!(small, Some(167_000));
-        assert!(!reading(141_949, 0, None, small).at_ceiling());
-        assert!(reading(141_950, 0, None, small).at_ceiling());
-        assert!(
-            reading(166_999, 0, None, small).at_ceiling(),
-            "the CLI compacts at 167K; the old 85% of the 200K window (170K) came after it"
-        );
-        let large = compact_threshold("1m", "400k");
-        assert_eq!(large, Some(367_000));
-        assert!(!reading(311_949, 0, None, large).at_ceiling());
-        assert!(reading(311_950, 0, None, large).at_ceiling());
     }
 
     fn session_at(status: SessionStatus, updated_at: chrono::DateTime<Utc>) -> Session {
