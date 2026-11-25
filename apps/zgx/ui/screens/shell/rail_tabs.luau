@@ -185,15 +185,23 @@ local Mark = ui.component(function(props: { chat: string, key: string, h: number
 			pointer_events = "none",
 		},
 		fill("$hover", wash, props.rounded),
-		SessionRow.mark(function(): any
-			local c = chat()
-			return { agent = c.mark or c.agent, harness = c.harness, agent_icon = c.agent_icon }
-		end, function(): boolean
-			return true
-		end, MARK),
 		ui.presence(function(): string
 			local kind = chat().status
-			return if kind and SessionRow.URGENCY[kind] and not M.hidden:get() then kind else ""
+			return if (kind == "working" or kind == "connecting") and not M.hidden:get() then kind else "mark"
+		end, function(which: string): Node
+			if which == "mark" then
+				return SessionRow.mark(function(): any
+					local c = chat()
+					return { agent = c.mark or c.agent, harness = c.harness, agent_icon = c.agent_icon }
+				end, function(): boolean
+					return true
+				end, MARK)
+			end
+			return ui.div { id = `rail-tab-{id}-run`, color = `$zeron.status.{which}`, status.StatusIcon { kind = which :: any, size = MARK } }
+		end, { w = MARK, h = MARK, items = "center", justify = "center", pointer_events = "none" }),
+		ui.presence(function(): string
+			local kind = chat().status
+			return if kind and SessionRow.URGENCY[kind] and kind ~= "working" and kind ~= "connecting" and not M.hidden:get() then kind else ""
 		end, function(which: string): Node
 			if which == "" then
 				return ui.div {}
