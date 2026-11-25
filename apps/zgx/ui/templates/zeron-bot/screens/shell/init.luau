@@ -512,10 +512,6 @@ local function sidebar_limit(): number
 				return true
 			end
 			if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) then
-				local floating: any = boundary.load("@app/screens/shell/sidebar")
-				if floating and floating.peek_dismiss() then
-					return true
-				end
 				-- (A press on the bar's muted controls leaves the keyboard nowhere.)
 				if route.current:peek().name == "settings" then
 					route.leave_settings()
@@ -539,10 +535,6 @@ local function sidebar_limit(): number
 			return false
 		end,
 		on_press = function()
-			local floating: any = boundary.load("@app/screens/shell/sidebar")
-			if floating then
-				floating.peek_press_outside()
-			end
 			local pills: any = boundary.load("@app/screens/chat/pills")
 			if pills then
 				pills.press_outside()
@@ -594,10 +586,6 @@ local function sidebar_limit(): number
 				ui.div {
 					h_full = true,
 					shrink = 0,
-					z = function(): number
-						local sidebar: any = boundary.load("@app/screens/shell/sidebar")
-						return if sidebar and sidebar.peek_mounted:get() then 1 else 0
-					end,
 					-- (One tone with the rail and the window, to the window's top.)
 					theme = { ["zeron.inset.bg"] = "#00000000" },
 					-- (Zeron Bot: the Bots sidebar in the sidebar's place; the sidebar's
@@ -610,9 +598,6 @@ local function sidebar_limit(): number
 					return Page { files = files, width = window_w }
 				end, { pass = true }),
 			},
-			boundary.screen(boundary.named("shell.boundary.screen.sidebar"), "@app/screens/shell/sidebar", function(sidebar): Node
-				return sidebar.PeekEdge()
-			end, { pass = true }),
 			-- The rail, while the sidebar is collapsed: floating over the page at
 			-- the window's bottom left. (Not mounted while `view.rail` is off.)
 			if view.rail

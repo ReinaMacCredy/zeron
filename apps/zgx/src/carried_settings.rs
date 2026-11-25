@@ -100,9 +100,6 @@ pub(crate) fn carried(settings: &Json) -> Vec<(String, Json)> {
     if let Some(space) = settings["spaceFilter"].as_str() {
         out.push((sidebar("project"), json!(space)));
     }
-    if let Some(on) = settings["sidebarHoverEnabled"].as_bool() {
-        out.push((format!("{VIEW}sidebar_hover.json"), json!(on)));
-    }
     if let Some(shut) = settings["sidebarCollapsed"].as_bool() {
         out.push((format!("{VIEW}collapsed.json"), json!(shut)));
     }
@@ -340,7 +337,6 @@ mod tests {
         assert_eq!(read(dir.path(), "show_working"), json!(true));
         assert_eq!(read(dir.path(), "active_first"), json!(true));
         assert_eq!(read(dir.path(), "project"), json!("space-1"));
-        assert!(dir.path().join(format!("{VIEW}sidebar_hover.json")).exists());
         assert_eq!(std::fs::read_to_string(dir.path().join(MODEL_PICKER_COMPACT)).unwrap(), "false");
         // What it doesn't say stays at this app's default.
         assert!(!dir.path().join(format!("{SIDEBAR}show_branch.json")).exists());

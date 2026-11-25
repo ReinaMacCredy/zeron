@@ -17,6 +17,9 @@ text = "The Waiting pill says what waits: 1 question waiting, 2 approvals waitin
 visual = "waiting-reveal"
 
 [[entry.improvements]]
+text = "A hidden sidebar no longer slides out when the pointer comes near the rail, and Reveal sidebar on hover is gone from Settings: the sidebar button or Cmd+B brings it back."
+
+[[entry.improvements]]
 text = "Ctrl+Tab, set to cycle the tabs, goes through the open tabs most recently used first, as Cmd+Tab does: a quick press goes back to the tab you used before."
 
 [[entry.improvements]]

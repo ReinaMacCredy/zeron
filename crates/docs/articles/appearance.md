@@ -1,6 +1,6 @@
 [Settings > Appearance](zeron://settings/appearance) controls how Zeron looks: light or dark, themes, fonts, glass, and background art.
 
-The page opens on the basics: light or dark, themes, accent, fonts and **Reduce motion**. The look-only controls (**Match wallpaper colors**, glass, inset card, sidebar reveal, background art, animations and scrolling, the theme library, and math) sit under **Advanced look**, folded until you click it. Searching Settings for one of them opens the fold.
+The page opens on the basics: light or dark, themes, accent, fonts and **Reduce motion**. The look-only controls (**Match wallpaper colors**, glass, inset card, background art, animations and scrolling, the theme library, and math) sit under **Advanced look**, folded until you click it. Searching Settings for one of them opens the fold.
 
 ## Color scheme and themes
 
@@ -17,7 +17,6 @@ Pick **System**, **Light**, or **Dark** at the top of the page. **System** follo
 - **Glass**: **Frosted** for translucent surfaces, **Opaque** for solid ones, or **Theme default**.
 - **Glass tint** and **Dim bright backdrops**: in dark mode with frosted glass, on macOS and Windows only. **Glass tint** runs from 50% to 100% (80% by default). **Dim bright backdrops**, on by default, keeps the glass dark over light windows behind Zeron; while it is on, **Backdrop brightness** (10% to 100%, 30% by default) sets how much of those windows still shows through.
 - **Inset card**: hold the sidebar and content in one rounded card above the window background. On by default.
-- **Reveal sidebar on hover**: show the collapsed sidebar when the pointer reaches the left edge. On by default.
 
 ### Background art
 

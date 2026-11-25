@@ -34,8 +34,6 @@ Drag the sidebar's right edge to resize it, from 242 to 400 px wide. Double-clic
 
 To hide or show the sidebar, click the sidebar button at the top left of the window or press Cmd+B (**Toggle left sidebar**). Zeron remembers your choice.
 
-With the sidebar hidden, move the pointer just right of the app rail and it slides out as a floating panel. Move away and it hides again; press Escape to dismiss it. Turn this off with **Reveal sidebar on hover** in [Settings > Appearance](zeron://settings/appearance).
-
 ## Needs you and running
 
 Questions from other chats and plans waiting for your OK wait in the **Waiting** pill above the composer, which reads **1 question waiting** or the like, where you answer them without leaving the chat you are in. See [When an agent asks](zeron://docs/agent-questions).
