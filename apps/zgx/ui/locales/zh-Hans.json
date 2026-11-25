@@ -4390,6 +4390,9 @@
     },
     "rail": {
       "label": "应用侧栏",
+      "tabs": "打开的对话",
+      "hide_tabs": "隐藏打开的对话",
+      "show_tabs": "{n, plural, other {显示 # 个打开的对话}}",
       "with_key": "{label} · {key}",
       "close_settings": "关闭设置",
       "help": "帮助",
@@ -4420,6 +4423,8 @@
       "close_right": "关闭右侧",
       "close_left": "关闭左侧",
       "close_idle": "关闭空闲标签页",
+      "pin": "固定标签页",
+      "unpin": "取消固定标签页",
       "new_session": "新建会话",
       "tree": {
         "ahead": "{n, plural, other {有 # 个提交不在 {base} 中}}",

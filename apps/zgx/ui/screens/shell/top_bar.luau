@@ -9,7 +9,7 @@ local art = require("@app/screens/shell/art")
 
 local M = {}
 
-local CONTROL, GAP, PAST_NAV, PAST_EDGE = 24, 2, 12, 8
+local CONTROL, GAP, PAST_NAV, PAST_EDGE = 24, 2, 20, 8
 
 -- (Read by what's beside it, which a `motion.tween` binding can't be.)
 local function sliding(key: string, to: () -> number): State<number>
@@ -41,7 +41,7 @@ local room = sliding("shell_top_bar_new_tab", function(): number
 	return if route.chat:get().name == "home" then 0 else 1
 end)
 function M.new_tab(): number
-	return (1 - reveal:get()) * room:get()
+	return room:get()
 end
 
 local function page_edge(): number
@@ -58,8 +58,8 @@ end
 
 function M.tabs_start(): number
 	local nav = M.nav_left(ds.TitleBar.nav_base())
-	-- (New tab's room whether it shows or not: the tabs hold still as it comes in on a new chat sent.)
-	return nav + CONTROL + GAP + CONTROL + (GAP + CONTROL) * (1 - reveal:get()) + PAST_NAV
+	-- (New tab's room whether it shows or not: the tabs hold still as it comes in on a new chat sent. Past it, the notch's flare.)
+	return nav + CONTROL + GAP + CONTROL + GAP + CONTROL + PAST_NAV
 end
 
 return M
