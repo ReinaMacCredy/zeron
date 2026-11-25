@@ -259,7 +259,17 @@ end
 store.catalog:set({
 	state = "ready",
 	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
-	models = { { value = "opus", label = "Opus", harness = "claude-code" } },
+	models = {
+		{
+			value = "opus",
+			label = "Opus",
+			harness = "claude-code",
+			options = {
+				{ id = "contextWindow", label = "Context Window", default = "1m", choices = { { id = "200k", label = "200K" }, { id = "1m", label = "1M" } } },
+				{ id = "autoCompact", label = "Auto-compact", default = "auto", choices = { { id = "auto", label = "Auto" }, { id = "300k", label = "300K" }, { id = "400k", label = "400K" }, { id = "600k", label = "600K" }, { id = "800k", label = "800K" } } },
+			},
+		},
+	},
 } :: any)
 
 local HOUR = 3600

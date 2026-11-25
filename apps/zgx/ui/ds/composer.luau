@@ -2019,7 +2019,14 @@ return ui.component(function(props: Props): Node
 
 	local picker_open = props.model_open or ui.use_state(false)
 	local step_context = ui.use_state({ n = 0, by = 0 })
-	local sized = ui.use_state(nil :: context_usage.Sized?)
+	local function step_context_by(by: number): boolean
+		if has_text() then
+			return false
+		end
+		step_context:set({ n = step_context:peek().n + 1, by = by })
+		return true
+	end
+	local sized =ui.use_state(nil :: context_usage.Sized?)
 	local sizes = 0
 	local function context_stepped(label: string, moved: boolean)
 		sizes += 1
@@ -3150,6 +3157,14 @@ return ui.component(function(props: Props): Node
 	end
 	if props.toolbar_id then
 		composer_surface.fill_prediction = fill_prediction
+		composer_surface.step_context = function(by: number): boolean
+			local el = field:peek()
+			if not el or not step_context_by(by) then
+				return false
+			end
+			el:focus()
+			return true
+		end
 	end
 
 	-- A press on the composer's blank room (the pill's padding, its controls'
@@ -3425,8 +3440,7 @@ return ui.component(function(props: Props): Node
 					if unit and unit.keys(e) then
 						return true
 					end
-					if (e.key == "ArrowUp" or e.key == "ArrowDown") and e.shift and not e.cmd and not e.alt and not e.ctrl and not has_text() then
-						step_context:set({ n = step_context:peek().n + 1, by = if e.key == "ArrowUp" then 1 else -1 })
+					if (e.key == "ArrowUp" or e.key == "ArrowDown") and e.shift and not e.cmd and not e.alt and not e.ctrl and step_context_by(if e.key == "ArrowUp" then 1 else -1) then
 						return true
 					end
 					if e.key == "Tab" and e.alt and not e.cmd and not e.ctrl and mission_on() then

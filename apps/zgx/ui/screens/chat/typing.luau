@@ -69,6 +69,21 @@ function M.prediction_key(e: any): boolean
 	return fill ~= nil and fill() == true
 end
 
+function M.context_key(e: any): boolean
+	if through_control or e.editing then
+		return false
+	end
+	if (e.key ~= "ArrowUp" and e.key ~= "ArrowDown") or not e.shift or e.cmd or e.ctrl or e.alt or e.meta then
+		return false
+	end
+	local name = route.current:peek().name
+	if name ~= "session" and name ~= "home" then
+		return false
+	end
+	local step = (composer_surface :: any).step_context
+	return step ~= nil and step(if e.key == "ArrowUp" then 1 else -1) == true
+end
+
 -- The window's on_key, a key no one took. Never takes the key itself: the
 -- window's text and paste follow it to the field just focused.
 function M.key(e: any)

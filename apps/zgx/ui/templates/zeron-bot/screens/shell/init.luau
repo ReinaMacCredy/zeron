@@ -529,6 +529,9 @@ local function sidebar_limit(): number
 			if typing and typing.prediction_key and typing.prediction_key(e) then
 				return true
 			end
+			if typing and typing.context_key and typing.context_key(e) then
+				return true
+			end
 			if typing then
 				typing.key(e)
 			end

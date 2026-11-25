@@ -4348,7 +4348,7 @@ return ui.overlay {
 	-- prediction's Tab or Right arrow.)
 	on_key = function(e: any): boolean
 		local typing = require("@app/screens/chat/typing")
-		return typing.pill_key(e) or typing.prediction_key(e)
+		return typing.pill_key(e) or typing.prediction_key(e) or typing.context_key(e)
 	end,
 	w_full = true,
 	h_full = true,
