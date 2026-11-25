@@ -58,6 +58,39 @@ pub fn chat_compact_threshold(
     }
 }
 
+/// Zeron's ask point, an `autoCompact` choice id below the chat's own: only Zeron reads it, so
+/// moving it never restarts the CLI.
+pub const ASK_AT: &str = "askAt";
+
+/// Where Zeron first asks the agent whether the chat's history still earns its place: `askAt`
+/// less the CLI's headroom, while that is below where the CLI compacts.
+pub fn chat_ask_threshold(config: Option<&ChatConfig>, reported_window: Option<u64>) -> Option<u64> {
+    ask_stops(config, reported_window).next()
+}
+
+/// The highest ask stop `tokens` has reached: `askAt` and each `autoCompact` choice above it,
+/// below where the CLI compacts.
+pub fn ask_stop(config: Option<&ChatConfig>, reported_window: Option<u64>, tokens: u64) -> Option<u64> {
+    ask_stops(config, reported_window).filter(|at| *at <= tokens).last()
+}
+
+fn ask_stops(
+    config: Option<&ChatConfig>,
+    reported_window: Option<u64>,
+) -> impl Iterator<Item = u64> {
+    let ask = config
+        .and_then(|config| config.model_options.get(ASK_AT))
+        .and_then(|value| value.as_str())
+        .and_then(auto_compact_tokens);
+    let limit = chat_compact_threshold(config, reported_window);
+    ["300k", "400k", "600k", "800k"]
+        .into_iter()
+        .filter_map(auto_compact_tokens)
+        .filter(move |stop| ask.is_some_and(|ask| *stop >= ask))
+        .map(|stop| stop.saturating_sub(AUTO_COMPACT_HEADROOM))
+        .filter(move |at| limit.is_some_and(|limit| *at < limit))
+}
+
 pub fn compact_applies(window_choice: &str) -> bool {
     context_window_tokens(window_choice).is_some_and(|tokens| tokens > 200_000)
 }
@@ -228,6 +261,25 @@ mod tests {
             Some(272_000)
         );
         assert_eq!(chat_compact_threshold(None, Some(272_000)), Some(272_000));
+
+        let asks = config(
+            "claude-code",
+            serde_json::json!({"contextWindow": "1m", "autoCompact": "800k", "askAt": "400k"}),
+        );
+        assert_eq!(chat_ask_threshold(Some(&asks), None), Some(367_000));
+        assert_eq!(ask_stop(Some(&asks), None, 366_999), None);
+        assert_eq!(ask_stop(Some(&asks), None, 600_000), Some(567_000));
+        assert_eq!(
+            ask_stop(Some(&asks), None, 900_000),
+            Some(567_000),
+            "800K is where the CLI compacts, not a stop"
+        );
+        assert_eq!(chat_ask_threshold(Some(&claude_400k), None), None, "no askAt, no ask");
+        let at_limit = config(
+            "claude-code",
+            serde_json::json!({"contextWindow": "1m", "autoCompact": "400k", "askAt": "400k"}),
+        );
+        assert_eq!(chat_ask_threshold(Some(&at_limit), None), None);
     }
 
     #[test]

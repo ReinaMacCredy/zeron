@@ -3,7 +3,7 @@
 //! sessions keep running with the app closed. Without the UI linked in.
 //!
 //! It also answers what the engine runs its own executable for: `mcp` and
-//! `hook` (the thread-tools bridge and Claude's PostToolUse hook, each
+//! `hook` (the thread-tools bridge and Claude's PostToolUse and PreCompact hook, each
 //! `--chat <id> --port <port>`) and `--noop-browser` (browser suppression for
 //! agents' sign-in flows). And it is the engine helper of an
 //! interface that doesn't link the engine (the zgx app): every `zeron`

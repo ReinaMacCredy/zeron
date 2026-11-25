@@ -88,7 +88,7 @@ impl SessionHandle {
             session.as_ref(),
             self.composer().compacting,
             usage.and_then(|usage| usage.tokens),
-            ContextMarks::of(window, threshold, None).auto,
+            ContextMarks::of(window, threshold, None, None).auto,
             config.map_or("", |config| config.harness.display_name()),
         )
     }

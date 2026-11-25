@@ -549,10 +549,15 @@ impl ClaudeHarness {
         if let Some(command) = hook {
             settings.insert(
                 "hooks".into(),
-                serde_json::json!({ "PostToolUse": [{
-                    "matcher": "*",
-                    "hooks": [{ "type": "command", "command": command }],
-                }] }),
+                serde_json::json!({
+                    "PostToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{ "type": "command", "command": command }],
+                    }],
+                    "PreCompact": [{
+                        "hooks": [{ "type": "command", "command": command }],
+                    }],
+                }),
             );
         }
         if code_mode {
@@ -2810,6 +2815,12 @@ mod tests {
         assert!(
             !harness.reconfigures_in_place(&request("200k", "auto"), &request("1m", "auto")),
             "the 200K switch already restarts"
+        );
+        let mut asks = request("1m", "800k");
+        asks.model_options.insert("askAt".into(), json!("400k"));
+        assert!(
+            harness.same_runtime(&request("1m", "800k"), &asks),
+            "Zeron's ask point never reaches the CLI"
         );
     }
 

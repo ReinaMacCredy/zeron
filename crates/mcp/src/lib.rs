@@ -161,7 +161,7 @@ fn wait_on_background_tool() -> Value {
 fn compact_tool() -> Value {
     json!({
         "name": "compact",
-        "description": "Compact this chat's context into a summary once this turn ends; finish your reply after calling it. Use it at a natural boundary, not mid-edit. `focus`: what the summary keeps (plan, files changing, open failures, decisions). `continueWith`: your next message afterwards, such as \"Continue with slice 3\", so work goes on without the person; omit it to stop and wait. Sub-agents and background shells keep running and report back, so say in `continueWith` what they do; a runtime that must restart to compact refuses while they run. A message arriving first cancels it.",
+        "description": "Compact this chat's context into a summary once this turn ends; finish your reply after calling it. Use it when the work changes and the earlier part of the chat is no longer needed, not to make room: the chat makes room on its own. `focus`: what the summary keeps (plan, files changing, open failures, decisions). `continueWith`: your next message afterwards, such as \"Continue with slice 3\", so work goes on without the person; omit it to stop and wait. Sub-agents and background shells keep running and report back, so say in `continueWith` what they do; a runtime that must restart to compact refuses while they run. A message arriving first cancels it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2899,7 +2899,6 @@ impl ThreadTools {
         Ok(json!({
             "queued": true,
             "runs": runs,
-            "context": queued["context"],
             "replacedEarlierRequest": queued["replaced"].as_bool().unwrap_or(false),
             "continueWith": args["continueWith"].as_str().is_some_and(|text| !text.trim().is_empty()),
         }))

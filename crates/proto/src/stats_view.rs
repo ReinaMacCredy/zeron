@@ -253,12 +253,21 @@ pub struct ContextMarks {
 }
 
 impl ContextMarks {
-    pub fn of(window: Option<u64>, threshold: Option<u64>, floor: Option<u64>) -> Self {
+    /// `ask` is where Zeron asks a running turn whether to carry the history further
+    /// (`model_options::chat_ask_threshold`).
+    pub fn of(
+        window: Option<u64>,
+        threshold: Option<u64>,
+        floor: Option<u64>,
+        ask: Option<u64>,
+    ) -> Self {
         let window = window.filter(|window| *window > 0);
         let auto = threshold.filter(|threshold| window.is_some_and(|window| *threshold < window));
-        let warn = auto.map(|auto| (auto * 85).div_ceil(100));
+        let warn = ask.filter(|ask| auto.or(window).is_some_and(|limit| *ask < limit));
         Self {
-            floor: floor.filter(|floor| warn.or(window).is_some_and(|limit| *floor < limit)),
+            floor: floor.filter(|floor| {
+                warn.or(auto).or(window).is_some_and(|limit| *floor < limit)
+            }),
             warn,
             auto,
         }
@@ -359,26 +368,32 @@ mod tests {
         assert_eq!(floor, Some(20_000 + 126_000));
         assert_eq!(reminder_floor(0, 0, Some(200_000)), None);
         assert_eq!(
-            ContextMarks::of(Some(200_000), Some(167_000), floor),
+            ContextMarks::of(Some(200_000), Some(167_000), floor, None),
             ContextMarks {
-                floor: None,
-                warn: Some(141_950),
+                floor: Some(146_000),
+                warn: None,
                 auto: Some(167_000),
             }
         );
         let large = reminder_floor(150_000, 20_000, Some(1_000_000));
         assert_eq!(
-            ContextMarks::of(Some(1_000_000), Some(967_000), large),
+            ContextMarks::of(Some(1_000_000), Some(767_000), large, Some(567_000)),
             ContextMarks {
                 floor: Some(170_000),
-                warn: Some(821_950),
-                auto: Some(967_000),
+                warn: Some(567_000),
+                auto: Some(767_000),
             }
+        );
+        assert_eq!(
+            ContextMarks::of(Some(1_000_000), Some(767_000), Some(600_000), Some(567_000)).floor,
+            None,
+            "a floor past the ask point is not drawn"
         );
         let codex = ContextMarks::of(
             Some(272_000),
             Some(272_000),
             reminder_floor(150_000, 0, Some(272_000)),
+            None,
         );
         assert_eq!(
             codex,

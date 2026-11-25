@@ -14,6 +14,7 @@ use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
 };
 use zeron_engine::registry::CompactionSettings;
+use zeron_proto::tools::ToolSettings;
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
@@ -922,29 +923,71 @@ async fn stop_cancels_the_agents_queued_compaction() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_running_turn_is_reminded_once_per_step_of_growth() {
+async fn a_running_turn_is_reminded_once_at_each_ask_stop() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, _harness, _requests) = engine_with_one_turn(tmp.path()).await;
+    let usage = |tokens: u64| {
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .update_context_usage(Some(tokens), Some(1_000_000))
+            .unwrap()
+    };
+    usage(900_000);
     assert_eq!(
         core.sessions.mid_turn_nudge(CHAT),
         None,
-        "far from the CLI's own compaction"
+        "without an ask point the CLI's own compaction is left to the PreCompact keep-list"
     );
-    core.doc_host
-        .open(CHAT)
-        .unwrap()
-        .doc()
-        .update_context_usage(Some(WINDOW * 85 / 100), Some(WINDOW))
-        .unwrap();
-    let first = core
-        .sessions
-        .mid_turn_nudge(CHAT)
-        .expect("at 85% of the threshold");
+    zeron_rpc::memory_client(core.rpc_service())
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatConfig",
+                "chatId": CHAT,
+                "config": {
+                    "harness": "mock",
+                    "model": null,
+                    "reasoning": null,
+                    "modelOptions": { "askAt": "300k" },
+                    "sandbox": "workspace-write",
+                },
+            }),
+        )
+        .await
+        .expect("setChatConfig");
+    let asked = "This chat has reached the point where it decides whether to carry its history further. If the step you just finished closes a piece of work and the rest needs only its conclusions, call compact with continueWith naming the remaining steps and end your turn. Otherwise keep going: nothing else is needed.";
+    usage(266_000);
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None, "below the ask point");
+    usage(270_000);
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT).as_deref(), Some(asked));
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None, "once per stop");
+    usage(380_000);
+    assert_eq!(
+        core.sessions.mid_turn_nudge(CHAT).as_deref(),
+        Some(asked),
+        "going on extends to the next stop, 367K"
+    );
+    usage(120_000);
+    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None);
+    usage(270_000);
+    assert_eq!(
+        core.sessions.mid_turn_nudge(CHAT).as_deref(),
+        Some(asked),
+        "a compaction starts the stops over"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_compaction_is_told_the_last_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _harness, _requests) = engine_with_one_turn(tmp.path()).await;
+    let note = core.sessions.pre_compact_note(CHAT).expect("a chat with a message");
     assert!(
-        first.starts_with("Context 170.0k of 200.0k (85%), and this turn is still running."),
-        "{first}"
+        note.starts_with("Keep in the summary:\n- The person's last message, word for word: hello"),
+        "{note}"
     );
-    assert_eq!(core.sessions.mid_turn_nudge(CHAT), None, "no growth since the last reminder");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -975,7 +1018,7 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         wait_for(|| !core.sessions.turn_in_flight(CHAT), "run settles").await;
         requests.lock().unwrap().last().unwrap().prompt.clone()
     };
-    let nudged = "hello\n\n<system-reminder>\nContext 22.8k of 200.0k (11%). Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. Continuing, including any follow-up question: do not compact.\n</system-reminder>";
+    let nudged = "hello\n\n<system-reminder>\nThis chat is long. Before answering, decide whether this message starts a new task or topic or continues the current one. Continuing, including any follow-up question: do not compact. New task or topic, and the current work is finished: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. New task or topic that does not need this chat, and the current work is unfinished: do not do it here and do not compact. If it can be briefed in full and only its result matters, call delegate_task and report the result here. If the person will have to steer it, call create_thread with what it needs to know and say here where it went.\n</system-reminder>";
     assert_eq!(
         send("msg-2").await,
         nudged,
@@ -993,6 +1036,16 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         "no reminder when the harness cannot compact"
     );
     harness.can_compact.store(true, Ordering::SeqCst);
+    core.registry.set_tool_settings(ToolSettings {
+        disabled_tools: vec!["create_thread".into()],
+        ..Default::default()
+    });
+    assert_eq!(
+        send("msg-4b").await,
+        "hello\n\n<system-reminder>\nThis chat is long. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. Continuing, including any follow-up question: do not compact.\n</system-reminder>",
+        "without create_thread the reminder offers only compact"
+    );
+    core.registry.set_tool_settings(ToolSettings::default());
 
     core.workspace
         .set_chat_plan(CHAT, Some(&ChatPlan::default()), false)
@@ -1047,7 +1100,7 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         .filter(|e| e.role == MessageRole::User)
         .map(entry_text)
         .collect();
-    assert_eq!(typed, ["hello"; 7], "the transcript keeps what was typed");
+    assert_eq!(typed, ["hello"; 8], "the transcript keeps what was typed");
 }
 
 fn remind_at(core: &EngineCore, nudge_tokens: u64) {

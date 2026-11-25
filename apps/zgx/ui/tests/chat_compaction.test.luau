@@ -440,17 +440,17 @@ end
 
 local IDLE = { icon = "clock", title = "Idle · 3:42 PM", detail = "A message from you first cancels it", chip = "compacts 3:42 PM" }
 
-test("compaction: the context card marks the bar where the agent is reminded, warned and compacted, only those the host names", function()
+test("compaction: the context card marks the bar where the agent is reminded, asked and compacted, only those the host names", function()
 	local app = opened()
 	patch(app, { context_marks = { floor = 120000, warn = 142000, auto = 167000 } })
 	card(app)
 	local tree = app:tree("#composer-context-card")
-	for _, w in { "New-task reminder from 120K", "Agent warned at 142K", "Compacts on its own at 167K" } do
+	for _, w in { "New-task reminder from 120K", "Agent asked at 142K", "Compacts on its own at 167K" } do
 		expect(`{w}: {tree:find(w, 1, true) ~= nil}`).to_be(`{w}: true`)
 	end
 	local bx, _, bw = box(app, "#composer-context-card", 'status "Context window')
 	expect(bx ~= nil).to_be(true)
-	for _, m in { { '"New%-task reminder from 120K"', 0.6 }, { '"Agent warned at 142K"', 0.71 }, { '"Compacts on its own at 167K"', 0.835 } } do
+	for _, m in { { '"New%-task reminder from 120K"', 0.6 }, { '"Agent asked at 142K"', 0.71 }, { '"Compacts on its own at 167K"', 0.835 } } do
 		local x, _, w = box(app, "#composer-context-card", m[1])
 		local at = ((x :: number) + (w :: number) / 2 - (bx :: number)) / (bw :: number)
 		expect(`{m[1]} {math.abs(at - m[2]) <= 0.01}`).to_be(`{m[1]} true`)
@@ -459,7 +459,7 @@ test("compaction: the context card marks the bar where the agent is reminded, wa
 	tree = app:tree("#composer-context-card")
 	expect(tree:find("Compacts on its own at 167K", 1, true) ~= nil).to_be(true)
 	expect(tree:find("New-task reminder", 1, true)).to_be(nil)
-	expect(tree:find("Agent warned", 1, true)).to_be(nil)
+	expect(tree:find("Agent asked", 1, true)).to_be(nil)
 	told(app, { context_marks = false })
 	expect(app:tree("#composer-context-card"):find("Compacts on its own", 1, true)).to_be(nil)
 	expect(app:error()).to_be(nil)

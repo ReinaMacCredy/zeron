@@ -7593,7 +7593,8 @@ fn compaction_readout(chats: &Chats, open: &Open, config: &Json) -> (Value, Valu
         .get()
         .zip(open.context_baseline)
         .and_then(|(nudge, baseline)| reminder_floor(nudge, tokens.map_or(baseline, |t| baseline.min(t)), window));
-    let marks = ContextMarks::of(window, threshold, floor);
+    let ask = zeron_proto::model_options::chat_ask_threshold(config.as_ref(), reported);
+    let marks = ContextMarks::of(window, threshold, floor, ask);
     let harness = config.map_or("", |c| c.harness.display_name());
     let next = NextCompaction::of(session.as_ref(), chats.chat_compacting(&open.id), tokens, marks.auto, harness);
     let next = {

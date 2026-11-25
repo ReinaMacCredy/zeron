@@ -177,9 +177,10 @@ local COMPACT_ROW, FULL_ROW = 32, 30
 local COMPACT_ROWS, FULL_ROWS = 7, 6
 -- Option ids a model uses for an effort ladder (Cursor's carry no levels).
 local EFFORT_OPTIONS = { effort = true, reasoning = true, reasoning_effort = true }
-local CONTEXT_WINDOW, AUTO_COMPACT = "contextWindow", "autoCompact"
+local CONTEXT_WINDOW, AUTO_COMPACT, ASK_AT = "contextWindow", "autoCompact", "askAt"
 -- The CLI compacts this far below the chosen window.
 local HEADROOM = 33000
+local SIZES = { ["300k"] = 300000, ["400k"] = 400000, ["600k"] = 600000, ["800k"] = 800000, auto = 1000000 }
 -- The model's options after six rows scroll.
 local OPTIONS_MAX = 6
 -- The option rows' pitch.
@@ -1389,7 +1390,27 @@ return ui.component(function(props: Props): Node
 		end
 		return out
 	end
-	-- Picks both as one write: a window, and where it compacts on it.
+	-- A stop's place on the long track, 0 off it.
+	local function place(auto: Option, id: string?): number
+		for n, c in long_stops(auto) do
+			if c.id == id then
+				return n
+			end
+		end
+		return 0
+	end
+	-- Zeron's ask point while it sits below the auto-compact pick: the track moves it then,
+	-- and the pick is the limit the chips set. Only Zeron reads it, so it never restarts the chat.
+	local function ask_of(auto: Option, picks: { [string]: any }): string?
+		local id = picks[ASK_AT]
+		if type(id) ~= "string" then
+			return nil
+		end
+		local at = place(auto, id)
+		return if at > 0 and at < place(auto, picks[auto.id] or auto.default) then id else nil
+	end
+	-- Picks both as one write: a window, and where it compacts on it. Below a limit the chips
+	-- set, a track pick moves only the ask point.
 	local function set_context(window: Option, auto: Option, choice: string?)
 		if not props.options then
 			return
@@ -1399,8 +1420,25 @@ return ui.component(function(props: Props): Node
 			now[window.id] = if window.default == "200k" then nil else "200k"
 		else
 			now[window.id] = if window.default == "1m" then nil else "1m"
-			now[auto.id] = if choice == auto.default then nil else choice
+			if ask_of(auto, now) and place(auto, choice) < place(auto, now[auto.id] or auto.default) then
+				now[ASK_AT] = choice
+			else
+				now[ASK_AT] = nil
+				now[auto.id] = if choice == auto.default then nil else choice
+			end
 		end
+		props.options:set(now)
+	end
+	-- A limit chip, as one write: nil (Off) folds the ask point back into the pick.
+	local function set_limit(auto: Option, limit: string?)
+		if not props.options then
+			return
+		end
+		local now = table.clone(props.options:peek())
+		local track = ask_of(auto, now) or now[auto.id] or auto.default
+		now[ASK_AT] = if limit == nil then nil else track
+		local pick = limit or track
+		now[auto.id] = if pick == auto.default then nil else pick
 		props.options:set(now)
 	end
 	local function name_of(id: string): string
@@ -1415,16 +1453,12 @@ return ui.component(function(props: Props): Node
 	local function stop_name(c: Choice): string
 		return if c.id == "auto" then name_of("1m") else c.label
 	end
+	-- The track's stop: the ask point while there is one, else the pick.
+	local function track_id(auto: Option): string
+		return ask_of(auto, if props.options then props.options:get() else {}) or chosen(auto).id
+	end
 	local function context_at(window: Option, auto: Option): number
-		local at = 0
-		if chosen(window).id == "1m" then
-			for n, c in long_stops(auto) do
-				if c.id == chosen(auto).id then
-					at = n
-				end
-			end
-		end
-		return at
+		return if chosen(window).id == "1m" then place(auto, track_id(auto)) else 0
 	end
 	if props.step_context_with then
 		local asked = props.step_context_with
@@ -1473,18 +1507,74 @@ return ui.component(function(props: Props): Node
 		local stop = ui.use_state(nil :: string?)
 		ui.effect(function()
 			local _, a = context_pair()
-			local v = if a then chosen(a).id else nil
+			local v = if a then track_id(a) else nil
 			if stop:peek() ~= v then
 				stop:set(v)
 			end
 		end)
+		-- What the last change does: "live" moved only the ask point, "restart" the chat's launch.
+		local notice = ui.use_state(nil :: string?)
+		local function write(change: () -> ())
+			local before = if props.options then table.clone(props.options:peek()) else {}
+			change()
+			local after = if props.options then props.options:peek() else {}
+			local w, a = pair()
+			-- A chat that never ran has nothing to restart.
+			local ran = props.context_tokens ~= nil and props.context_tokens() ~= nil
+			if before[w.id] ~= after[w.id] or before[a.id] ~= after[a.id] then
+				notice:set(if ran then "restart" else nil)
+			elseif before[ASK_AT] ~= after[ASK_AT] then
+				notice:set("live")
+				ui.after(2200, function()
+					if notice:peek() == "live" then
+						notice:set(nil)
+					end
+				end)
+			end
+		end
+		local function asks_at(): number?
+			local _, a = context_pair()
+			local id = if a and long_on() then ask_of(a, if props.options then props.options:get() else {}) else nil
+			return if id then SIZES[id] - HEADROOM else nil
+		end
+		-- The limit chips: Off, then each stop above the track.
+		local function limit_chips(): { { key: string, id: string?, label: string } }
+			local _, a = context_pair()
+			local out = { { key = "off", id = nil :: string?, label = locale.s("ds.model_picker.extend_off") } }
+			if not a then
+				return out
+			end
+			local from = place(a, track_id(a))
+			for n, c in long_stops(a) do
+				if n > from then
+					table.insert(out, { key = c.id, id = c.id, label = stop_name(c) })
+				end
+			end
+			return out
+		end
+		-- Past the ask point: the agent went on, and where the chat asks or compacts next.
+		local function extended(): string?
+			local at = asks_at()
+			local n = if props.context_tokens then props.context_tokens() else nil
+			if not at or not n or n < at then
+				return nil
+			end
+			local _, a = context_pair()
+			local limit = (SIZES[chosen(a :: Option).id] or SIZES.auto) - HEADROOM
+			for _, c in long_stops(a :: Option) do
+				local next = (SIZES[c.id] or SIZES.auto) - HEADROOM
+				if next > n and next < limit then
+					return locale.s("ds.model_picker.extended", { at = context_usage.short_tokens(at), next = context_usage.short_tokens(next) })
+				end
+			end
+			return locale.s("ds.model_picker.extended_last", { at = context_usage.short_tokens(at), limit = context_usage.short_tokens(limit) })
+		end
 		local function threshold(): string
 			local window = if long_on() then 1000000 else 200000
 			local _, a = context_pair()
-			local sizes = { ["300k"] = 300000, ["400k"] = 400000, ["600k"] = 600000, ["800k"] = 800000 }
 			local at = window
 			if window > 200000 and a then
-				at = math.min(sizes[chosen(a).id] or window, window)
+				at = math.min(SIZES[chosen(a).id] or window, window)
 			end
 			return context_usage.short_tokens(at - HEADROOM)
 		end
@@ -1533,7 +1623,9 @@ return ui.component(function(props: Props): Node
 					text_size = "$font.size.xs",
 					on_click = function()
 						local w, a = pair()
-						set_context(w, a, if long_on() then nil else chosen(a).id)
+						write(function()
+							set_context(w, a, if long_on() then nil else track_id(a))
+						end)
 					end,
 					ui.div {
 						w = 24,
@@ -1587,7 +1679,9 @@ return ui.component(function(props: Props): Node
 					hover = { bg = "$hover" },
 					on_click = function()
 						local w, a = pair()
-						set_context(w, a, nil)
+						write(function()
+							set_context(w, a, nil)
+						end)
 					end,
 					ui.text {
 						function(): string
@@ -1612,7 +1706,9 @@ return ui.component(function(props: Props): Node
 						end,
 						on_change = function(v: string)
 							local w, a = pair()
-							set_context(w, a, v)
+							write(function()
+								set_context(w, a, v)
+							end)
 						end,
 					},
 				},
@@ -1660,7 +1756,9 @@ return ui.component(function(props: Props): Node
 						end,
 						on_click = function()
 							local w, a = pair()
-							set_context(w, a, l.value)
+							write(function()
+								set_context(w, a, l.value)
+							end)
 						end,
 						ui.text { l.label },
 					}
@@ -1670,6 +1768,62 @@ return ui.component(function(props: Props): Node
 					end,
 				}),
 			},
+			-- How far the agent may carry the chat past the track: Off keeps today's one number.
+			ui.show(long_on, ui.column {
+				id = "model-picker-extend",
+				w_full = true,
+				mt = "$space.1",
+				px = "$zeron.space.hair",
+				gap = "$zeron.space.tight",
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+				ui.text { locale.t("ds.model_picker.extend_to"), truncate = true },
+				ui.row {
+					gap = "$zeron.space.tight",
+					ui.each(ui.computed(limit_chips), function(c: { key: string, id: string?, label: string }): Node
+						local function on(): boolean
+							local _, a = context_pair()
+							if not a then
+								return false
+							end
+							local picks = if props.options then props.options:get() else {}
+							return if c.id == nil then ask_of(a, picks) == nil else ask_of(a, picks) ~= nil and chosen(a).id == c.id
+						end
+						return ui.button {
+							id = `model-picker-extend-{c.key}`,
+							role = "radio",
+							checked = on,
+							label = c.label,
+							h = 20,
+							px = ui.raw(7, "the long context pill's"),
+							items = "center",
+							rounded = "$radius.full",
+							border = 1,
+							border_color = function()
+								return if on() then "$accent" else "$zeron.slider.rail_edge"
+							end,
+							bg = function()
+								return if on() then "$zeron.slider.accent_wash" else "#00000000"
+							end,
+							color = function()
+								return if on() then "$accent" else "$text.tertiary"
+							end,
+							hover = { bg = "$hover" },
+							on_click = function()
+								local _, a = pair()
+								write(function()
+									set_limit(a, c.id)
+								end)
+							end,
+							ui.text { c.label },
+						}
+					end, {
+						key = function(c: { key: string }): string
+							return c.key
+						end,
+					}),
+				},
+			}),
 			ui.row {
 				id = "model-picker-context-readout",
 				h = 14,
@@ -1687,12 +1841,43 @@ return ui.component(function(props: Props): Node
 					end,
 				},
 				ui.text { "\u{a0}·\u{a0}" },
+				ui.show(function(): boolean
+					return asks_at() ~= nil
+				end, ui.text {
+					function(): string
+						local at = asks_at()
+						return if at then locale.s("ds.model_picker.asks_at", { at = context_usage.short_tokens(at) }) .. "\u{a0}·\u{a0}" else ""
+					end,
+					color = "$accent",
+				}),
 				ui.text {
 					function(): string
 						return locale.s("ds.model_picker.compacts_at", { at = threshold() })
 					end,
 				},
 			},
+			ui.show(function(): boolean
+				return notice:get() ~= nil or extended() ~= nil
+			end, ui.text {
+				id = "model-picker-context-notice",
+				function(): string
+					local n = notice:get()
+					if n == "restart" then
+						return locale.s("ds.model_picker.applies_restart")
+					elseif n == "live" then
+						return locale.s("ds.model_picker.applies_now")
+					end
+					return extended() or ""
+				end,
+				mt = "$space.1",
+				px = "$zeron.space.hair",
+				wrap = true,
+				text_size = "$font.size.xs",
+				color = function()
+					local n = notice:get()
+					return if n == "restart" then "$warning" elseif n == "live" then "$text.tertiary" else "$accent"
+				end,
+			}),
 			ui.show(function(): boolean
 				return warning() ~= nil
 			end, ui.text {

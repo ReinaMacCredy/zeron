@@ -1151,7 +1151,14 @@
       "context_switching": "切换到 {size} 会压缩此聊天（已用约 {in_use}）",
       "retry": "重试",
       "context_selected": "已用约 {in_use}；下一条消息会压缩它",
-      "add_key": "添加 {name} API 密钥"
+      "add_key": "添加 {name} API 密钥",
+      "asks_at": "asks at ~{at}",
+      "extend_to": "Agent may extend to",
+      "extend_off": "Off",
+      "applies_now": "Applies now, no restart.",
+      "applies_restart": "Applies from the next message: this chat restarts and its background tasks stop.",
+      "extended": "The agent went on past ~{at} · asks again at ~{next}",
+      "extended_last": "The agent went on past ~{at} · compacts at ~{limit}"
     },
     "effort_slider": {
       "reasoning": "推理强度"

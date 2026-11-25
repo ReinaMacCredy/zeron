@@ -73,7 +73,6 @@ pub struct CompactQueued {
     pub replaced: bool,
     pub background_tasks: usize,
     pub running_subagents: u32,
-    pub context: Option<String>,
 }
 
 /// Result of a manual context compaction — also the RPC result shape.
@@ -504,7 +503,8 @@ struct ContextReading {
     tokens: u64,
     baseline: u64,
     window: Option<u64>,
-    threshold: Option<u64>,
+    /// The highest ask stop this reading has reached (`model_options::ask_stop`).
+    stop: Option<u64>,
 }
 
 impl ContextReading {
@@ -523,13 +523,6 @@ impl ContextReading {
     fn past_floor(&self, nudge: u64) -> bool {
         zeron_proto::stats_view::reminder_floor(nudge, self.baseline.min(self.tokens), self.window)
             .is_some_and(|floor| self.tokens >= floor)
-    }
-
-    /// `threshold` is where the CLI compacts on its own (`chat_compact_threshold`), not the window.
-    fn at_ceiling(&self) -> bool {
-        self.threshold
-            .filter(|threshold| *threshold > 0)
-            .is_some_and(|threshold| self.tokens * 100 >= threshold * 85)
     }
 }
 
@@ -978,8 +971,8 @@ struct Inner {
     compact_owed: Mutex<HashMap<String, String>>,
     work_tree_owed: Mutex<HashMap<String, String>>,
     restart_owed: Mutex<HashMap<String, String>>,
-    /// Context size at each chat's last reminder: the mid-turn one waits for it to grow.
-    nudged_at: Mutex<HashMap<String, u64>>,
+    /// The last ask stop each chat reached (`reach_ask_stop`).
+    ask_stops: Mutex<HashMap<String, u64>>,
     /// Chats `recover_stale` is re-dispatching: their Idle + aborted reply is not an ending.
     reviving: Mutex<std::collections::HashSet<String>>,
     /// Per chat: session ids the provider said it no longer has. Never
@@ -1462,7 +1455,7 @@ impl SessionsEngine {
                 compact_owed: Mutex::new(HashMap::new()),
                 work_tree_owed: Mutex::new(HashMap::new()),
                 restart_owed: Mutex::new(HashMap::new()),
-                nudged_at: Mutex::new(HashMap::new()),
+                ask_stops: Mutex::new(HashMap::new()),
                 reviving: Mutex::new(std::collections::HashSet::new()),
                 rejected_resumes: Mutex::new(HashMap::new()),
                 fresh_start_notices: Mutex::new(std::collections::HashSet::new()),
@@ -3650,6 +3643,47 @@ impl SessionsEngine {
         self.inner.mid_turn_nudge(chat_id)
     }
 
+    /// What a Claude Code compaction keeps, handed to it by a PreCompact hook: facts only, since
+    /// the summarizer distrusts instructions the person did not give.
+    pub fn pre_compact_note(&self, chat_id: &str) -> Option<String> {
+        let mut lines = Vec::new();
+        if let Some(text) = self.inner.last_user_text(chat_id) {
+            lines.push(format!("- The person's last message, word for word: {text}"));
+        }
+        if let Some((_, left)) = self.inner.plan_split(chat_id)
+            && !left.is_empty()
+        {
+            lines.push(format!("- Plan steps not run yet: {}", left.join("; ")));
+        }
+        if let Some(chat) = self
+            .inner
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+        {
+            let (path, branch, dirty) = match &chat.work_tree {
+                Some(tree) => (Some(tree.path.clone()), tree.branch.clone(), tree.dirty_files),
+                None => (chat.cwd.clone(), chat.branch.clone(), 0),
+            };
+            if let Some(path) = path {
+                let mut line = format!("- Working in {path}");
+                if let Some(branch) = branch {
+                    line.push_str(&format!(" on branch {branch}"));
+                }
+                if dirty > 0 {
+                    line.push_str(&format!(", {dirty} files changed and not committed"));
+                }
+                lines.push(line);
+            }
+        }
+        let (tasks, subagents) = self.background_work(chat_id);
+        if tasks + subagents as usize > 0 {
+            lines.push(format!(
+                "- Still running, and will report back: {tasks} background tasks and {subagents} sub-agents"
+            ));
+        }
+        (!lines.is_empty()).then(|| format!("Keep in the summary:\n{}", lines.join("\n")))
+    }
+
     pub fn request_compact(
         &self,
         chat_id: &str,
@@ -3690,18 +3724,10 @@ impl SessionsEngine {
         });
         self.inner
             .set_compact_plan(chat_id, Some(zeron_proto::CompactPlan::Agent));
-        let config = self
-            .inner
-            .workspace()
-            .and_then(|workspace| workspace.chat_config(chat_id));
         Ok(CompactQueued {
             replaced: replaced.is_some(),
             background_tasks,
             running_subagents,
-            context: self
-                .inner
-                .context_reading(chat_id, config.as_ref())
-                .map(|reading| reading.line()),
         })
     }
 
@@ -5625,13 +5651,14 @@ impl Inner {
     ) -> Option<ContextReading> {
         let handle = self.doc_host()?.open(chat_id).ok()?;
         let usage = handle.doc().context_usage()?;
+        let tokens = usage.tokens?;
         Some(ContextReading {
-            tokens: usage.tokens?,
+            tokens,
             baseline: handle.doc().context_baseline(),
             window: config
                 .and_then(zeron_proto::model_options::chat_budget)
                 .or(usage.window),
-            threshold: zeron_proto::model_options::chat_compact_threshold(config, usage.window),
+            stop: zeron_proto::model_options::ask_stop(config, usage.window, tokens),
         })
     }
 
@@ -5693,7 +5720,8 @@ impl Inner {
         })
     }
 
-    fn plan_in_flight(&self, chat_id: &str) -> Option<String> {
+    /// The current plan's started step count and the titles of the steps not run yet.
+    fn plan_split(&self, chat_id: &str) -> Option<(usize, Vec<String>)> {
         let workspace = self.workspace()?;
         let chat = workspace.chat(chat_id).ok().flatten()?;
         let steps: Vec<_> = workspace
@@ -5702,15 +5730,32 @@ impl Inner {
             .filter(|step| chat.in_current_plan(step))
             .collect();
         let (started, left): (Vec<_>, Vec<_>) =
-            steps.iter().partition(|step| workspace.step_started(step));
-        if started.is_empty() || left.is_empty() {
+            steps.into_iter().partition(|step| workspace.step_started(step));
+        Some((started.len(), left.into_iter().map(|step| step.title).collect()))
+    }
+
+    fn plan_in_flight(&self, chat_id: &str) -> Option<String> {
+        let (started, left) = self.plan_split(chat_id)?;
+        if started == 0 || left.is_empty() {
             return None;
         }
-        let titles: Vec<&str> = left.iter().map(|step| step.title.as_str()).collect();
         Some(format!(
             "Your current plan is still running and keeps its steps that have not run yet ({}): write only the steps this message adds, and they join that plan. To drop a step, mark it skipped with the plan tool, action \"step\".",
-            titles.join("; ")
+            left.join("; ")
         ))
+    }
+
+    fn last_user_text(&self, chat_id: &str) -> Option<String> {
+        let handle = self.doc_host()?.open(chat_id).ok()?;
+        let entries = handle.doc().read_entries().ok()?;
+        let text = entry_text(
+            entries
+                .iter()
+                .rev()
+                .find(|entry| entry.role == MessageRole::User && entry.from_chat_id.is_none())?,
+        );
+        // The CLI cuts a hook's output at 10,000 characters.
+        (!text.is_empty()).then(|| text.chars().take(4_000).collect())
     }
 
     fn mission(&self, chat_id: &str) -> Option<zeron_proto::ChatMission> {
@@ -5735,13 +5780,28 @@ impl Inner {
             None
         } else {
             let nudge = self.registry.compaction_settings().nudge_tokens;
-            self.reminder_reading(chat_id, harness_id)
+            let chat = self
+                .workspace()
+                .and_then(|workspace| workspace.chat(chat_id).ok().flatten());
+            let config = chat.as_ref().and_then(|chat| chat.config.as_ref());
+            // A delegated child has nobody steering it to hand work to.
+            let can_hand_off = chat.as_ref().is_some_and(|chat| chat.delegation.is_none())
+                && !self.tool_disabled(config, "delegate_task")
+                && !self.tool_disabled(config, "create_thread");
+            let reading = self.reminder_reading(chat_id, harness_id);
+            // The message itself asks, so a stop it arrives past is marked without a reminder.
+            if let Some(reading) = &reading {
+                self.reach_ask_stop(chat_id, reading);
+            }
+            reading
                 .filter(|reading| reading.past_floor(nudge))
-                .map(|reading| {
-                    format!(
-                        "{}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. Continuing, including any follow-up question: do not compact.",
-                        reading.line(),
-                    )
+                .map(|_| {
+                    if can_hand_off {
+                        "This chat is long. Before answering, decide whether this message starts a new task or topic or continues the current one. Continuing, including any follow-up question: do not compact. New task or topic, and the current work is finished: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. New task or topic that does not need this chat, and the current work is unfinished: do not do it here and do not compact. If it can be briefed in full and only its result matters, call delegate_task and report the result here. If the person will have to steer it, call create_thread with what it needs to know and say here where it went."
+                    } else {
+                        "This chat is long. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. Continuing, including any follow-up question: do not compact."
+                    }
+                    .to_string()
                 })
         };
         let findings = self.findings_reminder(chat_id);
@@ -5776,30 +5836,32 @@ impl Inner {
         lock(&self.compact_owed).insert(chat_id.to_string(), note);
     }
 
-    /// Near the CLI's own compaction, once per `MID_TURN_NUDGE_STEP` of growth: a long run of
-    /// tool calls sees no new message.
-    /// No tags: the CLI wraps hook context in its own system reminder and escapes ours.
+    /// At each ask stop of a chat with an ask point, once: a long run of tool calls sees no new
+    /// message. Going on past it extends the chat to the next stop, so nothing else is asked of
+    /// the agent. No tags: the CLI wraps hook context in its own system reminder and escapes ours.
     fn mid_turn_nudge(&self, chat_id: &str) -> Option<String> {
         let harness_id = self.doc_host()?.harness_for(chat_id);
         let reading = self.reminder_reading(chat_id, harness_id)?;
-        let threshold = reading.threshold.filter(|_| reading.at_ceiling())?;
-        let tokens = reading.tokens;
-        let mut nudged = lock(&self.nudged_at);
-        let last = nudged.entry(chat_id.to_string()).or_insert(0);
-        // Smaller than at the last reminder: the chat compacted since.
-        if tokens < *last {
-            *last = tokens;
-            return None;
+        self.reach_ask_stop(chat_id, &reading).then(|| {
+            "This chat has reached the point where it decides whether to carry its history further. If the step you just finished closes a piece of work and the rest needs only its conclusions, call compact with continueWith naming the remaining steps and end your turn. Otherwise keep going: nothing else is needed.".to_string()
+        })
+    }
+
+    /// Whether `reading` reached an ask stop not reached before, marking it. A reading below the
+    /// last stop means the chat compacted since, which starts the stops over.
+    fn reach_ask_stop(&self, chat_id: &str, reading: &ContextReading) -> bool {
+        let mut reached = lock(&self.ask_stops);
+        let last = reached.entry(chat_id.to_string()).or_insert(0);
+        if reading.tokens < *last {
+            *last = 0;
         }
-        if *last > 0 && tokens < *last + MID_TURN_NUDGE_STEP {
-            return None;
+        match reading.stop {
+            Some(stop) if stop > *last => {
+                *last = stop;
+                true
+            }
+            _ => false,
         }
-        *last = tokens;
-        Some(format!(
-            "{}, and this turn is still running. At {} the chat compacts on its own, wherever the work is then. Keep going unless the step you just finished closes a piece of work and the rest needs only its conclusions. Then call compact with continueWith naming the remaining steps and end your turn: the chat compacts keeping what you name and resumes from continueWith.",
-            reading.line(),
-            format_tokens(threshold),
-        ))
     }
 
     fn wrapped_prompt(
@@ -7448,7 +7510,6 @@ fn compaction_note(note: &str, pre_tokens: Option<u64>, post_tokens: Option<u64>
     }
 }
 
-const MID_TURN_NUDGE_STEP: u64 = 50_000;
 
 fn format_tokens(tokens: u64) -> String {
     if tokens >= 1000 {
@@ -11077,13 +11138,13 @@ mod tests {
         tokens: u64,
         baseline: u64,
         window: Option<u64>,
-        threshold: Option<u64>,
+        stop: Option<u64>,
     ) -> ContextReading {
         ContextReading {
             tokens,
             baseline,
             window,
-            threshold,
+            stop,
         }
     }
 
@@ -11105,24 +11166,6 @@ mod tests {
             !reading(40_000, 90_000, None, None).past_floor(30_000),
             "a baseline above the reading frees nothing"
         );
-        assert!(!reading(900_000, 0, None, None).at_ceiling());
-    }
-
-    #[test]
-    fn the_ceiling_sits_below_the_clis_own_threshold() {
-        use zeron_proto::model_options::compact_threshold;
-        let small = compact_threshold("200k", "auto");
-        assert_eq!(small, Some(167_000));
-        assert!(!reading(141_949, 0, None, small).at_ceiling());
-        assert!(reading(141_950, 0, None, small).at_ceiling());
-        assert!(
-            reading(166_999, 0, None, small).at_ceiling(),
-            "the CLI compacts at 167K; the old 85% of the 200K window (170K) came after it"
-        );
-        let large = compact_threshold("1m", "400k");
-        assert_eq!(large, Some(367_000));
-        assert!(!reading(311_949, 0, None, large).at_ceiling());
-        assert!(reading(311_950, 0, None, large).at_ceiling());
     }
 
     fn session_at(status: SessionStatus, updated_at: chrono::DateTime<Utc>) -> Session {

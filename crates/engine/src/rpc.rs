@@ -5700,6 +5700,10 @@ impl RpcService for EngineRpc {
                 let p: ChatParams = parse_params(params)?;
                 RpcReply::value(&serde_json::json!({ "text": self.sessions.mid_turn_nudge(&p.chat_id) }))
             }
+            methods::PRE_COMPACT_NOTE => {
+                let p: ChatParams = parse_params(params)?;
+                RpcReply::value(&serde_json::json!({ "text": self.sessions.pre_compact_note(&p.chat_id) }))
+            }
             methods::REQUEST_COMPACT => {
                 let p: RequestCompactParams = parse_params(params)?;
                 let queued = self

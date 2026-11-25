@@ -133,6 +133,9 @@ pub mod methods {
     /// `{chatId}` -> `{text}`: the compaction reminder for a turn still
     /// running, asked by `zeron hook` after each Claude Code tool call.
     pub const MID_TURN_NUDGE: &str = "MidTurnNudge";
+    /// `{chatId}` -> `{text}`: what a Claude Code compaction must keep, asked
+    /// by `zeron hook` on PreCompact.
+    pub const PRE_COMPACT_NOTE: &str = "PreCompactNote";
     /// Tail of a live background process's output: `{chatId, taskId}` →
     /// stream of `{lines, running}`, ending after the task leaves the set.
     pub const WATCH_BACKGROUND_OUTPUT: &str = "WatchBackgroundOutput";
@@ -1194,6 +1197,7 @@ pub fn fork_agent_allowed(method: &str) -> bool {
             | methods::LIST_PROJECT_ACTIONS
             | methods::LIST_TERMINALS
             | methods::MID_TURN_NUDGE
+            | methods::PRE_COMPACT_NOTE
             | methods::OPEN_TERMINAL
             | methods::PREVIEW_ROUTES
             | methods::PUBLISH_HTML_RENDER

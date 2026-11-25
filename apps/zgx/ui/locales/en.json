@@ -760,7 +760,7 @@
         "next_chip": "{chip} ·",
         "compact_now": "Compact now",
         "mark_floor": "New-task reminder from {n}K",
-        "mark_warn": "Agent warned at {n}K",
+        "mark_warn": "Agent asked at {n}K",
         "mark_auto": "Compacts on its own at {n}K"
       },
       "terminal": "Terminal",
@@ -1151,7 +1151,14 @@
       "context_switching": "Switching to {size} compacts this chat (~{in_use} in use)",
       "retry": "Retry",
       "context_selected": "~{in_use} in use; the next message compacts it",
-      "add_key": "Add {name} API key"
+      "add_key": "Add {name} API key",
+      "asks_at": "asks at ~{at}",
+      "extend_to": "Agent may extend to",
+      "extend_off": "Off",
+      "applies_now": "Applies now, no restart.",
+      "applies_restart": "Applies from the next message: this chat restarts and its background tasks stop.",
+      "extended": "The agent went on past ~{at} · asks again at ~{next}",
+      "extended_last": "The agent went on past ~{at} · compacts at ~{limit}"
     },
     "effort_slider": {
       "reasoning": "Reasoning"
