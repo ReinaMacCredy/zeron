@@ -20,7 +20,7 @@ visual = "waiting-reveal"
 text = "Ctrl+Tab, set to cycle the tabs, goes through the open tabs most recently used first, as Cmd+Tab does: a quick press goes back to the tab you used before."
 
 [[entry.improvements]]
-text = "A reply's files are one list, with their folder, their count and Reveal in Finder at its head. Click a line to open the file in the right pane; hover it for Quick look, which shows an HTML file as its page and a Markdown file as it reads, and for Open in browser on an HTML file. The separate Open in card under a reply is gone: a page linked in the reply's words has Open in browser in its right-click menu."
+text = "A reply's files are one list, with their folder, their count and Reveal in Finder at its head. Click a line to open the file in the right pane; hover it for Quick look, which shows an HTML file as its page and a Markdown file as it reads, and for Open in browser on an HTML file; Show all under a long file shows the rest of it there. Words ending in a colon followed by whole paths show the words, then the files as a list, and a whole path to a file among a reply's words is a link that opens it. The separate Open in card under a reply is gone: a page linked in the reply's words has Open in browser in its right-click menu."
 
 [[entry.improvements]]
 text = "Fixed: in a chat with no project, an HTML file showed a blank page in the Files tab, and Reveal in Finder and Open in browser on its files failed."

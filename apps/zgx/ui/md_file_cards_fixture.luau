@@ -14,7 +14,7 @@ local shown = ui.state("test_shown", "")
 
 local REPORT = { "# Checkout latency, week 47", "", "p95 rose from 180 ms to 240 ms on Wednesday." }
 for i = 4, 40 do
-	table.insert(REPORT, `Line {i} of the report.`)
+	table.insert(REPORT, `- Line {i} of the report.`)
 end
 local CSV = { "day,p50,p95,p99", "2026-11-16,88,180,236", "2026-11-17,90,183,244", "2026-11-18,112,240,355" }
 for i = 5, 169 do
@@ -140,6 +140,9 @@ return ui.scroll {
 		group = "reply:f1",
 		open = function(target: string)
 			calls:push(`open:{target}`)
+		end,
+		file_link = function(target: string): boolean
+			return not string.find(target, "://", 1, true)
 		end,
 		link_menu = function(target: string): any
 			return Links.file {

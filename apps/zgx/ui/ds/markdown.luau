@@ -1023,7 +1023,68 @@ local TABLE_SHARE = 40
 -- built again when what the page says of them changes (the chat's skills
 -- read after it showed), so it's the same as if they'd been known first.
 -- Words with none of those links: built once.
-local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?, veil_id: string?): Node
+local function path_spans(x: string): { { from: number, path: string } }
+	local out = {}
+	local at = 1
+	while true do
+		local s, e = string.find(x, "~?/[^%s]+", at)
+		if not s then
+			return out
+		end
+		local path = trimmed(string.sub(x, s, e :: number))
+		if (s == 1 or string.find(string.sub(x, s - 1, s - 1), "[%s%(%[\"']")) and string.match(path, "%.%w+$") then
+			table.insert(out, { from = s, path = path })
+		end
+		at = (e :: number) + 1
+	end
+end
+
+local function bare_paths(list: { MarkdownRun }, file_link: (target: string) -> boolean): { string }
+	local out: { string } = {}
+	for _, r in list do
+		if not r.a and not r.c and not r.img and type(r.x) == "string" then
+			for _, span in path_spans(r.x) do
+				if file_link(span.path) and not table.find(out, span.path) then
+					table.insert(out, span.path)
+				end
+			end
+		end
+	end
+	return out
+end
+
+local function path_linked(list: { MarkdownRun }, found: { [string]: boolean }): { MarkdownRun }
+	local out: { MarkdownRun } = {}
+	for _, r in list do
+		local copied = 1
+		if not r.a and not r.c and not r.img and type(r.x) == "string" then
+			for _, span in path_spans(r.x) do
+				if found[span.path] then
+					if span.from > copied then
+						local before = table.clone(r)
+						before.x = string.sub(r.x, copied, span.from - 1)
+						table.insert(out, before)
+					end
+					local link = table.clone(r)
+					link.x = span.path
+					link.a = span.path
+					table.insert(out, link)
+					copied = span.from + #span.path
+				end
+			end
+		end
+		if copied == 1 then
+			table.insert(out, r)
+		elseif copied <= #r.x then
+			local rest = table.clone(r)
+			rest.x = string.sub(r.x, copied)
+			table.insert(out, rest)
+		end
+	end
+	return out
+end
+
+local function chipped(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?, veil_id: string?): Node
 	local asked = if ctx then ctx.link_chip else nil
 	if not asked then
 		return runs_now(list, style, ctx, veil_id)
@@ -1046,6 +1107,34 @@ local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?,
 		return table.concat(says, "|")
 	end, function(): Node
 		return runs_now(list, style, ctx, veil_id)
+	end)
+end
+
+-- A whole path written in a reply's words, to a file there: a link, as a web address is.
+local function runs(list: { MarkdownRun }, style: { [string]: any }?, ctx: Ctx?, veil_id: string?): Node
+	local files = if ctx and ctx.file_link then ctx.file_cards else nil
+	local paths = if ctx and ctx.file_link and files then bare_paths(list, ctx.file_link) else {}
+	if not files or #paths == 0 then
+		return chipped(list, style, ctx, veil_id)
+	end
+	local function found(): { [string]: boolean }
+		local out: { [string]: boolean } = {}
+		for _, path in paths do
+			if files.find(path) then
+				out[path] = true
+			end
+		end
+		return out
+	end
+	return ui.presence(function(): string
+		local now = found()
+		local says: { string } = {}
+		for _, path in paths do
+			table.insert(says, if now[path] then "y" else "-")
+		end
+		return table.concat(says)
+	end, function(): Node
+		return chipped(path_linked(list, found()), style, ctx, veil_id)
 	end)
 end
 
@@ -1813,9 +1902,82 @@ local function no_cards(ctx: Ctx?): Ctx?
 	return plain
 end
 
+-- "The mockup is in three files: /a.html /b.css /c.png": the words up to the colon, and the whole paths after it.
+local function led_files(b: MarkdownBlock): (MarkdownBlock?, MarkdownBlock?)
+	if b.t ~= "p" then
+		return nil, nil
+	end
+	for i, r in b.s do
+		if not r.a and not r.c and not r.img and type(r.x) == "string" then
+			local at = 1
+			while true do
+				local p = string.find(r.x, ":", at, true)
+				if not p then
+					break
+				end
+				at = p + 1
+				if p == #r.x or string.find(string.sub(r.x, p + 1, p + 1), "%s") then
+					local lead = table.move(b.s, 1, i - 1, 1, {})
+					local said = table.clone(r)
+					said.x = string.sub(r.x, 1, p)
+					table.insert(lead, said)
+					local tail: { MarkdownRun } = {}
+					local after = string.sub(r.x, p + 1)
+					if string.find(after, "%S") then
+						local rest = table.clone(r)
+						rest.x = after
+						table.insert(tail, rest)
+					end
+					table.move(b.s, i + 1, #b.s, #tail + 1, tail)
+					local cards: { FileCard.Item } = {}
+					local whole = #tail > 0 and file_refs(tail, cards, {}) and #cards > 0
+					for _, it in cards do
+						if not string.match(it.target, "^~?/") then
+							whole = false
+						end
+					end
+					local words = false
+					for _, l in lead do
+						if string.find(l.x, "%S") and l.x ~= ":" then
+							words = true
+						end
+					end
+					if whole and words then
+						local head, list = table.clone(b), table.clone(b)
+						head.s, list.s = lead, tail
+						return head, list
+					end
+				end
+			end
+		end
+	end
+	return nil, nil
+end
+
 -- One block, by its kind; `ink`, its text's colour where not the primary (a
 -- quote's). `veil_id`: stable path for the streaming veil.
 local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?, n: number?): Node
+	local lead, listed
+	if ctx and ctx.file_cards then
+		lead, listed = led_files(b)
+	end
+	if lead and listed and ctx then
+		local items = cards_of(listed) :: { FileCard.Item }
+		return ui.presence(function(): string
+			return if (cards_state(nil, items, ctx)) == "words" then "words" else "split"
+		end, function(k: string): Node
+			if k == "words" then
+				return block(b, ink, no_cards(ctx), veil_id)
+			end
+			return ui.column {
+				w_full = true,
+				min_w = 0,
+				gap = if ctx.small then "$space.3" else "$space.4",
+				block(lead, ink, ctx, veil_id),
+				block(listed, ink, ctx),
+			}
+		end, { w_full = true, min_w = 0 })
+	end
 	local cards = if ctx and ctx.file_cards then cards_of(b) else nil
 	if cards and ctx and ctx.file_cards then
 		local files, plain = ctx.file_cards, no_cards(ctx)

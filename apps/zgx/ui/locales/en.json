@@ -1353,7 +1353,8 @@
     "file_card": {
       "gone": "No longer on this machine",
       "detail": "{kind} · {size}",
-      "more_lines": "{n, plural, one {# more line} other {# more lines}}",
+      "show_all": "Show all {n} lines",
+      "show_fewer": "Show fewer lines",
       "more_in_panel": "More in the Files panel",
       "text": "Text",
       "file": "File",

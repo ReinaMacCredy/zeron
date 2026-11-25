@@ -41,6 +41,7 @@ local PICTURE = { png = true, jpg = true, jpeg = true, gif = true, webp = true }
 local PAGE = { html = true, htm = true }
 local PROSE = { md = true, markdown = true }
 local PROSE_LINES, RENDER_MOST = 40, 360
+local WHOLE_MOST = 2000
 local OPEN_MOVE = { duration = 200, ease = "cubicBezier(.2,.8,.2,1)" }
 local HOVER_MOVE = { duration = 100, ease = "linear" }
 local ROW_H, LIST_MOST = 38, 560
@@ -129,15 +130,37 @@ local function quiet(words: string): Node
 	return ui.text { words, literal = true, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
 end
 
-local function more_of(n: number, truncated: boolean): Node?
-	if truncated then
-		return quiet(locale.s("ds.file_card.more_in_panel"))
-	end
-	return if n > 0 then quiet(locale.s("ds.file_card.more_lines", { n = n })) else nil
+local function lines_in(text: string): number
+	local n = select(2, string.gsub(text, "\n", ""))
+	return if text ~= "" and string.sub(text, -1) ~= "\n" then n + 1 else n
 end
 
-local function csv_body(text: string, ext: string, truncated: boolean): Node
-	local shown, more = head(text, CSV_ROWS + 1)
+type Whole = { all: boolean, flip: () -> (), text: string, ext: string, truncated: boolean }
+
+local function more_of(whole: Whole, more: number, hidden: (() -> boolean)?): Node?
+	local all = whole.all
+	local rest = if (all and more > 0) or whole.truncated then quiet(locale.s("ds.file_card.more_in_panel")) else nil
+	if not all and more == 0 and not hidden then
+		return rest
+	end
+	local button = Button {
+		tone = "ghost",
+		size = "xs",
+		class = "md-file-all",
+		on_click = whole.flip,
+		if all then locale.t("ds.file_card.show_fewer") else locale.t("ds.file_card.show_all", { n = lines_in(whole.text) }),
+	}
+	return ui.column {
+		items = "start",
+		gap = "$space.1",
+		if all or more > 0 or not hidden then button else ui.show(hidden, button),
+		rest,
+	}
+end
+
+local function csv_body(whole: Whole): Node
+	local text, ext = whole.text, whole.ext
+	local shown, more = head(text, if whole.all then WHOLE_MOST else CSV_ROWS + 1)
 	local rows = Csv.parse(shown, if ext == "tsv" then "\t" else ",")
 	local columns: { DataTable.Column } = {}
 	for _, label in rows[1] or {} do
@@ -155,12 +178,12 @@ local function csv_body(text: string, ext: string, truncated: boolean): Node
 				return ui.text { (rows[r + 1] or {})[c] or "", literal = true, truncate = true, text_size = "$font.size.sm" }
 			end,
 		},
-		more_of(more, truncated),
+		more_of(whole, more),
 	}
 end
 
-local function text_body(text: string, truncated: boolean): Node
-	local shown, more = head(text, HEAD_LINES)
+local function text_body(whole: Whole): Node
+	local shown, more = head(whole.text, if whole.all then WHOLE_MOST else HEAD_LINES)
 	return ui.column {
 		w_full = true,
 		min_w = 0,
@@ -174,12 +197,13 @@ local function text_body(text: string, truncated: boolean): Node
 			line_height = "$zeron.prose.code.line",
 			color = "$text.primary",
 		},
-		more_of(more, truncated),
+		more_of(whole, more),
 	}
 end
 
-local function prose_body(text: string, truncated: boolean, row: RowProps): Node
-	local shown, more = head(text, PROSE_LINES)
+local function prose_body(whole: Whole, tall: State<number>, row: RowProps): Node
+	local all = whole.all
+	local shown, more = head(whole.text, if all then WHOLE_MOST else PROSE_LINES)
 	local Markdown = (require :: any)("@self/markdown")
 	return ui.column {
 		w_full = true,
@@ -189,11 +213,28 @@ local function prose_body(text: string, truncated: boolean, row: RowProps): Node
 			class = "md-file-prose",
 			w_full = true,
 			min_w = 0,
-			max_h = RENDER_MOST,
+			max_h = if all then nil else RENDER_MOST,
 			overflow = "hidden",
-			Markdown { text = shown, small = true, open = row.open, link_menu = row.menu },
+			fade = if all
+				then nil
+				else function(): { number }
+					return if tall:get() > RENDER_MOST + 0.5 then { 0, 48 } else { 0, 0 }
+				end,
+			ui.column {
+				w_full = true,
+				min_w = 0,
+				shrink = 0,
+				on_resize = function(size: { w: number, h: number })
+					if math.abs(size.h - tall:peek()) >= 0.5 then
+						tall:set(size.h)
+					end
+				end,
+				Markdown { text = shown, small = true, open = row.open, link_menu = row.menu },
+			},
 		},
-		more_of(more, truncated),
+		more_of(whole, more, function(): boolean
+			return tall:get() > RENDER_MOST + 0.5
+		end),
 	}
 end
 
@@ -204,6 +245,8 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 	local whole = if files.whole then files.whole(item.target) else nil
 	local page = PAGE[ext] == true and whole ~= nil and files.here() and (ui :: any).web ~= nil
 	local got = ui.use_state(nil :: any)
+	local all = ui.use_state(false)
+	local tall = ui.use_state(0)
 	if not picture and not page and (file.size or 0) <= READ_MOST then
 		files.read(item.target):after(function(r: any)
 			got:set(if type(r) == "table" then r else false)
@@ -256,7 +299,7 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 			elseif r == false or type(r.text) ~= "string" or r.encoding == "binary" or r.encoding == "unsupported" then
 				return "none"
 			end
-			return "text"
+			return if all:get() then "all" else "text"
 		end, function(k: string): Node
 			if k == "wait" then
 				return ui.div { h = "$font.line.sm" }
@@ -264,12 +307,21 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 				return quiet(locale.s("ds.file_card.more_in_panel"))
 			end
 			local r = got:peek()
+			local read: Whole = {
+				all = k == "all",
+				flip = function()
+					all:set(not all:peek())
+				end,
+				text = r.text,
+				ext = ext,
+				truncated = r.truncated == true,
+			}
 			if ext == "csv" or ext == "tsv" then
-				return csv_body(r.text, ext, r.truncated == true)
+				return csv_body(read)
 			elseif PROSE[ext] then
-				return prose_body(r.text, r.truncated == true, props.row)
+				return prose_body(read, tall, props.row)
 			end
-			return text_body(r.text, r.truncated == true)
+			return text_body(read)
 		end, { w_full = true, min_w = 0 })
 	end
 	local open = props.row.open

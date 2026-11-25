@@ -1353,7 +1353,8 @@
     "file_card": {
       "gone": "已不在这台电脑上",
       "detail": "{kind} · {size}",
-      "more_lines": "{n, plural, other {还有 # 行}}",
+      "show_all": "显示全部 {n} 行",
+      "show_fewer": "显示更少行",
       "more_in_panel": "更多内容在文件面板中",
       "text": "文本",
       "file": "文件",
