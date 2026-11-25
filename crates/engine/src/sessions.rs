@@ -3649,6 +3649,47 @@ impl SessionsEngine {
         self.inner.mid_turn_nudge(chat_id)
     }
 
+    /// What a Claude Code compaction keeps, handed to it by a PreCompact hook: facts only, since
+    /// the summarizer distrusts instructions the person did not give.
+    pub fn pre_compact_note(&self, chat_id: &str) -> Option<String> {
+        let mut lines = Vec::new();
+        if let Some(text) = self.inner.last_user_text(chat_id) {
+            lines.push(format!("- The person's last message, word for word: {text}"));
+        }
+        if let Some((_, left)) = self.inner.plan_split(chat_id)
+            && !left.is_empty()
+        {
+            lines.push(format!("- Plan steps not run yet: {}", left.join("; ")));
+        }
+        if let Some(chat) = self
+            .inner
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+        {
+            let (path, branch, dirty) = match &chat.work_tree {
+                Some(tree) => (Some(tree.path.clone()), tree.branch.clone(), tree.dirty_files),
+                None => (chat.cwd.clone(), chat.branch.clone(), 0),
+            };
+            if let Some(path) = path {
+                let mut line = format!("- Working in {path}");
+                if let Some(branch) = branch {
+                    line.push_str(&format!(" on branch {branch}"));
+                }
+                if dirty > 0 {
+                    line.push_str(&format!(", {dirty} files changed and not committed"));
+                }
+                lines.push(line);
+            }
+        }
+        let (tasks, subagents) = self.background_work(chat_id);
+        if tasks + subagents as usize > 0 {
+            lines.push(format!(
+                "- Still running, and will report back: {tasks} background tasks and {subagents} sub-agents"
+            ));
+        }
+        (!lines.is_empty()).then(|| format!("Keep in the summary:\n{}", lines.join("\n")))
+    }
+
     pub fn request_compact(
         &self,
         chat_id: &str,
@@ -5684,7 +5725,8 @@ impl Inner {
         })
     }
 
-    fn plan_in_flight(&self, chat_id: &str) -> Option<String> {
+    /// The current plan's started step count and the titles of the steps not run yet.
+    fn plan_split(&self, chat_id: &str) -> Option<(usize, Vec<String>)> {
         let workspace = self.workspace()?;
         let chat = workspace.chat(chat_id).ok().flatten()?;
         let steps: Vec<_> = workspace
@@ -5693,15 +5735,32 @@ impl Inner {
             .filter(|step| chat.in_current_plan(step))
             .collect();
         let (started, left): (Vec<_>, Vec<_>) =
-            steps.iter().partition(|step| workspace.step_started(step));
-        if started.is_empty() || left.is_empty() {
+            steps.into_iter().partition(|step| workspace.step_started(step));
+        Some((started.len(), left.into_iter().map(|step| step.title).collect()))
+    }
+
+    fn plan_in_flight(&self, chat_id: &str) -> Option<String> {
+        let (started, left) = self.plan_split(chat_id)?;
+        if started == 0 || left.is_empty() {
             return None;
         }
-        let titles: Vec<&str> = left.iter().map(|step| step.title.as_str()).collect();
         Some(format!(
             "Your current plan is still running and keeps its steps that have not run yet ({}): write only the steps this message adds, and they join that plan. To drop a step, mark it skipped with the plan tool, action \"step\".",
-            titles.join("; ")
+            left.join("; ")
         ))
+    }
+
+    fn last_user_text(&self, chat_id: &str) -> Option<String> {
+        let handle = self.doc_host()?.open(chat_id).ok()?;
+        let entries = handle.doc().read_entries().ok()?;
+        let text = entry_text(
+            entries
+                .iter()
+                .rev()
+                .find(|entry| entry.role == MessageRole::User && entry.from_chat_id.is_none())?,
+        );
+        // The CLI cuts a hook's output at 10,000 characters.
+        (!text.is_empty()).then(|| text.chars().take(4_000).collect())
     }
 
     fn mission(&self, chat_id: &str) -> Option<zeron_proto::ChatMission> {

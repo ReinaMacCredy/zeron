@@ -88,7 +88,8 @@ enum Command {
         port: Option<u16>,
     },
     /// Claude Code PostToolUse hook: prints the compaction reminder the
-    /// engine has for this chat's running turn, if any.
+    /// engine has for this chat's running turn, if any. On PreCompact it
+    /// prints what the compaction must keep.
     #[command(hide = true)]
     Hook {
         #[arg(long)]

@@ -949,6 +949,17 @@ async fn a_running_turn_is_reminded_once_per_step_of_growth() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_claude_compaction_is_told_the_last_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _harness, _requests) = engine_with_one_turn(tmp.path()).await;
+    let note = core.sessions.pre_compact_note(CHAT).expect("a chat with a message");
+    assert!(
+        note.starts_with("Keep in the summary:\n- The person's last message, word for word: hello"),
+        "{note}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_filling_context_nudges_the_agent_on_every_message() {
     let tmp = tempfile::tempdir().unwrap();
     let (core, harness, requests) = engine_with_one_turn(tmp.path()).await;

@@ -549,10 +549,15 @@ impl ClaudeHarness {
         if let Some(command) = hook {
             settings.insert(
                 "hooks".into(),
-                serde_json::json!({ "PostToolUse": [{
-                    "matcher": "*",
-                    "hooks": [{ "type": "command", "command": command }],
-                }] }),
+                serde_json::json!({
+                    "PostToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{ "type": "command", "command": command }],
+                    }],
+                    "PreCompact": [{
+                        "hooks": [{ "type": "command", "command": command }],
+                    }],
+                }),
             );
         }
         if code_mode {

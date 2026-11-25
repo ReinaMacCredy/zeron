@@ -83,7 +83,7 @@ pub fn run_mcp(chat: String, port: Option<u16>) -> anyhow::Result<()> {
     runtime.block_on(mcp_cli(chat, port))
 }
 
-/// `hook --chat <id> --port <port>`: Claude Code's PostToolUse hook.
+/// `hook --chat <id> --port <port>`: Claude Code's PostToolUse and PreCompact hook.
 pub fn run_hook(chat: String, port: Option<u16>) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -148,6 +148,20 @@ async fn hook_cli(chat: String, ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ipc_as_agent(ipc_port, Some(&paths::data_dir()))
         .await
         .map_err(|e| anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e})"))?;
+    // PreCompact appends plain stdout to the summary's instructions.
+    if event.get("hook_event_name").and_then(|name| name.as_str()) == Some("PreCompact") {
+        let reply = client
+            .call(
+                zeron_rpc::methods::PRE_COMPACT_NOTE,
+                serde_json::json!({ "chatId": chat }),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("PreCompactNote failed: {e}"))?;
+        if let Some(text) = reply.get("text").and_then(|text| text.as_str()) {
+            println!("{text}");
+        }
+        return Ok(());
+    }
     let reply = client
         .call(
             zeron_rpc::methods::MID_TURN_NUDGE,
