@@ -27,6 +27,7 @@ local VISUALS: { [string]: Visual } = {
 	["markdown-fence-render"] = require("@app/screens/shell/whats_new_visuals/markdown_fence_render"),
 	["mission-threads"] = require("@app/screens/shell/whats_new_visuals/mission_threads"),
 	["mission-plan"] = require("@app/screens/shell/whats_new_visuals/mission_plan"),
+	["waiting-reveal"] = require("@app/screens/shell/whats_new_visuals/waiting_reveal"),
 }
 
 function M.has(id: string?): boolean

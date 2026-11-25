@@ -2,6 +2,20 @@
 # must be listed in crates/docs/src/images.rs IMAGES. Order does not matter.
 
 [[entry]]
+version = "0.3.19"
+date = "Nov 25"
+
+[[entry.improvements]]
+text = "The Waiting pill says what waits: 1 question waiting, 2 approvals waiting, 1 plan waiting, or 3 waiting for you when the kinds differ. A new one from another chat opens the pill out for a few seconds with the chat that asks and what it asks, then folds back."
+visual = "waiting-reveal"
+
+[[entry.improvements]]
+text = "Ctrl+Tab, set to cycle the tabs, goes through the open tabs most recently used first, as Cmd+Tab does: a quick press goes back to the tab you used before."
+
+[[entry.improvements]]
+text = "Fixed: a compaction's clock started again from zero when you left its chat and came back; the Working pill's rows could stop following their threads after a quick change of the threads it shows."
+
+[[entry]]
 version = "0.3.18"
 date = "Nov 24"
 hero = "visuals-in-reply.jpg"
