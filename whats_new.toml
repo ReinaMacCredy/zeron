@@ -4,6 +4,7 @@
 [[entry]]
 version = "0.3.20"
 date = "Nov 25"
+hero = "getting-around-tabs.jpg"
 
 [[entry.features]]
 id = "tab-notch"
