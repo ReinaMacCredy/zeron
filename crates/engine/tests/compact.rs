@@ -14,6 +14,7 @@ use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
 };
 use zeron_engine::registry::CompactionSettings;
+use zeron_proto::tools::ToolSettings;
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
@@ -975,7 +976,7 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         wait_for(|| !core.sessions.turn_in_flight(CHAT), "run settles").await;
         requests.lock().unwrap().last().unwrap().prompt.clone()
     };
-    let nudged = "hello\n\n<system-reminder>\nContext 22.8k of 200.0k (11%). Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. Continuing, including any follow-up question: do not compact.\n</system-reminder>";
+    let nudged = "hello\n\n<system-reminder>\nThis chat is long. Before answering, decide whether this message starts a new task or topic or continues the current one. Continuing, including any follow-up question: do not compact. New task or topic, and the current work is finished: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. New task or topic that does not need this chat, and the current work is unfinished: do not do it here and do not compact. If it can be briefed in full and only its result matters, call delegate_task and report the result here. If the person will have to steer it, call create_thread with what it needs to know and say here where it went.\n</system-reminder>";
     assert_eq!(
         send("msg-2").await,
         nudged,
@@ -993,6 +994,16 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         "no reminder when the harness cannot compact"
     );
     harness.can_compact.store(true, Ordering::SeqCst);
+    core.registry.set_tool_settings(ToolSettings {
+        disabled_tools: vec!["create_thread".into()],
+        ..Default::default()
+    });
+    assert_eq!(
+        send("msg-4b").await,
+        "hello\n\n<system-reminder>\nThis chat is long. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. Continuing, including any follow-up question: do not compact.\n</system-reminder>",
+        "without create_thread the reminder offers only compact"
+    );
+    core.registry.set_tool_settings(ToolSettings::default());
 
     core.workspace
         .set_chat_plan(CHAT, Some(&ChatPlan::default()), false)
@@ -1047,7 +1058,7 @@ async fn a_filling_context_nudges_the_agent_on_every_message() {
         .filter(|e| e.role == MessageRole::User)
         .map(entry_text)
         .collect();
-    assert_eq!(typed, ["hello"; 7], "the transcript keeps what was typed");
+    assert_eq!(typed, ["hello"; 8], "the transcript keeps what was typed");
 }
 
 fn remind_at(core: &EngineCore, nudge_tokens: u64) {

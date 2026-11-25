@@ -73,7 +73,6 @@ pub struct CompactQueued {
     pub replaced: bool,
     pub background_tasks: usize,
     pub running_subagents: u32,
-    pub context: Option<String>,
 }
 
 /// Result of a manual context compaction — also the RPC result shape.
@@ -3690,18 +3689,10 @@ impl SessionsEngine {
         });
         self.inner
             .set_compact_plan(chat_id, Some(zeron_proto::CompactPlan::Agent));
-        let config = self
-            .inner
-            .workspace()
-            .and_then(|workspace| workspace.chat_config(chat_id));
         Ok(CompactQueued {
             replaced: replaced.is_some(),
             background_tasks,
             running_subagents,
-            context: self
-                .inner
-                .context_reading(chat_id, config.as_ref())
-                .map(|reading| reading.line()),
         })
     }
 
@@ -5735,13 +5726,23 @@ impl Inner {
             None
         } else {
             let nudge = self.registry.compaction_settings().nudge_tokens;
+            let chat = self
+                .workspace()
+                .and_then(|workspace| workspace.chat(chat_id).ok().flatten());
+            let config = chat.as_ref().and_then(|chat| chat.config.as_ref());
+            // A delegated child has nobody steering it to hand work to.
+            let can_hand_off = chat.as_ref().is_some_and(|chat| chat.delegation.is_none())
+                && !self.tool_disabled(config, "delegate_task")
+                && !self.tool_disabled(config, "create_thread");
             self.reminder_reading(chat_id, harness_id)
                 .filter(|reading| reading.past_floor(nudge))
-                .map(|reading| {
-                    format!(
-                        "{}. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. Continuing, including any follow-up question: do not compact.",
-                        reading.line(),
-                    )
+                .map(|_| {
+                    if can_hand_off {
+                        "This chat is long. Before answering, decide whether this message starts a new task or topic or continues the current one. Continuing, including any follow-up question: do not compact. New task or topic, and the current work is finished: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. New task or topic that does not need this chat, and the current work is unfinished: do not do it here and do not compact. If it can be briefed in full and only its result matters, call delegate_task and report the result here. If the person will have to steer it, call create_thread with what it needs to know and say here where it went."
+                    } else {
+                        "This chat is long. Before answering, decide whether this message starts a new task or topic or continues the current one. New task or topic: call compact first, with the message as continueWith, and do nothing else this turn; it runs after the turn ends, so name what to keep. Continuing, including any follow-up question: do not compact."
+                    }
+                    .to_string()
                 })
         };
         let findings = self.findings_reminder(chat_id);
