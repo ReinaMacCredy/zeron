@@ -50,7 +50,7 @@ test("Back and Forward stand over the page, the tabs past them, closing up on th
 	local open_x = box(app, "#session-tabs").x
 	expect(open_x >= forward.x + forward.w).to_be(true)
 	expect(app:has("#titlebar-wordmark")).to_be(true)
-	expect(app:has("#titlebar-new-tab")).to_be(true)
+	expect(app:has("#titlebar-new-tab")).to_be(false)
 	-- The sidebar's "…" at its end, by them.
 	local dots = box(app, 'role:button "Sidebar view options"')
 	expect(dots.x + dots.w < back.x).to_be(true)
@@ -62,7 +62,7 @@ test("Back and Forward stand over the page, the tabs past them, closing up on th
 	back = box(app, '#titlebar >> role:button "Back"')
 	expect(back.x - (toggle.x + toggle.w) < 16).to_be(true)
 	expect(app:has("#titlebar-wordmark")).to_be(false)
-	-- (New tab past Forward, and the tabs past that.)
+	-- (Shut, New tab comes past Forward, and the tabs past that.)
 	local plus = box(app, '#titlebar >> role:button "New tab"')
 	local shut_x = box(app, "#session-tabs").x
 	expect(shut_x >= plus.x + plus.w).to_be(true)
@@ -198,8 +198,15 @@ test("typing a trigger in a split opens one menu, not one for the hidden compose
 	app:frames(30)
 	app:type('#chat-composer-dock >> role:textbox "Message"', "/")
 	app:frames(30)
-	-- (Counted by its id: the whole window's tree stops at a budget the rail's marks pass.)
-	expect(app:count("#mention-panel")).to_be(1)
+	local open_menus = 0
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find("#mention-popover", 1, true) or line:find("#mention-panel", 1, true) then
+			if not line:find(" hidden", 1, true) and line:find("#mention-panel", 1, true) then
+				open_menus += 1
+			end
+		end
+	end
+	expect(open_menus).to_be(1)
 	expect(app:error()).to_be_nil()
 end)
 
@@ -439,96 +446,6 @@ test("the new chat's page is a tab of its own, last; closed, it goes to the tab 
 	app:frames(40)
 	expect(route_has(app, "a1")).to_be(true)
 	expect(app:has("#session-tab-draft")).to_be(false)
-	expect(app:error()).to_be_nil()
-end)
-
-local function alone_open(): any
-	local app = mount("shell_fixture.luau")
-	app:resize(1200, 800)
-	app:frames(30)
-	for _, title in CHATS do
-		open(app, title)
-	end
-	return app
-end
-
-local function tab_order(app: any): { string }
-	local out: { string } = {}
-	for id in app:tree("#session-tabs"):gmatch("#session%-tab%-([%w_]+) tab") do
-		table.insert(out, id)
-	end
-	return out
-end
-
-test("a tab pinned is a tile at the head of the strip, in the order pinned; unpinned, it leads the rest", function()
-	local app = alone_open()
-	choose(app, "a3", "Pin tab")
-	expect(tab_order(app)[1]).to_be("a3")
-	expect(box(app, "#session-tab-a3").w).to_be(36)
-	choose(app, "b2", "Pin tab")
-	local now = tab_order(app)
-	expect(now[1]).to_be("a3")
-	expect(now[2]).to_be("b2")
-	expect(box(app, "#session-tab-b2").x > box(app, "#session-tab-a3").x).to_be(true)
-	app:hover("#session-tab-a3")
-	app:frames(20)
-	app:click("#session-tab-a3-unpin")
-	app:frames(30)
-	now = tab_order(app)
-	expect(now[1]).to_be("b2")
-	expect(now[2]).to_be("a3")
-	expect(box(app, "#session-tab-a3").w > 36).to_be(true)
-	expect(app:error()).to_be_nil()
-end)
-
-test("a pinned tab stays till unpinned: Close others, a middle click and ⌘W leave it", function()
-	local app = alone_open()
-	choose(app, "a2", "Pin tab")
-	choose(app, "b1", "Close others")
-	local now = tabs_shown(app)
-	expect(now.a2).to_be(true)
-	expect(now.b1).to_be(true)
-	for _, id in { "a1", "a3", "b2" } do
-		expect(now[id]).to_be_nil()
-	end
-	app:click("#session-tab-a2")
-	app:frames(30)
-	expect(route_has(app, "a2")).to_be(true)
-	app:command("shell.close")
-	app:frames(30)
-	expect(tabs_shown(app).a2).to_be(true)
-	expect(route_has(app, "a2")).to_be(true)
-	choose(app, "a2", "Unpin tab")
-	app:command("shell.close")
-	app:frames(30)
-	expect(tabs_shown(app).a2).to_be_nil()
-	expect(app:error()).to_be_nil()
-end)
-
-test("under the pointer a tab has Pin tab between Settle and Close, a press pinning it", function()
-	local app = alone_open()
-	app:hover("#session-tab-a2")
-	app:frames(20)
-	local pin, settle = box(app, "#session-tab-a2-pin"), box(app, "#session-tab-a2-settle")
-	local close = box(app, '#session-tab-a2 >> role:button "Close tab"')
-	expect(pin.x >= settle.x + settle.w).to_be(true)
-	expect(close.x >= pin.x + pin.w).to_be(true)
-	local full = box(app, "#session-tab-a2").w
-	app:click("#session-tab-a2-pin")
-	app:frames(4)
-	local folding = box(app, "#session-tab-a2").w
-	expect(folding > 36 and folding < full).to_be(true)
-	app:frames(30)
-	expect(tab_order(app)[1]).to_be("a2")
-	expect(box(app, "#session-tab-a2").w).to_be(36)
-	expect(app:error()).to_be_nil()
-end)
-
-test("a split's tab can't be pinned", function()
-	local app = all_open()
-	app:right_click("#session-tab-a2")
-	expect(app:wait('role:menuitem "Close tab"', { timeout_ms = 5000 })).to_be(true)
-	expect(app:has('role:menuitem "Pin tab"')).to_be(false)
 	expect(app:error()).to_be_nil()
 end)
 

@@ -15,7 +15,6 @@ local VISUALS: { [string]: Visual } = {
 	["compaction-morph"] = require("@app/screens/shell/whats_new_visuals/compaction_morph"),
 	["swipe-dot"] = require("@app/screens/shell/whats_new_visuals/swipe_dot"),
 	["tab-drag"] = require("@app/screens/shell/whats_new_visuals/tab_drag"),
-	["tab-notch"] = require("@app/screens/shell/whats_new_visuals/tab_notch"),
 	["text-annotation"] = text_annotation.card,
 	["text-annotation-hero"] = text_annotation.hero,
 	["skills-page"] = require("@app/screens/shell/whats_new_visuals/skills_page"),
