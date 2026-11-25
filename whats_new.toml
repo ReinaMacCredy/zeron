@@ -42,6 +42,9 @@ text = "Fixed: in a chat with no project, an HTML file showed a blank page in th
 [[entry.improvements]]
 text = "Fixed: a compaction's clock started again from zero when you left its chat and came back; the Working pill's rows could stop following their threads after a quick change of the threads it shows."
 
+[[entry.improvements]]
+text = "Fixed: Shift+Up and Shift+Down did nothing to the context size on a new chat opened from Home, or after Escape in the message box; they step it now with an empty draft wherever the keys are, and the message box takes them."
+
 [[entry]]
 version = "0.3.18"
 date = "Nov 24"
