@@ -131,12 +131,6 @@ function M.file_name(title: string): string
 	return sync("html.file_name", title) or `{title}.html`
 end
 
-function M.title(path: string, done: (any) -> ())
-	settle(call("html.title", path), function(v: any)
-		done(v or { missing = true })
-	end)
-end
-
 function M.forget(args: any)
 	sync("html.forget", args)
 end

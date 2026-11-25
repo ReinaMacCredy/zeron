@@ -1239,84 +1239,6 @@ pub fn page_file_name(title: &str) -> String {
     format!("{}.html", if name.is_empty() { "Page" } else { name })
 }
 
-/// "Open in" cards a settled reply shows at most, one per `.html` file it names.
-pub const MAX_OPEN_CARDS: usize = 3;
-const TITLE_SCAN_BYTES: usize = 64 * 1024;
-
-pub fn is_html_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.ends_with(".html") || lower.ends_with(".htm")
-}
-
-/// An `.html` file a reply names: a link to it, or a path in inline code.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HtmlTarget {
-    pub dest: String,
-    pub linked: bool,
-}
-
-pub fn html_link_targets<'a>(texts: impl Iterator<Item = &'a str>) -> Vec<HtmlTarget> {
-    use pulldown_cmark::{Event, Parser, Tag};
-    let mut out: Vec<HtmlTarget> = Vec::new();
-    for text in texts {
-        for event in Parser::new(text) {
-            let (dest, linked) = match &event {
-                Event::Start(Tag::Link { dest_url, .. }) => (dest_url.trim(), true),
-                Event::Code(code) if !code.contains(char::is_whitespace) => (code.as_ref(), false),
-                _ => continue,
-            };
-            if dest.contains("://") && !dest.starts_with("file://") {
-                continue;
-            }
-            let mut path = dest.split('#').next().unwrap_or(dest);
-            while let Some((head, tail)) = path.rsplit_once(':')
-                && !tail.is_empty()
-                && tail.bytes().all(|b| b.is_ascii_digit())
-            {
-                path = head;
-            }
-            if !is_html_path(path) {
-                continue;
-            }
-            match out.iter_mut().find(|seen| seen.dest == dest) {
-                Some(seen) => seen.linked |= linked,
-                None => out.push(HtmlTarget {
-                    dest: dest.to_string(),
-                    linked,
-                }),
-            }
-        }
-    }
-    out
-}
-
-/// A page file's `<title>`, from its first 64 KB; `Err` when it is not a
-/// readable file.
-pub fn read_title(path: &Path) -> Result<Option<String>, ()> {
-    use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|_| ())?;
-    if !file.metadata().map_err(|_| ())?.is_file() {
-        return Err(());
-    }
-    let mut bytes = Vec::new();
-    file.take(TITLE_SCAN_BYTES as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
-    Ok(title_from_html(&String::from_utf8_lossy(&bytes)))
-}
-
-pub fn title_from_html(html: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let open = lower.find("<title")?;
-    let body = open + lower[open..].find('>')? + 1;
-    let close = body + lower[body..].find("</title")?;
-    let title = html[body..close]
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!title.is_empty()).then_some(title)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1663,27 +1585,6 @@ mod tests {
                 "typed, not sent: {typed}"
             );
         }
-    }
-
-    #[test]
-    fn a_replys_html_files_are_its_links_and_code_paths() {
-        let text = "Made [demo.html](demo.html), [web](https://x.dev/a.html), `c.html`, `open e.html`, [line](b.html:12:3)";
-        let targets = html_link_targets([text].into_iter());
-        assert_eq!(
-            targets
-                .iter()
-                .map(|t| (t.dest.as_str(), t.linked))
-                .collect::<Vec<_>>(),
-            vec![
-                ("demo.html", true),
-                ("c.html", false),
-                ("b.html:12:3", true)
-            ]
-        );
-        assert_eq!(
-            title_from_html("<TITLE lang=vi>\n Demo  đơn giản </TITLE>"),
-            Some("Demo đơn giản".into())
-        );
     }
 
     #[test]

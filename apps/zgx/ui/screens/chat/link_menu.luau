@@ -4,6 +4,7 @@
 --   a file in its folder   Open, Reveal in Finder (the chat on this Mac),
 --                          Copy path (its whole path, on the chat's device)
 --   a file outside it      Open (read only), Copy path
+--   a page, either         Open in browser too (the chat on this Mac)
 -- Anything else that isn't a file (a `#section`, a link still arriving) has
 -- none: the message's own menu shows.
 --
@@ -17,6 +18,18 @@ local files = require("@app/screens/files/api")
 
 local function base_name(path: string): string
 	return string.match(path, "([^/]+)/?$") or path
+end
+
+local function browser(s: any, cwd: string, path: string): (() -> ())?
+	local page = string.match(string.lower(path), "%.html?$") ~= nil
+	if not page or (s.device ~= nil and s.device ~= sessions.now:peek().here) then
+		return nil
+	end
+	return function()
+		files.open_external({ chat = s.id, device = s.device, root = cwd }, path):after(function() end, function()
+			ds.toast.show { title = ui.t("files.workspace.not_opened", { name = base_name(path) }), tone = "danger" }
+		end)
+	end
 end
 
 -- (From selected text most dotted words are code, not files: `string.find`.
@@ -75,6 +88,7 @@ return function(open: (target: string) -> (), session: () -> any?): (target: str
 				open = function()
 					open(target)
 				end,
+				browse = if s and cwd then browser(s, cwd, path) else nil,
 				path = path,
 				panel = selected,
 			}
@@ -87,6 +101,7 @@ return function(open: (target: string) -> (), session: () -> any?): (target: str
 			open = function()
 				open(target)
 			end,
+			browse = if s and cwd then browser(s, cwd, path) else nil,
 			reveal = if here and s and cwd
 				then function()
 					files.reveal({ chat = s.id, device = s.device, root = cwd }, path):after(function() end, function()

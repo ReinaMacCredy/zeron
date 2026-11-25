@@ -171,13 +171,17 @@ function M.outside_menu(url: () -> string?, open: (() -> ())?): (e: PointerEvent
 	end
 end
 
--- A file's entries: Open, Reveal in Finder (with `reveal`: on this Mac),
--- Copy path (with `path`: its whole path).
-export type FileFacts = { open: (() -> ())?, reveal: (() -> ())?, path: string?, panel: boolean? }
+-- A file's entries: Open, Open in browser (with `browse`: a page on this
+-- Mac), Reveal in Finder (with `reveal`: on this Mac), Copy path (with
+-- `path`: its whole path).
+export type FileFacts = { open: (() -> ())?, browse: (() -> ())?, reveal: (() -> ())?, path: string?, panel: boolean? }
 function M.file(f: FileFacts): { Entry }
 	local out: { Entry } = {}
 	if f.open then
 		table.insert(out, item(if f.panel then "ds.links.open_in_side_panel" else "ds.links.open", "document", f.open))
+	end
+	if f.browse then
+		table.insert(out, item("ds.html_card.open_in_browser", "global", f.browse))
 	end
 	if f.reveal then
 		table.insert(out, item("ds.links.reveal", "folder", f.reveal))

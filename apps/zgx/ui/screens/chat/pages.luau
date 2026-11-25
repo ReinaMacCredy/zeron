@@ -1,11 +1,7 @@
--- What a transcript's agent pages reach of their chat: picks on its draft (cargo kind "pick"), what was sent, its folder.
+-- What a transcript's agent pages reach of their chat: picks on its draft (cargo kind "pick"), what was sent.
 
 local shared = require("@app/screens/chat/shared")
 local sessions = require("@account/sessions")
-local files = require("@app/screens/files/api")
-local route = require("@app/screens/shell/route")
-local boundary = require("@app/screens/shell/boundary")
-local FileLinks = require("@app/screens/chat/file_links")
 local references = require("@ds/references")
 local HtmlPicks = require("@ds/html_picks")
 local store = require("@app/screens/chat/store")
@@ -431,10 +427,6 @@ function M.pages(key: () -> string?, messages: State<{ any }>, session: () -> an
 		local s = session()
 		return s == nil or s.device == nil or s.device == sessions.now:peek().here
 	end
-	local function target(): any
-		local s = session()
-		return { chat = if s then s.id else nil, device = if s then s.device else nil, root = if s then s.cwd else nil }
-	end
 	local function tray_shows(card: string): boolean
 		local k = key()
 		local e = if k and M.tray:get() then M.waiting(k, messages:get()) else nil
@@ -526,24 +518,6 @@ function M.pages(key: () -> string?, messages: State<{ any }>, session: () -> an
 				end
 			end
 			return nil
-		end,
-		resolve = FileLinks.resolve,
-		root = function(): string?
-			local s = session()
-			return if s then s.cwd else nil
-		end,
-		reveal = function(path: string)
-			files.reveal(target(), path):after(function() end, function() end)
-		end,
-		open_external = function(path: string)
-			files.open_external(target(), path):after(function() end, function() end)
-		end,
-		open_in_zeron = function(path: string)
-			local s = session()
-			local panel: any = boundary.load("@app/screens/panel")
-			if s and panel and panel.open_file then
-				(panel.open_file :: any)(s.id, path, route.project:peek())
-			end
 		end,
 	}
 end

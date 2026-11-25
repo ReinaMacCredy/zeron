@@ -1747,16 +1747,7 @@
       "running_elsewhere": "运行于另一台设备",
       "reload": "重新载入",
       "not_responding": "{server} 没有响应",
-      "retry": "重试",
-      "website_elsewhere": "网站 · 在另一台设备上",
-      "website_gone": "网站 · 已不在磁盘上",
-      "website": "网站 · {path}",
-      "choose_app": "选取应用",
-      "open_in": "打开方式",
-      "zeron": "Zeron",
-      "default_browser": "默认浏览器",
-      "reveal": "在访达中显示",
-      "copy_path": "拷贝路径"
+      "retry": "重试"
     },
     "transcript_rows": {
       "question": "问题",
