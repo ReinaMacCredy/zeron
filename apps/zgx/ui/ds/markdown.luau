@@ -359,6 +359,7 @@ type Ctx = {
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
 	file_cards: FileCard.Files?,
 	live: (() -> boolean)?,
+	hold: (() -> ())?,
 	chains: { [number]: FileChain }?,
 	attached: { [string]: { kind: string, icon: string? } }?,
 	task: ((k: number, done: boolean) -> ())?,
@@ -2004,7 +2005,7 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?
 			if k == "in_run" then
 				return ui.div {}
 			end
-			return FileCard.Row { files = files, items = items, open = ctx.open, pictures = ctx.pictures, menu = ctx.link_menu, group = ctx.group }
+			return FileCard.Row { files = files, items = items, open = ctx.open, pictures = ctx.pictures, menu = ctx.link_menu, group = ctx.group, hold = ctx.hold }
 		end, { w_full = true, min_w = 0, hidden = in_run(b, n, ctx) })
 	end
 	if (b :: any).t == "pending" then
@@ -2488,6 +2489,17 @@ return function(props: Props): Node
 			else function(): boolean
 				return always
 			end
+		local window = props.window
+		local at_end = if window then window.at_end else nil
+		-- A quick look opening at the transcript's end grows down from its file: off the end by a point, the list's follow lets the view be (ds/transcript's send glide steps off the same way).
+		ctx.hold = if window and at_end
+			then function()
+				local off = window.offset:peek()
+				if at_end:peek() and off >= 1 then
+					window.offset:set(off - 1)
+				end
+			end
+			else nil
 	end
 	-- A text that grows: what a ```mermaid fence reads to know whether
 	-- it's still being written (ds/mermaid).

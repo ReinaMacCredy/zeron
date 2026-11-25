@@ -75,7 +75,7 @@ When a paragraph or list in a reply only names files, or a sentence ends in a co
 | You do | What happens |
 | --- | --- |
 | Click a file's line | The file opens in the right pane. The line of the file the pane shows is filled. |
-| Hover a line and click the eye (**Quick look**) | The start of the file opens under the list: an HTML file as its page, a Markdown file as it reads, a CSV file as a table, a picture as itself. Its top has **Open in right pane** and a close button; **Show all N lines** under a long file shows the whole file there, **Show fewer lines** folds it back. |
+| Hover a line and click the eye (**Quick look**) | The start of the file opens under its line, inside the list, and the line stays where it is: an HTML file as its page, a Markdown file as it reads, a CSV file as a table, a picture as itself. Its top has the file's kind and size, **Open in right pane** and a close button; **Show all N lines** under a long file shows the whole file there, **Show fewer lines** folds it back. |
 | Hover an HTML file's line and click the globe (**Open in browser**) | The page opens in your default app for web pages. |
 | Right-click a line | The file link menu. |
 

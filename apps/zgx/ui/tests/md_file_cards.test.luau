@@ -19,6 +19,7 @@ local function cards(app: any): number
 end
 
 local function peek(app: any, name: string)
+	app:frames(30)
 	app:hover(`role:button "{name}"`)
 	app:frames(15)
 	app:click(`role:button "Quick look {name}"`)
@@ -64,6 +65,7 @@ test("file cards: a press opens the file in the panel; its eye opens the file's 
 	expect(app:has('.md-file-preview >> "p95"')).to_be(true)
 	expect(app:has('.md-file-preview >> "2026-11-18"')).to_be(true)
 	expect(app:has('.md-file-preview >> "2026-12-169"')).to_be(false)
+	app:frames(30)
 	app:click('role:button "Show all 169 lines"')
 	expect(app:wait('.md-file-preview >> "2026-12-169"', { timeout_ms = 3000 })).to_be(true)
 	expect(app:has('role:button "Show fewer lines"')).to_be(true)

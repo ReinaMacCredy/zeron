@@ -32,6 +32,7 @@ export type RowProps = {
 	pictures: ReplyPicture.Pictures?,
 	menu: ((target: string) -> { Links.Entry }?)?,
 	group: string?,
+	hold: (() -> ())?,
 }
 
 local HEAD_LINES, CSV_ROWS = 8, 3
@@ -325,34 +326,38 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 		end, { w_full = true, min_w = 0 })
 	end
 	local open = props.row.open
+	local kind = kind_of(file.name)
 	return ui.column {
 		class = "md-file-preview",
 		w_full = true,
+		min_w = 0,
 		shrink = 0,
-		pt = "$space.2",
 		on_resize = function(size: { w: number, h: number })
 			if math.abs(size.h - props.measured:peek()) >= 0.5 then
 				props.measured:set(size.h)
 			end
 		end,
+		ui.div { w_full = true, h = 1, bg = "$border" },
 		ui.column {
 			w_full = true,
-			max_w = LIST_MOST,
 			min_w = 0,
-			rounded = ui.raw(12, "the mockup's file list corner"),
-			border = 1,
-			border_color = "$border",
-			overflow = "hidden",
 			ui.row {
 				w_full = true,
 				min_w = 0,
-				h = ROW_H,
+				h = 32,
 				gap = "$space.2",
 				items = "center",
 				pl = "$space.3",
-				pr = "$zeron.space.tight",
-				ui.row { shrink = 0, aria_hidden = true, FileIcon { name = file.name, size = 14 } },
-				ui.text { file.name, literal = true, truncate = true, grow = 1, min_w = 0, text_size = "$font.size.sm", weight = "$font.weight.medium", color = "$text.primary" },
+				pr = "$space.1",
+				ui.text {
+					if file.size then locale.s("ds.file_card.detail", { kind = kind, size = bytes(file.size) }) else kind,
+					literal = true,
+					truncate = true,
+					grow = 1,
+					min_w = 0,
+					text_size = "$font.size.sm",
+					color = "$text.tertiary",
+				},
 				if open
 					then Button {
 						tone = "ghost",
@@ -373,8 +378,7 @@ local Preview = ui.component(function(props: { row: RowProps, item: Item, file: 
 					on_click = props.close,
 				},
 			},
-			ui.div { w_full = true, h = 1, bg = "$border" },
-			ui.column { w_full = true, min_w = 0, p = "$space.3", body() },
+			ui.column { w_full = true, min_w = 0, px = "$space.3", pb = "$space.3", body() },
 		},
 	}
 end)
@@ -382,8 +386,6 @@ end)
 M.Row = ui.component(function(props: RowProps): Node
 	local files, open, menu = props.files, props.open, props.menu
 	local open_at = ui.use_state(nil :: string?)
-	local laid = ui.use_state(nil :: string?)
-	local measured = ui.use_state(0)
 	local last: { [string]: File } = {}
 	local function file_of(target: string): File?
 		local f = files.find(target)
@@ -400,24 +402,65 @@ M.Row = ui.component(function(props: RowProps): Node
 		local at = open_at:get()
 		return if at and not gone(at) then at else nil
 	end
-	ui.effect(function()
-		local on = opened()
-		if on then
-			laid:set(on)
-		elseif laid:peek() then
-			ui.after(math.max(motion.ms(OPEN_MOVE.duration), motion.FADE) + 40, function()
-				if open_at:peek() == nil or gone(open_at:peek() :: string) then
-					laid:set(nil)
-				end
-			end)
-		end
-	end)
 	local function peek(target: string)
 		if gone(target) then
 			return
 		end
 		files.check(target)
+		if open_at:peek() ~= target and props.hold then
+			props.hold()
+		end
 		open_at:set(if open_at:peek() == target then nil else target)
+	end
+	local function panel(item: Item): Node
+		local target = item.target
+		local laid = ui.use_state(false)
+		local measured = ui.use_state(0)
+		local function here(): boolean
+			return opened() == target
+		end
+		ui.effect(function()
+			if here() then
+				laid:set(true)
+			elseif laid:peek() then
+				ui.after(math.max(motion.ms(OPEN_MOVE.duration), motion.FADE) + 40, function()
+					if not here() then
+						laid:set(false)
+					end
+				end)
+			end
+		end)
+		return ui.column {
+			w_full = true,
+			min_w = 0,
+			shrink = 0,
+			overflow = "hidden",
+			h = motion.tween(ui.computed(function(): number
+				return if here() then measured:get() else 0
+			end), OPEN_MOVE),
+			opacity = if motion.reduced_now()
+				then ui.tween(ui.computed(function(): number
+					return if here() then 1 else 0
+				end), { duration = motion.FADE })
+				else nil,
+			ui.presence(function(): string
+				return if laid:get() then "laid" else "none"
+			end, function(k: string): Node
+				local file = file_of(target)
+				if k == "none" or not file then
+					return ui.div {}
+				end
+				return Preview {
+					row = props,
+					item = item,
+					file = file,
+					measured = measured,
+					close = function()
+						open_at:set(nil)
+					end,
+				}
+			end, { w_full = true, min_w = 0 }),
+		}
 	end
 	local function folder(target: string): string
 		local f = file_of(target)
@@ -627,13 +670,12 @@ M.Row = ui.component(function(props: RowProps): Node
 		}
 	end
 	local lines: { Node } = {}
-	local by_target: { [string]: Item } = {}
 	for n, item in props.items do
-		by_target[item.target] = item
 		if n > 1 then
 			table.insert(lines, ui.div { h = 1, bg = "$border", ml = ui.raw(38, "under the names, past the icons") })
 		end
 		table.insert(lines, line(item))
+		table.insert(lines, panel(item))
 	end
 	local many = #props.items > 1
 	return ui.column {
@@ -689,37 +731,6 @@ M.Row = ui.component(function(props: RowProps): Node
 				else nil,
 			if many then ui.div { w_full = true, h = 1, bg = "$border" } else nil,
 			lines,
-		},
-		ui.column {
-			w_full = true,
-			min_w = 0,
-			overflow = "hidden",
-			h = motion.tween(ui.computed(function(): number
-				return if opened() then measured:get() else 0
-			end), OPEN_MOVE),
-			opacity = if motion.reduced_now()
-				then ui.tween(ui.computed(function(): number
-					return if opened() then 1 else 0
-				end), { duration = motion.FADE })
-				else nil,
-			ui.presence(function(): string?
-				return laid:get()
-			end, function(target: string): Node
-				local item = by_target[target]
-				local file = file_of(target)
-				if not item or not file then
-					return ui.div {}
-				end
-				return Preview {
-					row = props,
-					item = item,
-					file = file,
-					measured = measured,
-					close = function()
-						open_at:set(nil)
-					end,
-				}
-			end, { w_full = true, min_w = 0 }),
 		},
 	}
 end)
