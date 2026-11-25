@@ -2274,16 +2274,9 @@ return function(props: Props): Node
 			start = function(): number
 				return top_bar.tabs_start()
 			end,
-			card_right = function(): number
-				local room = tabs_room:get()
-				if room > 0 then
-					return props.width() - room - INSET - WINDOW_EDGE
-				end
-				return props.width() - (if appearance.inset_card:get() then WINDOW_EDGE else 0)
-			end,
-			-- (Clear of the panel toggle, and of Expand while the panel's open; the notch's flare between.)
+			-- (Clear of the panel toggle, and of Expand while the panel's open.)
 			right = function(): number
-				local toggle = 34 + 8 - 10 + 12 + ds.TitleBar.actions_right() + math.max(actions_room:get() - 24, 0)
+				local toggle = 34 + 8 - 10 + ds.TitleBar.actions_right() + math.max(actions_room:get() - 24, 0)
 				-- (The tabs are the page card's: none over the panel beside it.)
 				local room = tabs_room:get()
 				return math.max(toggle + (if shown:get() then EXPAND + 8 else 0), if room > 0 then room + INSET + WINDOW_EDGE else 0)

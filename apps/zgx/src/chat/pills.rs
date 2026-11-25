@@ -175,8 +175,9 @@ impl Pills {
     }
 
     fn publish_usage(&self) {
-        let docs = self.docs.borrow();
-        self.roster_usage.set(usage_value(docs.iter().map(|(doc, look)| (doc.as_str(), look))));
+        // Built before the set: the set's flush can run chat.roster_watch, which borrows `docs` mutably.
+        let usage = usage_value(self.docs.borrow().iter().map(|(doc, look)| (doc.as_str(), look)));
+        self.roster_usage.set(usage);
     }
 
     fn follow_shells(self: &Rc<Self>, wanted: Vec<(String, String)>) {
@@ -210,11 +211,11 @@ impl Pills {
     }
 
     fn publish_shells(&self) {
-        let shells = self.shells.borrow();
-        self.shell_output.set(Value::record(shells.iter().map(|(task, look)| {
+        let output = Value::record(self.shells.borrow().iter().map(|(task, look)| {
             let lines: Vec<Value> = look.lines.iter().map(|l| Value::from(l.as_str())).collect();
             (task.as_str(), Value::record([("lines", Value::List(lines.into()))]))
-        })));
+        }));
+        self.shell_output.set(output);
     }
 }
 

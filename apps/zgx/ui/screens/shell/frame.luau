@@ -44,54 +44,47 @@ local function scrim_of(placement: string): any
 	return { angle = 180, stops = { { 0, at("top") }, { 0.45, at("mid") }, { 1, at(if placement == "full" then "foot" else "none") } } }
 end
 local RAIL_SCRIM = { angle = 90, stops = { { 0, "#000000b8" }, { 1, "#00000000" } } }
--- (params as session_tabs sets them, in the window's points: [0] the notch's left wall, its right wall, the card's top, the bar's foot. A wall away, the chrome runs on past the card's edge.)
-M.NOTCH_FLARE, M.NOTCH_RADIUS = 14, 18
-local NOTCH = [[
-fn notch_d(input: LayerInput) -> f32 {
-	let f = 14.0;
-	let r = 18.0;
-	let a = input.params[0];
-	let u = min(input.p.x - a.x, a.y - input.p.x);
-	let y = input.p.y - a.z;
-	let depth = a.w - a.z;
-	if (u >= 0.0) {
-		if (y > depth - r && u < r) {
-			return r - length(vec2<f32>(r - u, y - (depth - r)));
-		}
-		return min(u, depth - y);
+-- (params as session_tabs sets them, in the window's points: [0] each tab's x and width, feet in; [1] the strip's visible span, the tabs' top; [2] its edge fades.)
+M.TAB_FOOT = 10
+local TAB_HOLE = [[
+fn tab(p: vec2<f32>, x0: f32, w: f32, top: f32, scale: f32) -> f32 {
+	let foot = 10.0;
+	let corner = 10.0;
+	let h = 36.0;
+	var x = p.x - x0;
+	let y = p.y - top;
+	if (w <= 0.0 || x < 0.0 || x > w || y < -1.0 || y > h + 1.0) {
+		return 0.0;
 	}
-	if (y < f) {
-		if (u > -f) {
-			return length(vec2<f32>(u + f, y - f)) - f;
-		}
-		return -y;
+	if (x > w * 0.5) {
+		x = w - x;
 	}
-	if (y > depth - r) {
-		return r - length(vec2<f32>(r - u, y - (depth - r)));
+	if (x < foot) {
+		let d = length(vec2<f32>(x, y - (h - foot)));
+		return select(0.0, clamp((d - foot) * scale + 0.5, 0.0, 1.0), y > h - foot);
 	}
-	return u;
+	let cx = foot + corner;
+	if (x < cx && y < corner) {
+		let d = length(vec2<f32>(cx - x, corner - y));
+		return clamp((corner - d) * scale + 0.5, 0.0, 1.0);
+	}
+	return clamp((x - foot) * scale + 0.5, 0.0, 1.0) * clamp(y * scale + 0.5, 0.0, 1.0);
 }
-fn notch(input: LayerInput) -> f32 {
-	return clamp(notch_d(input) * input.scale + 0.5, 0.0, 1.0);
+fn hole(input: LayerInput) -> f32 {
+	let a = input.params[0];
+	let b = input.params[1];
+	let c = input.params[2];
+	let h = max(tab(input.p, a.x, a.y, b.z, input.scale), tab(input.p, a.z, a.w, b.z, input.scale));
+	return h * clamp((input.p.x - b.x) / max(c.x, 0.5), 0.0, 1.0) * clamp((b.y - input.p.x) / max(c.y, 0.5), 0.0, 1.0);
 }
 ]]
-local NOTCH_KEEP = ui.layer_shader(NOTCH .. [[
+local STRIP_CUT = ui.layer_shader(TAB_HOLE .. [[
 fn layer(input: LayerInput) -> vec4<f32> {
-	return vec4<f32>(input.color.rgb, input.color.a * notch(input));
+	return vec4<f32>(input.color.rgb, input.color.a * (1.0 - hole(input)));
 }]])
-local NOTCH_CUT = ui.layer_shader(NOTCH .. [[
+local TAB_KEEP = ui.layer_shader(TAB_HOLE .. [[
 fn layer(input: LayerInput) -> vec4<f32> {
-	return vec4<f32>(input.color.rgb, input.color.a * (1.0 - notch(input)));
-}]])
-local NOTCH_EDGE = ui.layer_shader(NOTCH .. [[
-fn layer(input: LayerInput) -> vec4<f32> {
-	let a = input.params[0];
-	if (min(input.p.x - a.x, a.y - input.p.x) < -16.0) {
-		return input.color;
-	}
-	let d = notch_d(input);
-	let line = clamp(-d * input.scale + 0.5, 0.0, 1.0) * clamp((d + 1.0) * input.scale + 0.5, 0.0, 1.0);
-	return vec4<f32>(input.color.rgb, input.color.a * line);
+	return vec4<f32>(input.color.rgb, input.color.a * hole(input));
 }]])
 local STRIP_BLUR = 28
 local STRIP_IN = { angle = 90, stops = { { 0, "#00000000" }, { 0.12, "#000000ff" }, { 1, "#000000ff" } } }
@@ -104,16 +97,10 @@ ui.theme.tokens {
 			art_dark = "alpha({zeron.window}, 0.47)",
 			ink_light = "alpha({text.primary}, 0.72)",
 			ink_dark = "alpha({text.primary}, 0.7)",
-			row_hover = "alpha({text.primary}, 0.04)",
-			row_selected = "alpha({text.primary}, 0.075)",
-			row_rim = "alpha({text.primary}, 0.06)",
-			row_tile = "alpha({text.primary}, 0.06)",
-			row_rule = "alpha({text.primary}, 0.16)",
-			row_hover_art = "alpha({text.primary}, 0.1)",
-			row_selected_art = "alpha({text.primary}, 0.18)",
-			row_rim_art = "alpha({text.primary}, 0.12)",
-			row_tile_art = "alpha({text.primary}, 0.1)",
-			row_rule_art = "alpha({text.primary}, 0.24)",
+			hover_light = "#ffffff59",
+			hover_dark = "#ffffff14",
+			rule_light = "alpha({text.primary}, 0.18)",
+			rule_dark = "#ffffff24",
 			tab_top = "alpha({zeron.window}, 0.55)",
 			tab_foot = "alpha({zeron.window}, 0.31)",
 		},
@@ -123,11 +110,6 @@ function M.strip_token(name: string): string
 	local kind = ui.theme.kind()
 	local light = kind == "light" or kind == "high-contrast-light"
 	return `$zeron.strip.{name}_{if light then "light" else "dark"}`
-end
-
-local shows_art: () -> boolean
-function M.row_token(name: string): string
-	return `$zeron.strip.row_{name}{if shows_art() then "_art" else ""}`
 end
 
 M.page_art = ui.computed(function(): string?
@@ -424,7 +406,7 @@ local function plugin_wallpaper(): boolean
 	return showing ~= "none" and showing ~= "image" and route.chat:get().name == "home"
 end
 
-function shows_art(): boolean
+local function shows_art(): boolean
 	return M.page_art:get() ~= nil or plugin_wallpaper()
 end
 
@@ -649,11 +631,7 @@ local function inset_radius(): number
 	return if appearance.inset_card:get() then (ui.theme.get("zeron.inset.radius") :: number?) or 12 else 0
 end
 
--- The bar over the card (Reina's N1): the card's own surface at both corners, the window's chrome dipping into it between them, as a browser's tab notch; the tabs stand in the chrome (screens/shell/session_tabs, which says where its walls are). Framed, the chrome is the frame's band blurred and tinted. The sidebar away, it runs from the window's edge, under the lights.
-function M.band_top(): number
-	return if appearance.inset_card:get() then GAP else 0
-end
-
+-- The strip over the bar (Reina's option A), with the selected tab cut out of it; the selected tab is the card's own surface, cut to the tab (crates/ui shell/tabs.rs `folder_tab_backdrop`). Framed, the bar is the frame's band blurred and tinted, coming in from its start so the frame runs into it. The sidebar away, it runs from the window's edge, under the lights.
 local function strip_view(): Node
 	local function start(): number
 		return if folded() then 0 else page_x()
@@ -667,46 +645,30 @@ local function strip_view(): Node
 	local function top_radius(): number
 		return if folded() then 0 else inset_radius()
 	end
-	local function window_box(kids: { any }, from: () -> number, gap: () -> number, down: () -> number): Node
+	local function window_box(kids: { any }): Node
 		local box: { [any]: any } = {
 			absolute = true,
 			left = function(): number
-				return -from()
+				return -start()
 			end,
 			ml = moved(function(): number
-				return -gap()
+				return -start_gap()
 			end),
 			top = moved(function(): number
-				return -down()
+				return -top()
 			end),
 			w = function(): number
 				return art.window:get().w
 			end,
-			h = ui.raw(TOP_BAR + 1, "the top bar and the card's first line"),
+			h = ui.raw(TOP_BAR, "the top bar"),
 		}
 		for _, k in kids do
 			table.insert(box, k)
 		end
 		return ui.div(box)
 	end
-	local function card_band(props: { [any]: any }): Node
-		props.absolute = true
-		props.left = page_x
-		props.ml = moved(left_gap)
-		props.right = art.panel_w
-		props.mr = moved(edge_gap)
-		props.top = moved(M.band_top)
-		props.bottom = 0
-		props.overflow = "hidden"
-		props.rounded_tl = faded_in(inset_radius)
-		props.rounded_tr = faded_in(inset_radius)
-		return ui.div(props)
-	end
 	local function framed(): boolean
 		return M.framed:get()
-	end
-	local function edge_color(): string
-		return if framed() then "$zeron.inset.framed_edge" else "$border.subtle"
 	end
 	local strip = ui.div {
 		absolute = true,
@@ -730,7 +692,7 @@ local function strip_view(): Node
 		mask_gradient = function(): any
 			return if framed() then STRIP_IN else nil
 		end,
-		window_box({
+		window_box {
 			ui.show(function(): boolean
 				return M.page_art:get() ~= nil
 			end, M.Layer {
@@ -755,7 +717,7 @@ local function strip_view(): Node
 					return M.strip_token("art")
 				end,
 			}),
-		}, start, start_gap, top),
+		},
 	}
 	return ui.div {
 		id = "shell-strip",
@@ -763,89 +725,48 @@ local function strip_view(): Node
 		left = 0,
 		right = art.panel_gap,
 		top = 0,
-		h = ui.raw(TOP_BAR + 1, "the top bar and the card's first line"),
+		h = ui.raw(TOP_BAR, "the top bar"),
 		pointer_events = "none",
 		hidden = function(): boolean
 			return art.expanded:get()
 		end,
 		ui.div {
-			id = "shell-notch",
 			ref = art.strip,
 			absolute = true,
 			left = 0,
 			right = 0,
 			top = 0,
-			h = ui.raw(TOP_BAR, "the top bar"),
-			layer_shader = NOTCH_KEEP,
+			bottom = 0,
+			layer_shader = STRIP_CUT,
 			layer_params = CUT_PARAMS,
 			strip,
 		},
 		ui.div {
-			id = "shell-bar-surface",
+			id = "shell-tab-surface",
 			ref = art.tab,
 			absolute = true,
 			left = 0,
 			right = 0,
 			top = 0,
-			h = ui.raw(TOP_BAR, "the top bar"),
-			layer_shader = NOTCH_CUT,
-			layer_params = CUT_PARAMS,
-			card_band {
-				bg = fill_token,
-				window_box({
-					-- (Unfaded: a faded picture inside this cut layer draws nothing.)
-					M.Layer { id = "shell-tab-art", unfaded = true },
-					ui.div {
-						absolute = true,
-						left = 0,
-						right = 0,
-						top = 0,
-						h = ui.raw(TOP_BAR, "the top bar"),
-						gradient = function(): any
-							return { angle = 180, stops = { { 0, ui.theme.get("zeron.strip.tab_top") }, { 1, ui.theme.get("zeron.strip.tab_foot") } } }
-						end,
-						opacity = function(): number
-							return if shows_art() then appearance.chat_tab_shade:get() else 0
-						end,
-					},
-				}, page_x, left_gap, M.band_top),
-			},
-		},
-		ui.div {
-			id = "shell-notch-edge",
-			ref = art.edge,
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
 			bottom = 0,
-			layer_shader = NOTCH_EDGE,
+			overflow = "hidden",
+			layer_shader = TAB_KEEP,
 			layer_params = CUT_PARAMS,
-			opacity = faded_in(function(): number
-				return if appearance.inset_card:get() then 1 else 0
-			end),
-			card_band {
-				border = 1,
-				border_sides = { 1, 1, 0, 1 },
-				border_color = edge_color,
-				window_box({
-					ui.div {
-						absolute = true,
-						left = function(): number
-							return math.max(art.notch:get().x0 - M.NOTCH_FLARE - 1, -8)
-						end,
-						w = function(): number
-							local n = art.notch:get()
-							local from = math.max(n.x0 - M.NOTCH_FLARE - 1, -8)
-							return math.max(math.min(n.x1 + M.NOTCH_FLARE + 1, art.window:get().w + 8) - from, 0)
-						end,
-						top = function(): number
-							return M.band_top() + 1
-						end,
-						bottom = 0,
-						bg = edge_color,
-					},
-				}, page_x, left_gap, M.band_top),
+			bg = fill_token,
+			-- (Unfaded: a faded picture inside this cut layer draws nothing.)
+			M.Layer { id = "shell-tab-art", unfaded = true },
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				gradient = function(): any
+					return { angle = 180, stops = { { 0, ui.theme.get("zeron.strip.tab_top") }, { 1, ui.theme.get("zeron.strip.tab_foot") } } }
+				end,
+				opacity = function(): number
+					return if shows_art() then appearance.chat_tab_shade:get() else 0
+				end,
 			},
 		},
 	}
@@ -853,11 +774,9 @@ end
 
 local function card_view(): Node
 	local radius = faded_in(inset_radius)
-	local top_left = faded_in(function(): number
-		return if art.notch:get().left then 0 else inset_radius()
-	end)
-	local top_right = faded_in(function(): number
-		return if art.notch:get().right then 0 else inset_radius()
+	-- (Over a picture unframed, the strip over the bar is the card's top: its corners are the strip's. Plain, the strip is the window's own tint, so the card rounds its own.)
+	local top_radius = faded_in(function(): number
+		return if M.framed:get() or not shows_art() then inset_radius() else 0
 	end)
 	local whole = faded_in(function(): number
 		return if art.split:get() then 0 else 1
@@ -874,8 +793,8 @@ local function card_view(): Node
 		mr = moved(edge_gap),
 		top = ui.raw(TOP_BAR, "the card starts at the bar's foot, as gpui's"),
 		bottom = moved(edge_gap),
-		rounded_tl = top_left,
-		rounded_tr = top_right,
+		rounded_tl = top_radius,
+		rounded_tr = top_radius,
 		rounded_bl = radius,
 		rounded_br = radius,
 		overflow = "hidden",
@@ -945,8 +864,8 @@ local function card_view(): Node
 			right = 0,
 			top = 0,
 			bottom = 0,
-			rounded_tl = top_left,
-			rounded_tr = top_right,
+			rounded_tl = top_radius,
+			rounded_tr = top_radius,
 			rounded_bl = radius,
 			rounded_br = radius,
 			border = 1,

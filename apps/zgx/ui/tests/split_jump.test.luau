@@ -82,15 +82,10 @@ local function select_in(app: any, id: string)
 	app:frames(30)
 	expect(app:has(`#lane-split-{id} >> #annotation-pill`)).to_be(true)
 end
--- (The page's own tree and the pill's: the whole window's stops at a budget the rail's marks pass.)
 local function focused(app: any): string
-	for _, scope in { "#shell-page", "#annotation-pill" } do
-		if app:has(scope) then
-			for line in app:tree(scope):gmatch("[^\n]+") do
-				if line:find(" focused", 1, true) then
-					return line
-				end
-			end
+	for line in app:tree():gmatch("[^\n]+") do
+		if line:find(" focused", 1, true) then
+			return line
 		end
 	end
 	return ""
