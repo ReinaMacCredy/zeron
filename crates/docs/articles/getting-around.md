@@ -14,7 +14,7 @@ The narrow strip on the left switches between Zeron's pages. Hover a button to s
 | **Skills** | The [Skills](zeron://docs/skills) page: every skill your agents find. |
 | **Pull requests** | The [Pull requests](zeron://pull-requests) board. |
 
-Between those buttons and the ones at the foot, the rail shows a mark for each chat you have open as a tab: the agent's mark, with a dot while the chat works, asks or has failed, or a short running track while it waits on background work. Hover a mark for the chat's title, click it to go there, and right-click it for the tab's menu. The marks of pinned tabs stand first, above a short rule; a split shows its chats' marks joined in one cell. New chat tabs have no mark. The arrow above the marks hides them: hidden, it shows how many there are and a dot for the most urgent one (asking, then failed, then working). Zeron remembers whether they are hidden.
+Between those buttons and the ones at the foot, the rail shows a mark for each chat you have open as a tab: the agent's mark, with a dot under it while the chat works, asks or has failed, or a short running track while it waits on background work. The chat you are on stands on a tile the color of the chat card. Hover a mark for the chat's title, click it to go there, and right-click it for the tab's menu. The marks of pinned tabs stand first, above a short rule; a split shows its chats' marks joined in one cell. New chat tabs have no mark. The arrow above the marks folds them: they slide up into a small deck under it, with how many there are and a dot for the most urgent one (asking, then failed, then working). Click the deck or the arrow to unfold them. Zeron remembers whether they are hidden.
 
 What needs you right now is not on the rail: questions, plans and decisions wait in the **Waiting** pill above the composer, and the pill on the right of the titlebar counts the rest, with Cmd+I for its tray. See **Needs you and running** below.
 
@@ -69,7 +69,7 @@ On a trackpad that supports it, you feel a light tick when the swipe is far enou
 
 The top of the chat card has a notch, as a browser has: the card rises to the window's top at both corners, and between them the window dips in and holds a tab for each session open on this device. **Back**, **Forward** and **New tab** sit in the left corner, and the chat's controls in the right one. With the sidebar hidden the tabs start beside the window's buttons, and with the right pane open they run to the card's edge.
 
-A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it. While a chat waits on work its agent left running in the background, the dot is a prompt arrow and a short track with a pill running along it. The tab you are on has a soft fill.
+A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it. While a chat waits on work its agent left running in the background, the dot is a prompt arrow and a short track with a pill running along it. The tab you are on is part of the chat card: it rises from the card through the notch's floor, as a browser's tab joins its page, and slides to the next tab you pick.
 
 ![Session tabs in the notch at the top of the chat card, two of them pinned, and their marks on the rail](getting-around-tabs.jpg)
 

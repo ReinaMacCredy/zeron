@@ -12,9 +12,10 @@ local tabs = require("@app/screens/shell/session_tabs")
 
 local M = {}
 
-local CELL, PANE, MARK, GAP = 34, 32, 15, 2
+local CELL, PANE, MARK, GAP = 34, 32, 16, 2
 local TOGGLE_H, CHEVRON = 24, 13
-local DOT = 8
+local DOT = 5
+local DECK_STEP, DECK_SCALE, DECK_SHOWN = 4, 0.56, 3
 local HOVER_MS, FOLD_MS = 150, 200
 local HOVER_FADE = "cubicBezier(.4, 0, .2, 1)"
 local FOLD_EASE = "cubicBezier(.22, 1, .36, 1)"
@@ -55,6 +56,22 @@ local all = ui.computed(function(): { string }
 	local out = table.clone(held:get())
 	table.move(rest:get(), 1, #rest:get(), #out + 1, out)
 	return out
+end)
+
+local tops = ui.computed(function(): { [string]: number }
+	local out: { [string]: number } = {}
+	local y = 0
+	local rest = rest:get()
+	for _, key in all:get() do
+		local n = #marks_of(key)
+		local rule = if #held:get() > 0 and rest[1] == key then 9 else 0
+		out[key] = y + rule
+		y += rule + (if n <= 1 then CELL else n * PANE + (n - 1) + 2) + GAP
+	end
+	return out
+end)
+local deck_size = ui.computed(function(): number
+	return math.min(#all:get(), DECK_SHOWN)
 end)
 
 local function count(): number
@@ -149,7 +166,24 @@ local Mark = ui.component(function(props: { chat: string, key: string, h: number
 		end, ui.computed(function(): number
 			return if splits.is_pinned(props.key) then 1 else 0
 		end), props.rounded),
-		fill("$zeron.selected.flat.bg", on, props.rounded),
+		ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			rounded = props.rounded,
+			bg = frame.card_fill,
+			border = 1,
+			border_color = function(): string
+				return frame.row_token("rim")
+			end,
+			-- (Folded into the deck, every mark is a card of its own, so the ones under it don't show through.)
+			opacity = fade(ui.computed(function(): number
+				return if M.hidden:get() then 1 else on:get()
+			end)),
+			pointer_events = "none",
+		},
 		fill("$hover", wash, props.rounded),
 		SessionRow.mark(function(): any
 			local c = chat()
@@ -159,13 +193,13 @@ local Mark = ui.component(function(props: { chat: string, key: string, h: number
 		end, MARK),
 		ui.presence(function(): string
 			local kind = chat().status
-			return if kind and SessionRow.URGENCY[kind] then kind else ""
+			return if kind and SessionRow.URGENCY[kind] and not M.hidden:get() then kind else ""
 		end, function(which: string): Node
 			if which == "" then
 				return ui.div {}
 			end
-			return ui.div { id = `rail-tab-{id}-state`, tabs.state_mark(which, DOT, true) }
-		end, { absolute = true, right = 2, top = 3, pointer_events = "none" }),
+			return ui.div { id = `rail-tab-{id}-state`, w = CELL, items = "center", tabs.state_mark(which, DOT, true) }
+		end, { absolute = true, left = 0, right = 0, bottom = ui.raw(3, "under the mark"), pointer_events = "none" }),
 	}
 end)
 
@@ -211,10 +245,32 @@ local function menu_cell(key: string): Node
 	}
 end
 
-local function cell(key: string): Node
+local Cell = ui.component(function(props: { key: string }): Node
+	local key = props.key
+	local folded = ui.use_state(if M.hidden:peek() then 1 else 0)
+	local function rank(): number
+		return (table.find(all:get(), key) or 1) - 1
+	end
+	ui.effect(function()
+		local want = if M.hidden:get() then 1 else 0
+		local k = rank()
+		anime.animate(folded, { value = want, duration = math.max(motion.ms(FOLD_MS), 1), delay = motion.ms(k * 25), ease = FOLD_EASE })
+	end)
 	return ui.column {
 		shrink = 0,
 		items = "center",
+		pointer_events = function(): string
+			return if M.hidden:get() then "none" else "auto"
+		end,
+		y = function(): number
+			return folded:get() * (rank() * DECK_STEP - (tops:get()[key] or 0))
+		end,
+		scale = function(): number
+			return 1 - folded:get() * (1 - DECK_SCALE)
+		end,
+		opacity = function(): number
+			return if rank() < DECK_SHOWN then 1 else 1 - folded:get()
+		end,
 		ui.show(function(): boolean
 			return #held:get() > 0 and rest:get()[1] == key
 		end, ui.div {
@@ -226,9 +282,16 @@ local function cell(key: string): Node
 			bg = function(): string
 				return frame.row_token("rule")
 			end,
+			opacity = function(): number
+				return 1 - folded:get()
+			end,
 		}),
 		menu_cell(key),
 	}
+end)
+
+local function cell(key: string): Node
+	return Cell { key = key }
 end
 
 local function each(list: any): Node
@@ -265,7 +328,6 @@ local function toggle(): Node
 		shrink = 0,
 		p = 0,
 		py = ui.raw(4, "the toggle's room round its chevron"),
-		gap = ui.raw(2, "the count under the chevron"),
 		items = "center",
 		justify = "center",
 		rounded = "$radius.lg",
@@ -285,38 +347,6 @@ local function toggle(): Node
 			end), { duration = FOLD_MS, ease = FOLD_EASE }),
 			ds.Icon { name = "lucide-chevron-down", size = CHEVRON },
 		},
-		ui.presence(function(): string
-			return if M.hidden:get() then "count" else ""
-		end, function(which: string): Node
-			if which == "" then
-				return ui.div {}
-			end
-			return ui.row {
-				id = "rail-tabs-count",
-				items = "center",
-				gap = ui.raw(3, "the count and its dot"),
-				ui.text {
-					function(): string
-						return tostring(count())
-					end,
-					color = "$text.primary",
-					text_size = ui.raw(11, "the rail's count"),
-					weight = "$font.weight.semibold",
-					tabular = true,
-				},
-				ui.presence(function(): string
-					return urgent() or ""
-				end, function(kind: string): Node
-					if kind == "" then
-						return ui.div {}
-					end
-					return ui.div { id = "rail-tabs-urgent", status.StatusDot { kind = kind :: any, size = 7 } }
-				end),
-			}
-		end, {
-			enter = motion.transition({ opacity = { 0, 1 }, duration = FOLD_MS, ease = FOLD_EASE }),
-			exit = motion.transition({ opacity = 0, duration = 100 }),
-		}),
 	}
 end
 
@@ -335,13 +365,14 @@ M.Zone = ui.component(function(): Node
 		ui.show(function(): boolean
 			return #held:get() + #rest:get() > 0
 		end, toggle()),
-		ui.presence(function(): string
-			return if M.hidden:get() or #held:get() + #rest:get() == 0 then "" else "marks"
-		end, function(which: string): Node
-			if which == "" then
-				return ui.div {}
-			end
-			return ui.scroll {
+		ui.show(function(): boolean
+			return #held:get() + #rest:get() > 0
+		end, ui.column {
+			relative = true,
+			grow = 1,
+			min_h = 0,
+			w = CELL,
+			ui.scroll {
 				id = "rail-tabs-list",
 				grow = 1,
 				min_h = 0,
@@ -351,13 +382,65 @@ M.Zone = ui.component(function(): Node
 					w = CELL,
 					each(all),
 				},
-			}
-		end, {
-			grow = 1,
-			min_h = 0,
-			direction = "column",
-			enter = motion.transition({ opacity = { 0, 1 }, y = { -6, 0 }, duration = FOLD_MS, ease = FOLD_EASE }),
-			exit = motion.transition({ opacity = 0, duration = 120 }),
+			},
+			ui.show(function(): boolean
+				return M.hidden:get()
+			end, ui.div {
+				id = "rail-tabs-deck",
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				h = function(): number
+					return ui.raw((deck_size:get() - 1) * DECK_STEP + CELL, "the deck")
+				end,
+				cursor = "pointer",
+				on_click = function()
+					M.hidden:set(false)
+				end,
+			}),
+			ui.presence(function(): string
+				return if M.hidden:get() then "count" else ""
+			end, function(which: string): Node
+				if which == "" then
+					return ui.div {}
+				end
+				return ui.row {
+					id = "rail-tabs-count",
+					w = CELL,
+					justify = "center",
+					items = "center",
+					gap = ui.raw(3, "the count and its dot"),
+					ui.text {
+						function(): string
+							return tostring(count())
+						end,
+						color = "$text.primary",
+						text_size = ui.raw(11, "the rail's count"),
+						weight = "$font.weight.semibold",
+						tabular = true,
+					},
+					ui.presence(function(): string
+						return urgent() or ""
+					end, function(kind: string): Node
+						if kind == "" then
+							return ui.div {}
+						end
+						return ui.div { id = "rail-tabs-urgent", status.StatusDot { kind = kind :: any, size = 7 } }
+					end),
+				}
+			end, {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = function(): number
+					return ui.raw((deck_size:get() - 1) * DECK_STEP + CELL * (1 + DECK_SCALE) / 2 + 4, "under the deck")
+				end,
+				items = "center",
+				pointer_events = "none",
+				enter = motion.transition({ opacity = { 0, 1 }, scale = { 0.6, 1 }, duration = FOLD_MS, delay = 120, ease = FOLD_EASE }),
+				exit = motion.transition({ opacity = 0, duration = 100 }),
+			}),
 		}),
 	}
 end)

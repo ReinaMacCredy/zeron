@@ -44,10 +44,10 @@ local function scrim_of(placement: string): any
 	return { angle = 180, stops = { { 0, at("top") }, { 0.45, at("mid") }, { 1, at(if placement == "full" then "foot" else "none") } } }
 end
 local RAIL_SCRIM = { angle = 90, stops = { { 0, "#000000b8" }, { 1, "#00000000" } } }
--- (params as session_tabs sets them, in the window's points: [0] the notch's left wall, its right wall, the card's top, the bar's foot. A wall away, the chrome runs on past the card's edge.)
+-- (params as session_tabs sets them, in the window's points: [0] the notch's left wall, its right wall, the card's top, the bar's foot. A wall away, the chrome runs on past the card's edge. [1] the chosen tab's left, right, top and corner: the card rises through the notch's floor there, as a browser's tab joins its page.)
 M.NOTCH_FLARE, M.NOTCH_RADIUS = 14, 18
 local NOTCH = [[
-fn notch_d(input: LayerInput) -> f32 {
+fn bay_d(input: LayerInput) -> f32 {
 	let f = 14.0;
 	let r = 18.0;
 	let a = input.params[0];
@@ -70,6 +70,20 @@ fn notch_d(input: LayerInput) -> f32 {
 		return r - length(vec2<f32>(r - u, y - (depth - r)));
 	}
 	return u;
+}
+fn notch_d(input: LayerInput) -> f32 {
+	let b = bay_d(input);
+	let t = input.params[1];
+	if (t.y - t.x < 1.0) {
+		return b;
+	}
+	let r = t.w;
+	let c = vec2<f32>((t.x + t.y) * 0.5, t.z + 40.0);
+	let q = abs(input.p - c) - vec2<f32>((t.y - t.x) * 0.5 - r, 40.0 - r);
+	let tab = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+	let k = 8.0;
+	let h = max(k - abs(b - tab), 0.0) / k;
+	return min(b, tab) - h * h * k * 0.25;
 }
 fn notch(input: LayerInput) -> f32 {
 	return clamp(notch_d(input) * input.scale + 0.5, 0.0, 1.0);
@@ -469,6 +483,7 @@ end
 local function fill_token(): string
 	return if M.framed:get() then "$zeron.inset.framed_bg" else "$zeron.inset.bg"
 end
+M.card_fill = fill_token
 
 -- crates/ui's `tab_fade` under the bar, in the card.
 local function tab_fade(): Node

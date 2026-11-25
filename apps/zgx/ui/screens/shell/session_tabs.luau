@@ -25,7 +25,7 @@ local M = {}
 local TAB_H, SLOT, TILE = 30, 24, 20
 local MARK = 14
 local TAB_MAX, TAB_MIN, TAB_GAP = 176, 128, 4
-local PIN_W, PIN_RULE, PIN_MARK = 36, 9, 15
+local PIN_W, PIN_RULE, PIN_MARK = 36, 9, 16
 local TAB_RADIUS = ui.raw(10, "a tab's corner in the notch")
 local TITLE_SIZE = ui.raw(12, "Zeron's tab title, at any text size")
 local BAR, LIFT = 42, 30
@@ -168,8 +168,14 @@ local rider_hover = ui.state("shell_session_tab_rider_hover", false)
 local landed = false
 -- (Frozen for a drag, or the strip would shrink as the slot closes.)
 local tab_w = ui.state("shell_session_tab_w", TAB_MAX)
-local SHADE_PARAMS = { "layerParam0", "layerParam1", "layerParam2", "layerParam3" }
+local SHADE_PARAMS = { "layerParam0", "layerParam1", "layerParam2", "layerParam3", "layerParam4", "layerParam5", "layerParam6", "layerParam7" }
 local PAD = 8
+-- (A dragged tab carries its own fill, so the card rises into none.)
+local carved = ui.computed(function(): string?
+	local key = selected_key()
+	local d = drag:get()
+	return if key and not (d and d.key == key) then key else nil
+end)
 
 local pins = ui.computed(function(): number
 	local n = 0
@@ -883,7 +889,7 @@ local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () 
 			return if active() then frame.row_token("rim") else "#00000000"
 		end,
 		opacity = ui.tween(ui.computed(function(): number
-			return if washed() or active() then 1 else 0
+			return if (washed() and not active()) or (active() and carved:get() == nil) then 1 else 0
 		end), { duration = math.max(motion.ms(120), 1), ease = "out(3)" }),
 	})
 	if tile then
@@ -897,7 +903,9 @@ local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () 
 			bg = function(): string
 				return frame.row_token("tile")
 			end,
-			opacity = tile,
+			opacity = function(): number
+				return if active() and carved:get() ~= nil then 0 else tile()
+			end,
 		})
 	end
 	return props
@@ -953,9 +961,9 @@ local function tile_face(id: string, hovered: any): Node
 			if which == "" then
 				return ui.div {}
 			elseif which == "unpin" then
-				return ui.div { absolute = true, right = 0, top = 0, unpin_button(id) }
+				return ui.div { absolute = true, right = ui.raw(-4, "past the tile's corner"), top = ui.raw(-4, "past the tile's corner"), unpin_button(id) }
 			end
-			return ui.div { id = `session-tab-{id}-state`, absolute = true, right = 3, top = 3, state_mark(which, 7, true) }
+			return ui.div { id = `session-tab-{id}-state`, absolute = true, left = 0, right = 0, bottom = ui.raw(2, "under the mark"), items = "center", state_mark(which, 5, true) }
 		end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0 }),
 	}
 end
@@ -1471,6 +1479,29 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		end
 	end)
 	local start = props.start
+	local carve_l, carve_r = ui.state("shell_session_tab_carve_l", 0), ui.state("shell_session_tab_carve_r", 0)
+	local carve_placed = false
+	ui.effect(function()
+		local key = carved:get()
+		local at = if key then table.find(strip:get(), key) else nil
+		local l, r
+		if at then
+			l = slot_left(at)
+			r = l + slot_w_at(at)
+		else
+			l = (carve_l:peek() + carve_r:peek()) / 2
+			r = l
+		end
+		if not carve_placed then
+			carve_placed = at ~= nil
+			carve_l:set(l)
+			carve_r:set(r)
+			return
+		end
+		local ms = math.max(motion.ms(PIN_MS), 1)
+		anime.animate(carve_l, { value = l, duration = ms, ease = motion.DRAG_SLIDE.ease })
+		anime.animate(carve_r, { value = r, duration = ms, ease = motion.DRAG_SLIDE.ease })
+	end)
 	local cut_params: { [any]: { [string]: number } } = {}
 	ui.effect(function()
 		local room = view.width or 0
@@ -1484,7 +1515,9 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		if was.x0 ~= x0 or was.x1 ~= x1 or was.left ~= left or was.right ~= right then
 			art.notch:set({ x0 = x0, x1 = x1, left = left, right = right })
 		end
-		local want: { [string]: number } = { layerParam0 = x0, layerParam1 = x1, layerParam2 = frame.band_top(), layerParam3 = BAR }
+		local cl = start() + carve_l:get() - offset:get()
+		local cr = if hidden or room <= 0 then cl else start() + carve_r:get() - offset:get()
+		local want: { [string]: number } = { layerParam0 = x0, layerParam1 = x1, layerParam2 = frame.band_top(), layerParam3 = BAR, layerParam4 = cl, layerParam5 = cr, layerParam6 = DROP, layerParam7 = 10 }
 		local seen: { [any]: { [string]: number } } = {}
 		for _, ref in { art.strip, art.tab, art.edge } do
 			local el = ref:get()
