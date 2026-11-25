@@ -19,6 +19,7 @@
 local FileTree = require("@ds/file_tree")
 local FileViewer = require("@ds/file_viewer")
 local api = require("@app/screens/files/api")
+local sessions = require("@account/sessions")
 local prefs = require("@app/screens/settings/prefs")
 
 -- What the tree lists of a folder's entries: all of them with Settings →
@@ -637,9 +638,13 @@ local function bump(w: Workspace)
 	w.revision:set(w.revision:peek() + 1)
 end
 
+-- (Not `w.here`: a file opened from a reply is read before the tree's first listing says so.)
 local function on_disk(w: Workspace): string?
-	local root = w.target.root
-	return if root and w.here:peek() and string.sub(root, 1, 1) == "~" then api.on_disk(root) else root
+	local root, device = w.target.root, w.target.device
+	if root and string.sub(root, 1, 1) == "~" and (device == nil or device == sessions.now:peek().here) then
+		return api.on_disk(root)
+	end
+	return root
 end
 
 local function absolute(w: Workspace, path: string): string?
