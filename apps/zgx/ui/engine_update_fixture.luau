@@ -11,6 +11,10 @@ local Update = require("@app/screens/engine/update")
 local rail = require("@app/screens/shell/rail")
 local sessions = require("@account/sessions") :: any
 
+ui.actions {
+	appearance = function() end,
+}
+
 local restarts = ui.state("test_engine_restarts", 0)
 Update.call_restart = function(): any
 	restarts:set(restarts:peek() + 1)
