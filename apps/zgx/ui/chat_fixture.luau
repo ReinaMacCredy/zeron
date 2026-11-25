@@ -3095,6 +3095,10 @@ files_stub.reveal = function(target: any, path: string): any
 	note(`reveal:{target.chat}:{target.root}:{path}`)
 	return settled(nil)
 end
+files_stub.open_external = function(target: any, path: string): any
+	note(`browse:{target.chat}:{target.root}:{path}`)
+	return settled(nil)
+end
 files_stub.read = function(_target: any, path: string): any
 	return settled({ path = path, text = '[package]\nname = "atlas"\n', size = 26, encoding = "utf8", truncated = false })
 end
@@ -3118,7 +3122,7 @@ ui.command {
 		}
 		local reply = "The fix is in [the parser](src/parse.rs#L12) and [the host](/work/atlas/src/main.rs:40). "
 			.. "Not [this one](/etc/hosts.conf), nor [the docs](https://example.com/a.rs). "
-			.. "PR: **https://github.com/zeronsh/example/pull/1**.\n\nSee Cargo.toml\n\nversion 1.2"
+			.. "PR: **https://github.com/zeronsh/example/pull/1**. The [demo page](out/demo.html) and [the old one](/tmp/site/index.html).\n\nSee Cargo.toml\n\nversion 1.2"
 		store.messages:push {
 			id = "la1",
 			role = "assistant",
@@ -4142,11 +4146,6 @@ do
 	html_api.file_name = function(title: string): string
 		return `{title}.html`
 	end
-	local titles = ui.state("page_titles", { ["/tmp/atlas/out/demo.html"] = "Demo page" } :: { [string]: string })
-	html_api.title = function(path: string, done: (any) -> ())
-		local t = titles:peek()[path]
-		done(if t then { title = t } else { missing = true })
-	end
 	html_api.picks = function(state: any): string
 		return ui.json.encode(state)
 	end
@@ -4260,19 +4259,6 @@ do
 		note(`close_page:{id}:{title}`)
 	end
 	ui.command {
-		id = "pages_seed_spans",
-		title = "s2 names three .html files not on disk in code, then links one that is",
-		run = function()
-			seed {
-				{ id = "x4", role = "user", text = "Which?" },
-				page_reply("p4", {
-					{ id = "t", kind = "text", text = "`a.html` `b.html` `c.html` [demo](out/demo.html)" },
-					{ id = "html-files", kind = "html_files", targets = { { dest = "a.html", linked = false }, { dest = "b.html", linked = false }, { dest = "c.html", linked = false }, { dest = "out/demo.html", linked = true } } },
-				}),
-			}
-		end,
-	}
-	ui.command {
 		id = "pages_seed_live",
 		title = "s2 shows a dev server's page and names .html files",
 		run = function()
@@ -4281,7 +4267,6 @@ do
 				page_reply("p3", {
 					{ id = "tc4-html", kind = "html", url = "http://localhost:5391/app/?x=1", title = "Tray", height = 300 },
 					{ id = "t", kind = "text", text = "Made [demo](out/demo.html) and `out/other.html`." },
-					{ id = "html-files", kind = "html_files", targets = { { dest = "out/demo.html", linked = true }, { dest = "out/other.html", linked = false }, { dest = "out/missing.html", linked = true } } },
 				}),
 			}
 		end,

@@ -1747,16 +1747,7 @@
       "running_elsewhere": "Running on another device",
       "reload": "Reload",
       "not_responding": "{server} is not responding",
-      "retry": "Retry",
-      "website_elsewhere": "Website · on another device",
-      "website_gone": "Website · no longer on disk",
-      "website": "Website · {path}",
-      "choose_app": "Choose an app",
-      "open_in": "Open in",
-      "zeron": "Zeron",
-      "default_browser": "Default browser",
-      "reveal": "Reveal in Finder",
-      "copy_path": "Copy path"
+      "retry": "Retry"
     },
     "transcript_rows": {
       "question": "Question",

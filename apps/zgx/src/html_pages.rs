@@ -318,14 +318,6 @@ pub fn install(host: &ScriptHost) {
         }
     });
     host.function("html.file_name", |arg| Value::from(shared::page_file_name(&crate::auth::text(&arg)).as_str()));
-    host.async_action("html.title", |arg| async move {
-        let path = crate::auth::text(&arg);
-        let read = off_thread(move || shared::read_title(std::path::Path::new(&path))).await.unwrap_or(Err(()));
-        Ok(match read {
-            Ok(title) => Value::record([("title", title.as_deref().map_or(Value::Nil, Value::from))]),
-            Err(()) => Value::record([("missing", Value::Bool(true))]),
-        })
-    });
     host.function("html.picks_state", |arg| Value::from(picks_script(&arg).as_str()));
     let p = pages.clone();
     host.function("html.forget", move |arg| {

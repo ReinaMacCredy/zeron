@@ -63,7 +63,8 @@
 //!                                  { status = "applied" } or rejected
 //!   files.reveal { target, path }  shown in Finder, and
 //!   files.open_external { target, path }
-//!                                  opened in its app: on this Mac only
+//!                                  opened in its app: on this Mac only,
+//!                                  inside the root (a page, anywhere)
 //! and actions:
 //!   files.watch { key, target }    follow its changes (again after every
 //!                                  reconnection), until
@@ -173,6 +174,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         let path = root.and_then(|root| inside(&local_root(&root), &text(arg.field("path"))).ok());
         path.map_or(Value::Nil, |path| Value::from(path.to_string_lossy().as_ref()))
     });
+    host.function("files.on_disk", |arg| Value::from(local_root(&text(arg.field("root"))).to_string_lossy().as_ref()));
     if !files.started.get() {
         files.started.set(true);
         let f = files.clone();
@@ -1078,7 +1080,11 @@ impl Files {
             return Err("That file is on another device".into());
         }
         let root = opt_text(target.field("root")).ok_or("This session's folder isn't known")?;
-        let path = inside(&local_root(&root), &text(arg.field("path")))?;
+        let named = text(arg.field("path"));
+        let path = match page_anywhere(&named) {
+            Some(page) if !reveal => page,
+            _ => inside(&local_root(&root), &named)?,
+        };
         let opened = if reveal { reveal_in_finder(&path) } else { open::that_detached(&path) };
         opened.map_err(|error| error.to_string())?;
         Ok(Value::Nil)
@@ -1256,6 +1262,16 @@ fn on_disk(root: &str, data: Option<&Path>, home: Option<&Path>) -> PathBuf {
         (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
         _ => PathBuf::from(root),
     }
+}
+
+// A page a reply names by its whole path opens wherever it is: a browser shows it, as it would any other.
+fn page_anywhere(path: &str) -> Option<PathBuf> {
+    if !Path::new(path).is_absolute() {
+        return None;
+    }
+    let path = Path::new(path).canonicalize().ok()?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    (matches!(ext.as_str(), "html" | "htm") && path.is_file()).then_some(path)
 }
 
 /// `relative` under `root`, as it is on disk (links followed), refused if
@@ -1576,6 +1592,25 @@ mod tests {
         assert_eq!(at("/Users/me/app"), Path::new("/Users/me/app"));
         assert_eq!(at("~other/app"), Path::new("~other/app"));
         assert_eq!(on_disk("~/code/app", None, None), Path::new("~/code/app"));
+    }
+
+    #[test]
+    fn a_page_opens_from_anywhere_and_nothing_else_does() {
+        use super::page_anywhere;
+        let dir = std::env::temp_dir().join(format!("zgx-files-page-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("site.html")).unwrap();
+        std::fs::write(dir.join("a.HTML"), "").unwrap();
+        std::fs::write(dir.join("run.command"), "").unwrap();
+        assert!(page_anywhere(&dir.join("a.HTML").to_string_lossy()).is_some());
+        assert!(page_anywhere(&dir.join("run.command").to_string_lossy()).is_none());
+        assert!(page_anywhere(&dir.join("site.html").to_string_lossy()).is_none(), "a folder");
+        assert!(page_anywhere("a.HTML").is_none(), "a relative path is the chat's");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("run.command"), dir.join("run.html")).unwrap();
+            assert!(page_anywhere(&dir.join("run.html").to_string_lossy()).is_none(), "a link is what it leads to");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

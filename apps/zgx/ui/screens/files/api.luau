@@ -14,6 +14,8 @@
 --   api.search(target, query)      { { path, dir } }, best first
 --   api.create(target, path, dir, checkout)
 --   api.reveal(target, path), api.open_external(target, path)   (this Mac's)
+--   api.on_disk(root)              where this Mac keeps a chat's folder
+--   api.local_path(target, path)   a file's whole path here, nil if not inside
 --   api.watch(key, target)         its changes from now on, in `api.events`
 --   api.unwatch(key)
 --   api.frames(key, since)         a folder's kept frames past `since`, now
@@ -132,6 +134,10 @@ end
 
 function M.open_external(target: Target, path: string): any
 	return ui.call("files.open_external", { target = target, path = path })
+end
+
+function M.on_disk(root: string): string
+	return ui.call_sync("files.on_disk", { root = root }) or root
 end
 
 function M.local_path(target: Target, path: string): string?

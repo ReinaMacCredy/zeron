@@ -499,8 +499,7 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 			end,
 			annotate = if notes_for
 				then function(path: string): any
-					local root = w.target.root
-					local rel = if root and string.sub(path, 1, #root + 1) == root .. "/" then string.sub(path, #root + 2) else path
+					local rel = Workspace.in_root(w, path)
 					return (notes_for :: any)(function(): string?
 						return w.target.chat
 					end, rel, {

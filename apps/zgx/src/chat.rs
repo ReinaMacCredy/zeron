@@ -7288,13 +7288,9 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // A settled reply with nothing to show (only an empty thought,
             // say) has no row, as in the shipping app: drawn, it would be an
             // empty lane whose time floats over the next reply.
-            let mut shown = blocks(entry);
+            let shown = blocks(entry);
             if !streaming && matches!(&shown, Value::List(list) if list.is_empty()) {
                 return None;
-            }
-            let files = html_files_block(entry);
-            if let Some(files) = files.clone() {
-                shown = push_block(shown, files);
             }
             let mut fields = vec![
                 ("id", Value::from(id)),
@@ -7329,10 +7325,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             if (COMPACT_SHOWN.get() || (COMPACT_ANYWAY.get() && !streaming))
                 && let Some(compact) = compact_blocks(entry)
             {
-                fields.push(("compact", match files {
-                    Some(files) => push_block(compact, files),
-                    None => compact,
-                }));
+                fields.push(("compact", compact));
             }
             Some(Value::record(fields))
         }
@@ -8419,40 +8412,6 @@ fn html_block(part: &Json) -> Option<Value> {
 fn without_pages(blocks: Value) -> Value {
     match blocks {
         Value::List(list) => Value::List(list.iter().filter(|b| b.field("kind").map(crate::auth::text).as_deref() != Some("html")).cloned().collect::<Vec<_>>().into()),
-        other => other,
-    }
-}
-
-/// The shipping app's `html_link_targets`.
-fn html_files_block(entry: &Json) -> Option<Value> {
-    if entry["status"].as_str() == Some("streaming") {
-        return None;
-    }
-    let texts: Vec<&str> = entry["parts"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|p| p["kind"].as_str() == Some("text"))
-        .filter_map(|p| p["text"].as_str())
-        .collect();
-    let targets = zeron_proto::html_render::html_link_targets(texts.into_iter());
-    if targets.is_empty() {
-        return None;
-    }
-    let list: Vec<Value> = targets
-        .iter()
-        .map(|t| Value::record([("dest", Value::from(t.dest.as_str())), ("linked", Value::Bool(t.linked))]))
-        .collect();
-    Some(Value::record([("id", Value::from("html-files")), ("kind", Value::from("html_files")), ("targets", Value::List(list.into()))]))
-}
-
-fn push_block(blocks: Value, block: Value) -> Value {
-    match blocks {
-        Value::List(list) => {
-            let mut all: Vec<Value> = list.iter().cloned().collect();
-            all.push(block);
-            Value::List(all.into())
-        }
         other => other,
     }
 }
@@ -12767,17 +12726,12 @@ mod tests {
         let mut closed = entry.clone();
         closed["parts"][0]["htmlRender"]["closed"] = json!(true);
         assert_eq!(blocks(&closed).list()[1].field("closed"), Some(&Value::Bool(true)), "a closed page says so");
-        let row = message(&entry, None).unwrap();
-        let shown = row.field("blocks").unwrap().list();
-        let files = shown.last().unwrap();
-        assert_eq!(text_of(files, "kind"), "html_files");
-        assert_eq!(text_of(&files.field("targets").unwrap().list()[0], "dest"), "out/tray.html");
         COMPACT_SHOWN.set(true);
         let row = message(&entry, None).unwrap();
         COMPACT_SHOWN.set(false);
         let compact = row.field("compact").unwrap().list();
         let kinds: Vec<String> = compact.iter().map(|b| text_of(b, "kind")).collect();
-        assert_eq!(kinds, ["work", "html", "text", "html_files"], "compact: the page outside the fold");
+        assert_eq!(kinds, ["work", "html", "text"], "compact: the page outside the fold");
         assert!(compact[0].field("blocks").unwrap().list().iter().all(|b| text_of(b, "kind") != "html"));
         let remote = with_host(&entry, "c1", Some("dev-2")).expect("a page is read from its host");
         assert_eq!(text_of(&blocks(&remote).list()[1], "device"), "dev-2");

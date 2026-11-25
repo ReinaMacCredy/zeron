@@ -136,8 +136,8 @@ return function(session: () -> any?, shows: ((chat: string, path: string) -> boo
 			end)
 		end,
 		browse = function(target: string)
-			local where, path, _, outside = place(target)
-			if not where or outside then
+			local where, path = place(target)
+			if not where then
 				return
 			end
 			files.open_external(where, path):after(function() end, function()

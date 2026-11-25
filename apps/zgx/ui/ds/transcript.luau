@@ -298,7 +298,7 @@ export type Draft = { id: string, text: string, part: string?, part_text: string
 -- its own blocks, opened.
 export type Block = {
 	id: string,
-	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images" | "line" | "html" | "html_files",
+	kind: "text" | "tools" | "work" | "visual" | "display_failed" | "images" | "line" | "html",
 	text: string?,
 	line: string?,
 	-- Pictures an agent showed (`show_image`, a generated image), one after
@@ -1089,9 +1089,6 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				on_select = if view then view.page_selection else nil,
 				on_mention = if view then view.page_mention else nil,
 			}
-		end
-		if b.kind == "html_files" then
-			return HtmlCard.OpenCards { key = m.id, targets = b.targets or {}, pages = if view then view.pages else nil }
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then

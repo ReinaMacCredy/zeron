@@ -182,7 +182,7 @@ test("external links bypass an internal opener, including pull requests", functi
 	expect(app:error()).to_be(nil)
 end)
 
-test("a file link: Open, Reveal in Finder on this computer, Copy path", function()
+test("a file link: Open, Reveal in Finder on this computer, Copy path; a page also Open in browser", function()
 	local app = setup()
 	menu(app, 'role:link "the parser"')
 	expect(shows(app, "Open")).to_be(true)
@@ -205,7 +205,15 @@ test("a file link: Open, Reveal in Finder on this computer, Copy path", function
 	expect(shows(app, "Copy path")).to_be(true)
 	expect(shows(app, "Open")).to_be(true)
 	expect(shows(app, "Reveal in Finder")).to_be(false)
+	expect(shows(app, "Open in browser")).to_be(false)
 	shut(app)
+	-- A page, in the folder or out of it: Open in browser too.
+	menu(app, 'role:link "demo page"')
+	pick(app, "Open in browser")
+	expect(app:state("calls")).to_contain("browse:s2:/work/atlas:out/demo.html")
+	menu(app, 'role:link "the old one"')
+	pick(app, "Open in browser")
+	expect(app:state("calls")).to_contain("browse:s2:/work/atlas:/tmp/site/index.html")
 	-- On another device: no Finder to show it in.
 	app:command("session_on_box")
 	app:frames(10)
@@ -213,6 +221,9 @@ test("a file link: Open, Reveal in Finder on this computer, Copy path", function
 	expect(shows(app, "Open")).to_be(true)
 	expect(shows(app, "Reveal in Finder")).to_be(false)
 	expect(shows(app, "Copy path")).to_be(true)
+	shut(app)
+	menu(app, 'role:link "demo page"')
+	expect(shows(app, "Open in browser")).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
 
