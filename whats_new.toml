@@ -5,6 +5,13 @@
 version = "0.3.19"
 date = "Nov 25"
 
+[[entry.features]]
+id = "tab-notch"
+title = "Tabs sit in a notch, pin as tiles, and show on the rail"
+description = "The top of the chat card has a notch that holds the session tabs, with Back, Forward and New tab in its left corner and the chat's controls in the right one. Right-click a tab and choose Pin tab to keep it as a small tile at the head of the tabs. The app rail shows a mark for each open chat; the arrow above them hides them and shows their count."
+details = "A hovered tab also shows a pin button between its tick and its close button, and a hovered tile an unpin button at its corner. A pinned tab stays until you unpin it: Cmd+W, a middle-click and the Close commands leave it. Pinning a tab is separate from Pin chat in the sidebar. New chat tabs have no mark on the rail. A chat waiting on background work shows a short running track in place of its dot."
+visual = "tab-notch"
+
 [[entry.improvements]]
 text = "The Waiting pill says what waits: 1 question waiting, 2 approvals waiting, 1 plan waiting, or 3 waiting for you when the kinds differ. A new one from another chat opens the pill out for a few seconds with the chat that asks and what it asks, then folds back."
 visual = "waiting-reveal"
