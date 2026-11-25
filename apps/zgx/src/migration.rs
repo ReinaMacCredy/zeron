@@ -131,7 +131,7 @@ pub const TABLE: &[(&str, Home)] = &[
     ("mathSize", Home::Persist(&["ds/math.luau::math_size"])),
     ("transcriptWidth", Home::Persist(&["screens/settings/prefs.luau::settings_conversation_width"])),
     ("openWebLinksInZeron", Home::Persist(&["screens/settings/prefs.luau::settings_open_links"])),
-    ("htmlOpenApp", Home::Persist(&["ds/html_card.luau::html_open_app"])),
+    ("htmlOpenApp", Home::None("no app to pick: a reply's page opens in Zeron from its line and in the system's app from its globe")),
     ("transcriptCompactMode", Home::Persist(&["screens/settings/prefs.luau::settings_compact_transcript"])),
     ("pullRequestOpenIn", Home::None("pull requests are the GitHub plugin's, which keeps its own")),
     ("pullRequestDestination", Home::None("pull requests are the GitHub plugin's, which keeps its own")),
@@ -252,7 +252,6 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("ds/math.luau::math_render", "true"),
     ("ds/math.luau::math_face", "\"fira\""),
     ("ds/math.luau::math_size", "100"),
-    ("ds/html_card.luau::html_open_app", "\"default\""),
     ("ds/git.luau::ds.git.diff_split", "false"),
     ("ds/git.luau::ds.git.diff_wrap", "false"),
     ("ds/markdown.luau::markdown_code_fit", "false"),
@@ -412,11 +411,6 @@ fn more(settings: &Json) -> Vec<(String, Json)> {
     if let Some(size) = settings["mathSize"].as_f64().filter(|n| n.is_finite()) {
         put("ds/math.luau::math_size", json!(nearest(size.round().clamp(75.0, 200.0), &[90.0, 100.0, 110.0, 120.0, 135.0, 150.0])));
     }
-    match settings["htmlOpenApp"]["kind"].as_str() {
-        Some("systemDefault") => put("ds/html_card.luau::html_open_app", json!("default")),
-        Some("zeron") => put("ds/html_card.luau::html_open_app", json!("zeron")),
-        _ => {}
-    }
     let accent = &settings["accent"];
     let accent = match (accent.as_str(), accent["preset"].as_str()) {
         (Some("themeDefault"), _) => Some("default"),
@@ -524,9 +518,6 @@ fn left_out(settings: &Json, mac: bool) -> Map<String, Json> {
     }
     if let Some(face) = settings["mathFont"].as_str().filter(|f| !matches!(*f, "fira" | "stixTwo" | "computerModern" | "libertinus" | "pagella" | "euler")) {
         say("mathFont", &json!(face), "a math face this app doesn't offer: its own stays");
-    }
-    if let Some(kind) = settings["htmlOpenApp"]["kind"].as_str().filter(|k| !matches!(*k, "systemDefault" | "zeron")) {
-        say("htmlOpenApp", &settings["htmlOpenApp"], &format!("{kind}: this app opens HTML in Zeron or the system's app only"));
     }
     left
 }
@@ -1274,7 +1265,6 @@ mod tests {
         assert_eq!(s("ds/material.luau::frost_tint"), json!(0.91));
         assert_eq!(s("ds/math.luau::math_face"), json!("stix"));
         assert_eq!(s("ds/math.luau::math_size"), json!(120.0));
-        assert_eq!(s("ds/html_card.luau::html_open_app"), json!("zeron"));
         assert_eq!(s("screens/tasks/init.luau::tasks_view"), json!("board"));
         assert_eq!(s("screens/onboarding/state.luau::appearance"), json!("dark"));
         assert_eq!(s("screens/shell/split.luau::shell_session_tabs"), json!(["chat-a", "chat-b"]));
@@ -1343,7 +1333,6 @@ mod tests {
         assert_eq!(s("ds/look.luau::interface_font"), None);
         assert_eq!(s("ds/math.luau::math_face"), None, "a face this app doesn't know");
         assert_eq!(s("ds/math.luau::math_size"), None);
-        assert_eq!(s("ds/html_card.luau::html_open_app"), None, "another app to open with isn't one of this app's two");
         assert!(!zeron_theme::catalog::chosen(&data).dark.is_some(), "the default themes aren't a choice");
     }
 
@@ -1616,9 +1605,9 @@ mod tests {
         // A rebind of a command this app hasn't: named.
         let other = keys(json!({ "saveFile": "mod-shift-s", "toggleTray": "mod-shift-i" }), true);
         assert!(other.left.contains_key("keymap.saveFile") && other.left.contains_key("keymap.toggleTray"));
-        // A font, a math face and an app to open HTML with that this app hasn't: named.
-        let left = left_out(&json!({ "uiFontFamily": "system", "mathFont": "garamond", "htmlOpenApp": { "kind": "app", "path": "/x" } }), true);
-        assert!(left.contains_key("uiFontFamily") && left.contains_key("mathFont") && left.contains_key("htmlOpenApp"), "{left:?}");
+        // A font and a math face this app hasn't: named.
+        let left = left_out(&json!({ "uiFontFamily": "system", "mathFont": "garamond" }), true);
+        assert!(left.contains_key("uiFontFamily") && left.contains_key("mathFont"), "{left:?}");
     }
 
     #[test]
