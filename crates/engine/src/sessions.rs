@@ -483,6 +483,10 @@ struct RunHandle {
     /// session whose setting has since flipped is replaced before its next
     /// turn.
     code_mode: bool,
+    /// Launched with only Zeron's MCP servers (Settings → Providers): its
+    /// MCP servers are fixed at launch, so a parked session whose setting
+    /// has since flipped is replaced before its next turn.
+    zeron_mcp_only: bool,
 }
 
 /// Which CLI binary a run of `harness` launches now: its real path, size and
@@ -695,6 +699,7 @@ enum RunMode {
         binary: Option<String>,
         side_chats_only: bool,
         code_mode: bool,
+        zeron_mcp_only: bool,
     },
     Compaction,
 }
@@ -715,25 +720,35 @@ impl RunSetup {
         mode: RunMode,
         review: Option<crate::auto_review::Review>,
     ) -> Self {
-        let (steerable, accepts_input, capacity, credential, binary, side_chats_only, code_mode) =
-            match mode {
-                RunMode::Turn {
-                    steerable,
-                    credential,
-                    binary,
-                    side_chats_only,
-                    code_mode,
-                } => (
-                    steerable,
-                    true,
-                    32,
-                    credential,
-                    binary,
-                    side_chats_only,
-                    code_mode,
-                ),
-                RunMode::Compaction => (false, false, 1, None, None, false, false),
-            };
+        let (
+            steerable,
+            accepts_input,
+            capacity,
+            credential,
+            binary,
+            side_chats_only,
+            code_mode,
+            zeron_mcp_only,
+        ) = match mode {
+            RunMode::Turn {
+                steerable,
+                credential,
+                binary,
+                side_chats_only,
+                code_mode,
+                zeron_mcp_only,
+            } => (
+                steerable,
+                true,
+                32,
+                credential,
+                binary,
+                side_chats_only,
+                code_mode,
+                zeron_mcp_only,
+            ),
+            RunMode::Compaction => (false, false, 1, None, None, false, false, false),
+        };
         let (steer_tx, steer_rx) = mpsc::channel(capacity);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (engine_tx, engine_rx) = mpsc::unbounded_channel();
@@ -849,6 +864,7 @@ impl RunSetup {
                 binary,
                 side_chats_only,
                 code_mode,
+                zeron_mcp_only,
             },
             controls,
             engine_rx,
@@ -914,6 +930,7 @@ struct Inner {
     /// while no run was live (between the failed run and its retry) found
     /// nothing to stop, and still ends the turn.
     user_stops: Mutex<HashMap<String, u64>>,
+    mcp_gateway: tokio::sync::Mutex<Option<McpGateway>>,
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
     ipc_token_file: Mutex<Option<std::path::PathBuf>>,
@@ -1002,12 +1019,18 @@ struct Inner {
     quota: Arc<crate::routing::quota::QuotaBook>,
     /// Plugins whose native MCP servers local runs get (absent in bare tests).
     plugins: OnceLock<crate::plugins::Plugins>,
+    /// Managed external MCP servers (Vault + local) stamped into runs and served
+    /// through the loopback MCP Gateway (absent in bare tests).
+    mcp_servers: OnceLock<Arc<crate::mcp_servers::McpServers>>,
     /// New chats' warm starts, by the id the chat will be created with
     /// ([`warm_start`]).
     warm: Mutex<HashMap<String, warm_start::WarmStart>>,
     /// Their leases (open, typed) when a test sets them.
     warm_leases: Mutex<Option<(std::time::Duration, std::time::Duration)>>,
 }
+
+/// The engine binary's stdio-to-HTTP MCP forwarder ([`zeron_mcp::proxy`]).
+pub const MCP_PROXY_SUBCOMMAND: &str = "mcp-proxy";
 
 /// How long a runtime parked between turns with nothing pending keeps its
 /// agent process when its driver resumes sessions whole
@@ -1131,6 +1154,11 @@ pub use warm_start::WarmOutcome;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+struct McpGateway {
+    server: Arc<zeron_mcp::http::McpHttpServer>,
+    grants: HashMap<String, zeron_mcp::http::Grant>,
 }
 
 #[derive(Clone)]
@@ -1428,6 +1456,7 @@ impl SessionsEngine {
                 revivals_starting: Mutex::new(std::collections::HashSet::new()),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
+                mcp_gateway: tokio::sync::Mutex::new(None),
                 ipc_token_file: Mutex::new(None),
                 viewers: Arc::default(),
                 journal,
@@ -1471,6 +1500,7 @@ impl SessionsEngine {
                 resume_schedule: OnceLock::new(),
                 quota: crate::routing::quota::QuotaBook::new(),
                 plugins: OnceLock::new(),
+                mcp_servers: OnceLock::new(),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
             }),
@@ -1514,6 +1544,12 @@ impl SessionsEngine {
         let _ = self.inner.plugins.set(plugins);
     }
 
+    /// Wire the managed external MCP servers service: runs get enabled remote
+    /// (gateway) and stdio servers stamped into `extra_mcp`.
+    pub fn set_mcp_servers(&self, mcp_servers: Arc<crate::mcp_servers::McpServers>) {
+        let _ = self.inner.mcp_servers.set(mcp_servers);
+    }
+
     /// Wire the doc host (called once at engine assembly; the two services are mutually
     /// referential by design — sessions stream into docs, docs execute commands here).
     pub fn set_doc_host(&self, host: DocHost) {
@@ -1530,6 +1566,9 @@ impl SessionsEngine {
     pub fn clear_doc_host(&self) {
         lock(&self.inner.doc_host).take();
         lock(&self.inner.computer).take();
+        if let Ok(mut gateway) = self.inner.mcp_gateway.try_lock() {
+            gateway.take();
+        }
     }
 
     pub fn set_computer(&self, computer: Arc<ComputerRuntime>) {
@@ -2505,6 +2544,7 @@ impl SessionsEngine {
         // `drive_run`; normalize here so parked-session routing and mid-turn
         // guards go through `code_mode_changed`.
         request.code_mode = false;
+        request.zeron_mcp_only = false;
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -2525,6 +2565,7 @@ impl SessionsEngine {
                 h.runtime_config.harness.clone(),
                 h.side_chats_only,
                 h.code_mode,
+                h.zeron_mcp_only,
             )
         });
         if let Some((
@@ -2540,6 +2581,7 @@ impl SessionsEngine {
             live_harness,
             side_chats_only,
             code_mode,
+            zeron_mcp_only,
         )) = routed
         {
             if idle {
@@ -2562,6 +2604,7 @@ impl SessionsEngine {
                     .await
                 || self.native_subagents_changed(chat_id, harness_id, side_chats_only)
                 || self.code_mode_changed(chat_id, harness_id, code_mode)
+                || self.zeron_mcp_only_changed(chat_id, harness_id, zeron_mcp_only)
             {
                 None
             } else {
@@ -2738,6 +2781,7 @@ impl SessionsEngine {
         };
         let side_chats_only = self.inner.side_chats_only(chat_id, harness_id);
         let code_mode = self.inner.registry.code_mode(harness_id);
+        let zeron_mcp_only = self.inner.zeron_mcp_only(harness_id);
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -2830,6 +2874,7 @@ impl SessionsEngine {
                 binary,
                 side_chats_only,
                 code_mode,
+                zeron_mcp_only,
             },
             Some(review),
         );
@@ -2966,6 +3011,7 @@ impl SessionsEngine {
             turn,
             side_chats_only,
             code_mode,
+            zeron_mcp_only,
             title,
         ));
         Ok(run_id)
@@ -3113,6 +3159,26 @@ impl SessionsEngine {
         }
         tracing::info!(chat = %chat_id, harness = ?harness_id,
             "code mode switched; replacing the parked session");
+        true
+    }
+
+    /// Whether a session parked between turns launched with "Only Zeron's
+    /// MCP servers" otherwise than a run would launch now (Settings →
+    /// Providers). Same guards as [`Self::code_mode_changed`].
+    fn zeron_mcp_only_changed(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        started: bool,
+    ) -> bool {
+        if started == self.inner.zeron_mcp_only(harness_id)
+            || self.turn_in_flight(chat_id)
+            || self.holds_background_work(chat_id)
+        {
+            return false;
+        }
+        tracing::info!(chat = %chat_id, harness = ?harness_id,
+            "MCP servers switched; replacing the parked session");
         true
     }
 
@@ -4455,6 +4521,7 @@ impl SessionsEngine {
                     .unwrap_or_else(|| "~".into());
                 RunRequest {
                     code_mode: false,
+                    zeron_mcp_only: false,
                     prompt: String::new(),
                     harness: Some(config.harness),
                     model: config.model,
@@ -5252,6 +5319,7 @@ impl SessionsEngine {
                     access: zeron_proto::AccessMode::FullAccess,
                     plan: false,
                     code_mode: false,
+                    zeron_mcp_only: false,
                     attachments: Vec::new(),
                     resume: None,
                     worktree: None,
@@ -6651,6 +6719,84 @@ impl Inner {
         self.doc_host()
             .and_then(|host| host.open(chat_id).ok())
             .is_some_and(|handle| handle.continues_with_sent_message())
+    }
+
+    /// Whether a run of `harness_id` gets only Zeron's MCP servers, its own
+    /// hidden: the person's choice in Settings → Providers (off until then).
+    pub(super) fn zeron_mcp_only(&self, harness_id: HarnessId) -> bool {
+        self.registry.zeron_mcp_only(harness_id)
+    }
+
+    /// Before a run's servers are collected: the vault's MCP connections
+    /// listed again when stale, so one added on another device is there.
+    pub(super) async fn refresh_mcp_servers_for_run(&self) {
+        if let Some(mcp_servers) = self.mcp_servers.get() {
+            mcp_servers.refresh_for_run().await;
+        }
+    }
+
+    /// Collect all extra MCP servers stamped onto an agent run of `chat_id`:
+    /// allowed plugins' native MCP servers plus managed external MCP servers
+    /// (remote servers routed via the loopback MCP Gateway + local stdio
+    /// servers). Names are deduplicated and `"zeron"` is always reserved.
+    pub(super) async fn extra_mcp_servers(&self, chat_id: &str) -> Vec<zeron_proto::McpServer> {
+        let mut out = self
+            .plugins
+            .get()
+            .map(crate::plugins::Plugins::native_mcp_servers)
+            .unwrap_or_default();
+        let mut seen: std::collections::HashSet<String> = out
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        seen.insert("zeron".to_owned());
+
+        if let Some(mcp_servers) = self.mcp_servers.get() {
+            let (endpoint, token) = self.mcp_gateway_grant(mcp_servers, chat_id).await;
+            for server in mcp_servers.extra_mcp_servers(endpoint.as_deref(), token.as_deref()) {
+                if seen.insert(server.name.clone()) {
+                    out.push(server);
+                }
+            }
+        }
+        out
+    }
+
+    // One token per chat, not per run: an agent process outlives a run
+    // (parked, warm, reconfigured in place) and keeps the config it launched with.
+    async fn mcp_gateway_grant(
+        &self,
+        mcp_servers: &Arc<crate::mcp_servers::McpServers>,
+        chat_id: &str,
+    ) -> (Option<Arc<zeron_mcp::http::McpHttpServer>>, Option<String>) {
+        let mut gateway = self.mcp_gateway.lock().await;
+        if gateway.is_none() {
+            match zeron_mcp::http::McpHttpServer::bind(mcp_servers.gateway()).await {
+                Ok(server) => {
+                    *gateway = Some(McpGateway {
+                        server: Arc::new(server),
+                        grants: HashMap::new(),
+                    })
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "MCP gateway: could not bind; runs get no remote MCP servers");
+                }
+            }
+        }
+        let Some(gateway) = gateway.as_mut() else {
+            return (None, None);
+        };
+        let token = match gateway.grants.entry(chat_id.to_owned()) {
+            std::collections::hash_map::Entry::Occupied(grant) => Some(grant.get().token().to_owned()),
+            std::collections::hash_map::Entry::Vacant(slot) => match gateway.server.grant() {
+                Ok(grant) => Some(slot.insert(grant).token().to_owned()),
+                Err(err) => {
+                    tracing::warn!(error = %err, "MCP gateway: no token for a run");
+                    None
+                }
+            },
+        };
+        (Some(gateway.server.clone()), token)
     }
 
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
@@ -8634,6 +8780,7 @@ async fn drive_run(
     turn: TurnControl,
     side_chats_only: bool,
     code_mode: bool,
+    zeron_mcp_only: bool,
     mut title: Option<crate::titles::TitleAfterFirstOutput>,
 ) {
     let device_id = inner.device_id.clone();
@@ -8690,6 +8837,8 @@ async fn drive_run(
             Some("native subagents switched")
         } else if taken.parked.code_mode != code_mode {
             Some("code mode switched")
+        } else if taken.parked.zeron_mcp_only != zeron_mcp_only {
+            Some("MCP servers switched")
         } else {
             None
         }
@@ -8699,14 +8848,12 @@ async fn drive_run(
             .discard_taken(harness.as_ref(), &chat_id, taken, reason)
             .await;
     }
-    // Plugins' native MCP servers come from this host's own allowed plugins,
-    // run from their verified snapshots — never from what a sender put here.
-    request.extra_mcp = inner
-        .plugins
-        .get()
-        .map(crate::plugins::Plugins::native_mcp_servers)
-        .unwrap_or_default();
+    // Plugins' native MCP servers and managed external MCP servers come from
+    // this host's own configuration — never from what a sender put here.
+    inner.refresh_mcp_servers_for_run().await;
+    request.extra_mcp = inner.extra_mcp_servers(&chat_id).await;
     request.code_mode = code_mode;
+    request.zeron_mcp_only = zeron_mcp_only;
     // The MCP servers the agent starts from this run's config: the only
     // children it may hold when stopped idle (see the reaper).
     let mut known_servers: Vec<zeron_harness::process::KnownServer> = request
@@ -12201,6 +12348,7 @@ mod tests {
             access: zeron_proto::AccessMode::FullAccess,
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             resume: None,
             attachments: Vec::new(),
             worktree: None,

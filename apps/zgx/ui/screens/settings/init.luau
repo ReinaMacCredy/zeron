@@ -35,7 +35,7 @@ local function ahead(): string
 end
 
 -- (Each page by its module's `ID` and `TITLE`: the module loads as it's first shown or searched.)
-local function add(id: string, title: string, module: string, icon: string, group: string)
+local function add(id: string, title: string, module: string, icon: string, group: string, private: boolean?)
 	settings.add {
 		id = id,
 		title = title,
@@ -44,6 +44,7 @@ local function add(id: string, title: string, module: string, icon: string, grou
 		-- (The shell centres each page in the room beside the list.)
 		module = `@app/screens/settings/{module}`,
 		before = ahead(),
+		private = private,
 	}
 end
 
@@ -63,6 +64,7 @@ add("usage", "Usage", "usage", "wallet", "Personal")
 -- site data, permissions, downloads).
 add("browser", "Browser", "browser", "global", "Browser")
 add("providers", "Providers", "providers", "widget", "Devices")
+add("mcp", "MCP", "mcp", "remote-server", "Devices", true)
 -- (Zeron's Agents heading has its Profiles beside Providers; zgx keeps the
 -- agents under Devices.)
 add("agent-profiles", "Agent profiles", "agent_profiles", "bot", "Devices")

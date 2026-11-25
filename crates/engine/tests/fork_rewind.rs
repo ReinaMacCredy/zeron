@@ -188,6 +188,7 @@ fn run_payload(prompt: &str, message_id: &str, cwd: &str) -> SessionCommandPaylo
     SessionCommandPayload::Run {
         request: RunRequest {
             code_mode: false,
+            zeron_mcp_only: false,
             prompt: prompt.into(),
             harness: None,
             model: None,

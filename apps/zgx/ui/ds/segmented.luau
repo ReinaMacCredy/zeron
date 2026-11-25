@@ -183,9 +183,15 @@ return function(props: Props): Node
 				h = H - PAD * 2,
 				rounded = ui.raw(control.nest(TRACK_RADIUS, PAD), "the track's corner less the thumb's inset: concentric"),
 				bg = props.thumb or "$zeron.segmented.thumb",
-				w = move(ui.computed(function(): number
-					return width(index:get() + 1)
-				end)),
+				-- (Equal segments: the width changes only with the layout, which
+				-- it follows at once rather than springing to.)
+				w = if fixed or props.fill
+					then function(): number
+						return width(index:get() + 1)
+					end
+					else move(ui.computed(function(): number
+						return width(index:get() + 1)
+					end)),
 				x = move(ui.computed(function(): number
 					local x = 0
 					for i = 1, index:get() do

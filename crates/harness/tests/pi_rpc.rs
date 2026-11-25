@@ -24,6 +24,7 @@ fn request(cwd: &std::path::Path, prompt: &str) -> RunRequest {
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         resume: None,
         forked_at: None,
         attachments: vec![],

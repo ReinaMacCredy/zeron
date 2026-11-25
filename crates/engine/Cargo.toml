@@ -28,6 +28,7 @@ tokio.workspace = true
 futures.workspace = true
 zeron-term-link.workspace = true
 async-trait.workspace = true
+zeron-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
@@ -50,6 +51,9 @@ reqwest.workspace = true
 tokio-tungstenite.workspace = true
 # A large chat2 checkpoint sent in parts, sliced from one buffer.
 bytes = "1"
+# External MCP loopback gateway (`ExternalMcpProxy` response streaming).
+hyper = { version = "1", features = ["http1"] }
+http-body-util = "0.1"
 # The rules plugins are held to (paths, programs, network), shared with apps/zgx.
 zeron-plugin-guard.workspace = true
 ignore.workspace = true
@@ -77,7 +81,6 @@ dunce = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Threading"] }
 
 [dev-dependencies]
-zeron-mcp.workspace = true
 dunce = "1"
 tracing-subscriber.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }

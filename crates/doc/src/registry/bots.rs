@@ -254,6 +254,7 @@ impl RegistryDoc {
         if self.bot_image(bot_id).as_deref() == image {
             return Ok(None);
         }
+        self.observe_sidebar_row(KIND_BOT_AVATARS, bot_id);
         let hlc = self.next_hlc();
         let set = fields([
             (IMAGE, opt_str(image)),
@@ -367,6 +368,7 @@ impl RegistryDoc {
         if let Some(unread) = patch.unread.filter(|u| *u != bot.unread) {
             set.insert("unread".into(), json!(unread));
         }
+        self.observe_sidebar_row(KIND_BOTS, bot_id);
         let hlc = self.next_hlc();
         let pinned = patch.pinned.unwrap_or(bot.pinned);
         if pinned != bot.pinned {
@@ -410,6 +412,7 @@ impl RegistryDoc {
         let Some(bot) = self.bot(bot_id) else {
             return Ok(None);
         };
+        self.observe_sidebar_row(KIND_BOTS, bot_id);
         let hlc = self.next_hlc();
         let mut ops = vec![RowOp {
             kind: KIND_BOTS.into(),

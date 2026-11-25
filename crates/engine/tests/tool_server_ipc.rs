@@ -73,6 +73,7 @@ fn run_payload() -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
             code_mode: false,
+            zeron_mcp_only: false,
             prompt: "stay".into(),
             harness: None,
             model: None,

@@ -131,6 +131,14 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
                 "docs",
                 "Read Zeron's own Docs and release notes to answer how Zeron works.",
             ),
+            tool(
+                "list_mcp_servers",
+                "List the person's MCP servers (Settings → MCP) and the services that can be added.",
+            ),
+            tool(
+                "request_mcp_change",
+                "Ask the person to add, remove, or turn on or off one of their MCP servers.",
+            ),
         ],
     },
     ToolGroupInfo {

@@ -116,6 +116,8 @@ fn tool_switch(method: &str, params: &Value) -> Option<&'static str> {
         methods::UPDATE_THEME => "update_theme",
         methods::DELETE_THEME => "delete_theme",
         methods::USE_THEME => "use_theme",
+        methods::LIST_MCP_SERVERS => "list_mcp_servers",
+        methods::REQUEST_MCP_CHANGE | methods::GET_MCP_REQUEST => "request_mcp_change",
         methods::MUTATE => match params["op"].as_str()? {
             "renameChat" => "set_thread_title",
             "setChatArchived" => "set_thread_archived",

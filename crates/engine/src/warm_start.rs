@@ -111,6 +111,9 @@ pub(super) struct Parked {
     /// Whether it launched with Code Mode enabled (the setting may change
     /// before its run: `code_mode_changed`).
     pub(super) code_mode: bool,
+    /// Whether it launched with only Zeron's MCP servers (the setting, or
+    /// whether any is set up, may change before its run).
+    pub(super) zeron_mcp_only: bool,
     /// The projectless folder its launch made, removed if it ends unused
     /// and still empty.
     made_folder: Option<std::path::PathBuf>,
@@ -147,6 +150,7 @@ fn same_ask(a: &RunRequest, b: &RunRequest) -> bool {
         && a.access == b.access
         && a.plan == b.plan
         && a.code_mode == b.code_mode
+        && a.zeron_mcp_only == b.zeron_mcp_only
         && a.auto_approve == b.auto_approve
 }
 
@@ -194,6 +198,7 @@ impl SessionsEngine {
         }
         request.harness = Some(harness_id);
         request.code_mode = self.inner.registry.code_mode(harness_id);
+        request.zeron_mcp_only = self.inner.zeron_mcp_only(harness_id);
         request.prompt.clear();
         request.attachments.clear();
         request.mcp = None;
@@ -326,12 +331,8 @@ impl SessionsEngine {
             // Zeron's own tools reach the run through its controls.
             let side_chats_only = self.inner.side_chats_only(chat_id, harness_id);
             request.mcp = None;
-            request.extra_mcp = self
-                .inner
-                .plugins
-                .get()
-                .map(crate::plugins::Plugins::native_mcp_servers)
-                .unwrap_or_default();
+            self.inner.refresh_mcp_servers_for_run().await;
+            request.extra_mcp = self.inner.extra_mcp_servers(chat_id).await;
             request.env.insert(
                 zeron_proto::ORIGIN_ENV.into(),
                 zeron_proto::chat_origin(chat_id),
@@ -358,6 +359,7 @@ impl SessionsEngine {
                 return Ok(None);
             }
             let code_mode = request.code_mode;
+            let zeron_mcp_only = request.zeron_mcp_only;
             harness
                 .prewarm(key, request)
                 .await
@@ -368,6 +370,7 @@ impl SessionsEngine {
                 binary,
                 side_chats_only,
                 code_mode,
+                zeron_mcp_only,
                 made_folder: made_folder.clone(),
             }))
         };

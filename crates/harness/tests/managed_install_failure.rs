@@ -60,6 +60,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,

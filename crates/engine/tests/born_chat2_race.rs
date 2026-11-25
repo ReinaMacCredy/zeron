@@ -164,6 +164,7 @@ async fn transcript_survives_open_racing_create_chat() {
                         access: zeron_proto::AccessMode::FullAccess,
                         plan: false,
                         code_mode: false,
+                        zeron_mcp_only: false,
                         attachments: Vec::new(),
                         worktree: None,
                         branch: None,

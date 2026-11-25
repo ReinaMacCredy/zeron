@@ -113,6 +113,7 @@ fn run(
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: vec![],
         worktree: None,
         branch: None,
