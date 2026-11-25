@@ -13,6 +13,14 @@ local sessions = require("@account/sessions")
 
 local M = {}
 
+local panel: any = nil
+function M.shows_file(chat: string, path: string): boolean
+	if panel == nil then
+		panel = boundary.load("@app/screens/panel") or false
+	end
+	return panel ~= false and panel.shows_file ~= nil and panel.shows_file(chat, path, route.project:peek()) == true
+end
+
 -- `props` with them added: `chat()` its id, `session()` its session (followed), `peek()` the same unfollowed (a paragraph isn't drawn again as the session moves). A link's glyph only where `props.open_link` opens it.
 function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any, peek: () -> any): { [string]: any }
 	props.on_sign_in = function()
@@ -95,7 +103,7 @@ function M.add(props: { [string]: any }, chat: () -> string?, session: () -> any
 			local r = FileLinks.resolve(target, if s then s.cwd else nil)
 			return r ~= nil
 		end
-		props.file_cards = FileCards(peek)
+		props.file_cards = FileCards(peek, M.shows_file)
 	end
 	return props
 end

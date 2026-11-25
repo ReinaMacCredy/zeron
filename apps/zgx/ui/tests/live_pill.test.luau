@@ -67,7 +67,7 @@ test("the tray answers in place, approves a plan, and dismisses or retries a fai
 end)
 
 test("a chat's plan waiting for approval is approved from the tray", function()
-	local waiting = { key = "lead:plan", chat = "lead", request = "plan", title = "lead", kind = "plan_approval", secret = false, steps = { "One", "Two", "Three" } }
+	local waiting = { key = "lead:plan", chat = "lead", request = "plan", title = "lead", kind = "plan_approval", mark = "s1", secret = false, steps = { "One", "Two", "Three" } }
 	local app = open({ chat("lead", nil), chat("w1", "working") }, { waiting })
 	expect(app:has('role:button "1 needs you · 1 working"')).to_be(true)
 	app:click("#live-pill")
@@ -76,6 +76,9 @@ test("a chat's plan waiting for approval is approved from the tray", function()
 	app:click("#live-approve-lead")
 	app:frames(5)
 	expect(app:state("calls")).to_contain("answer:lead:plan:once:")
+	app:set_state("chat_plans_dismissed", { lead = "s1" })
+	app:frames(10)
+	expect(app:has('role:button "1 working"')).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
 

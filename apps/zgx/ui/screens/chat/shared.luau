@@ -133,6 +133,17 @@ M.at_foot = ui.shared("chat.pills.at_foot", "page")
 -- (The chat page's pair, by its old names.)
 M.jump_width = M.pill_width_of("jump", "page")
 M.pill_width = M.pill_width_of("waiting", "window")
+
+local plans_dismissed = ui.persist("chat_plans_dismissed", {} :: { [string]: string })
+
+function M.plan_dismissed(item: any): boolean
+	return item.kind == "plan_approval" and item.mark ~= nil and plans_dismissed:get()[item.chat] == item.mark
+end
+
+function M.dismiss_plan(item: any)
+	plans_dismissed:set_key({ item.chat }, item.mark)
+end
+
 -- Each chat's place as it was left (its `anchor`; none, its end), by
 -- session id: switched back to, a chat opens where it was read.
 M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })

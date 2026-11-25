@@ -38,7 +38,7 @@ With the sidebar hidden, move the pointer just right of the app rail and it slid
 
 ## Needs you and running
 
-Questions from other chats and plans waiting for your OK wait in the **? N Waiting** pill above the composer, where you answer them without leaving the chat you are in. See [When an agent asks](zeron://docs/agent-questions).
+Questions from other chats and plans waiting for your OK wait in the **Waiting** pill above the composer, which reads **1 question waiting** or the like, where you answer them without leaving the chat you are in. See [When an agent asks](zeron://docs/agent-questions).
 
 The pill on the right of the titlebar counts the rest: threads that failed, Tasks whose message did not send or that are ready to review, and the ones running, for example **1 needs you · 2 working**. With nothing failed or waiting it reads only the running count, and with nothing at all it is hidden.
 

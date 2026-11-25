@@ -1351,13 +1351,19 @@
       "link_not_ready": "This chat's link isn't ready yet"
     },
     "file_card": {
-      "open_in_panel": "Open in Files panel",
       "gone": "No longer on this machine",
-      "detail": "{kind}, {size}",
+      "detail": "{kind} · {size}",
       "more_lines": "{n, plural, one {# more line} other {# more lines}}",
       "more_in_panel": "More in the Files panel",
       "text": "Text",
-      "file": "File"
+      "file": "File",
+      "open_in_pane": "Open in right pane",
+      "open_file_in_pane": "Open {name} in the right pane",
+      "quick_look": "Quick look",
+      "quick_look_file": "Quick look {name}",
+      "close_preview": "Close preview",
+      "count": "{n, plural, one {# file} other {# files}}",
+      "open_file_in_browser": "Open {name} in the browser"
     },
     "emoji_picker": {
       "search": "Search emoji",
@@ -1494,8 +1500,14 @@
       "shells_title": "Background shells",
       "shells_running": "{n} running",
       "stopping": "Stopping…",
-      "waiting": "Waiting",
       "waiting_label": "{n} waiting for you",
+      "waiting_question": "{n, plural, one {question waiting} other {questions waiting}}",
+      "waiting_approval": "{n, plural, one {approval waiting} other {approvals waiting}}",
+      "waiting_plan": "{n, plural, one {plan waiting} other {plans waiting}}",
+      "waiting_mixed": "waiting for you",
+      "fresh_question": "asks:",
+      "fresh_approval": "needs approval:",
+      "fresh_plan": "has a plan:",
       "waiting_card": "Waiting for you",
       "question": "Question",
       "plan": "Plan",

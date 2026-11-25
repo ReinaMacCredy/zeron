@@ -8,6 +8,7 @@ local MarkStack = require("@ds/mark_stack")
 local Recorder = require("@ds/shortcut_recorder")
 local sessions = require("@account/sessions")
 local boundary = require("@app/screens/shell/boundary")
+local chat_shared = require("@app/screens/chat/shared")
 local keys = require("@app/screens/shell/keys")
 local rail = require("@app/screens/shell/rail")
 local route = require("@app/screens/shell/route")
@@ -45,8 +46,12 @@ end
 
 local board = ui.computed(function(): any
 	local asked: { [string]: any } = {}
+	local shown: { any } = {}
 	for _, w in waiting:get() do
-		asked[w.chat] = w
+		if not chat_shared.plan_dismissed(w) then
+			asked[w.chat] = w
+			table.insert(shown, w)
+		end
 	end
 	local out = { needs = {}, working = {}, done = {} }
 	local listed: { [string]: boolean } = {}
@@ -65,7 +70,7 @@ local board = ui.computed(function(): any
 			table.insert(out.done, { id = c.id, kind = "done", chat = c })
 		end
 	end
-	for _, w in waiting:get() do
+	for _, w in shown do
 		if not listed[w.chat] then
 			table.insert(out.needs, { id = w.chat, kind = w.kind, chat = { id = w.chat, title = w.title or "" }, item = w })
 		end

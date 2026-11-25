@@ -168,6 +168,11 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     files.git.borrow_mut().push(host.shared("files.git", files.git_value()));
     let f = files.clone();
     host.function("files.frames", move |arg| f.frames_since(&arg));
+    host.function("files.local_path", |arg| {
+        let root = opt_text(arg.field("target").and_then(|target| target.field("root")));
+        let path = root.and_then(|root| inside(&local_root(&root), &text(arg.field("path"))).ok());
+        path.map_or(Value::Nil, |path| Value::from(path.to_string_lossy().as_ref()))
+    });
     if !files.started.get() {
         files.started.set(true);
         let f = files.clone();
@@ -842,7 +847,7 @@ impl Files {
         let target = arg.field("target").ok_or("no target")?;
         let found = |path: PathBuf| Value::record([("src", Value::from(path.to_string_lossy().as_ref()))]);
         if self.is_local(target).await {
-            let root = PathBuf::from(text(target.field("root")));
+            let root = local_root(&text(target.field("root")));
             if !root.is_absolute() {
                 return Ok(Value::Nil);
             }
@@ -1059,7 +1064,7 @@ impl Files {
                     return Err("That device's Zeron is too old to make files. Update it, then try again.".into());
                 }
                 let root = opt_text(target.field("root")).ok_or("This session has no folder to make files in")?;
-                make(Path::new(&root), &relative, dir)?;
+                make(&local_root(&root), &relative, dir)?;
                 Ok(Value::record([("status", Value::from("applied"))]))
             }
             Err(error) => Err(said(error)),
@@ -1073,7 +1078,7 @@ impl Files {
             return Err("That file is on another device".into());
         }
         let root = opt_text(target.field("root")).ok_or("This session's folder isn't known")?;
-        let path = inside(Path::new(&root), &text(arg.field("path")))?;
+        let path = inside(&local_root(&root), &text(arg.field("path")))?;
         let opened = if reveal { reveal_in_finder(&path) } else { open::that_detached(&path) };
         opened.map_err(|error| error.to_string())?;
         Ok(Value::Nil)
@@ -1235,6 +1240,22 @@ fn kind(value: Option<&Value>) -> String {
         _ => "file",
     }
     .into()
+}
+
+fn local_root(root: &str) -> PathBuf {
+    on_disk(root, engine::data_dir().as_deref(), std::env::var_os("HOME").map(PathBuf::from).as_deref())
+}
+
+// The engine's `resolve_chat_cwd`: a projectless chat's folder is under its data folder, which a Dev app keeps outside the home.
+fn on_disk(root: &str, data: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    let root = root.trim();
+    if let (true, Some(data), Some(name)) = (zeron_proto::projectless::is_scratch_cwd(root), data, root.rsplit('/').next()) {
+        return data.join("scratch").join(name);
+    }
+    match (root.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(root),
+    }
 }
 
 /// `relative` under `root`, as it is on disk (links followed), refused if
@@ -1541,6 +1562,20 @@ mod tests {
         assert!(make(&dir, ".git/x", false).is_err());
         assert!(make(&dir, "missing/x.rs", false).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_the_engine_names_is_found_on_this_disk() {
+        use super::on_disk;
+        use std::path::Path;
+        let (data, home) = (Path::new("/dev/data"), Path::new("/dev/home"));
+        let at = |root: &str| on_disk(root, Some(data), Some(home));
+        assert_eq!(at("~/.zeron/scratch/2026-11-05-0b83b127"), Path::new("/dev/data/scratch/2026-11-05-0b83b127"));
+        assert_eq!(at("~/code/app"), Path::new("/dev/home/code/app"));
+        assert_eq!(at("~"), Path::new("/dev/home"));
+        assert_eq!(at("/Users/me/app"), Path::new("/Users/me/app"));
+        assert_eq!(at("~other/app"), Path::new("~other/app"));
+        assert_eq!(on_disk("~/code/app", None, None), Path::new("~/code/app"));
     }
 
     #[test]

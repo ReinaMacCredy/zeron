@@ -134,6 +134,10 @@ function M.open_external(target: Target, path: string): any
 	return ui.call("files.open_external", { target = target, path = path })
 end
 
+function M.local_path(target: Target, path: string): string?
+	return ui.call_sync("files.local_path", { target = target, path = path })
+end
+
 -- `{ kept }`: whether that watch was running already (kept a moment after
 -- being let go of), every change since in its frames.
 function M.watch(key: string, target: Target): any

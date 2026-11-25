@@ -359,6 +359,7 @@ type Ctx = {
 	link_chip: ((target: string) -> { file: boolean?, skill: string? }?)?,
 	file_cards: FileCard.Files?,
 	live: (() -> boolean)?,
+	chains: { [number]: FileChain }?,
 	attached: { [string]: { kind: string, icon: string? } }?,
 	task: ((k: number, done: boolean) -> ())?,
 	tasks: { [any]: number },
@@ -1555,7 +1556,7 @@ local Picture = ui.component(function(props: { src: string, name: string, w: num
 	}
 end)
 
-local blocks: (list: { MarkdownBlock }, ink: string?, ctx: Ctx?, prefix: string?) -> { Node }
+local blocks: (list: { MarkdownBlock }, ink: string?, ctx: Ctx?, prefix: string?, top: boolean?) -> { Node }
 
 -- A list item's marker, hanging in its gutter, on the first line's middle.
 local function marker(ordered: boolean, n: number, ctx: Ctx?): Node
@@ -1627,9 +1628,18 @@ local function file_refs(list: { MarkdownRun }, out: { FileCard.Item }, seen: { 
 				return false
 			end
 		else
-			for word in string.gmatch(r.x, "%S+") do
-				if not string.find(word, "[./]") or not add(word, word) then
-					return false
+			for line in string.gmatch(r.x, "[^\n]+") do
+				local whole = string.match(line, "^%s*(/.-)%s*$")
+				if whole and string.find(whole, "%s") and not string.find(whole, "%s/") and string.match(whole, "%.%w+$") then
+					if not add(whole, whole) then
+						return false
+					end
+				else
+					for word in string.gmatch(line, "%S+") do
+						if not string.find(word, "[./]") or not add(word, word) then
+							return false
+						end
+					end
 				end
 			end
 		end
@@ -1641,19 +1651,157 @@ end
 local function cards_of(b: MarkdownBlock): { FileCard.Item }?
 	local out: { FileCard.Item } = {}
 	local seen: { [string]: boolean } = {}
+	local ok = true
 	if b.t == "p" then
-		if not file_refs(b.s, out, seen) then
-			return nil
-		end
+		ok = file_refs(b.s, out, seen)
 	elseif b.t == "ul" or b.t == "ol" then
 		for _, item in b.items do
 			local only = item[1]
 			if #item ~= 1 or only.t ~= "p" or not file_refs(only.s, out, seen) then
-				return nil
+				ok = false
+				break
 			end
 		end
 	end
-	return if #out > 0 then out else nil
+	return if ok and #out > 0 then out else nil
+end
+
+type FileChain = { first: number, cards: { { FileCard.Item } }, sig: string }
+local runs_rev = ui.state("markdown_file_runs", 0)
+
+local function link_runs(list: { MarkdownBlock }, ctx: Ctx)
+	local chains = ctx.chains
+	if not chains then
+		return
+	end
+	local fresh: { [number]: FileChain } = {}
+	local i = 1
+	while i <= #list do
+		local j = i
+		if cards_of(list[i]) then
+			while j < #list and cards_of(list[j + 1]) do
+				j += 1
+			end
+			if j > i then
+				local chain: FileChain = { first = i, cards = {}, sig = "" }
+				local sigs: { string } = {}
+				for k = i, j do
+					local cards = cards_of(list[k]) :: { FileCard.Item }
+					table.insert(chain.cards, cards)
+					for _, it in cards do
+						table.insert(sigs, it.target)
+					end
+					table.insert(sigs, "")
+				end
+				chain.sig = table.concat(sigs, "\0")
+				for k = i, j do
+					fresh[k] = chain
+				end
+			end
+		end
+		i = j + 1
+	end
+	local changed = false
+	for k, was in chains do
+		local now = fresh[k]
+		if not (now and now.first == was.first and now.sig == was.sig) then
+			changed = true
+		end
+	end
+	for k in fresh do
+		if not chains[k] then
+			changed = true
+		end
+	end
+	if changed then
+		table.clear(chains)
+		for k, chain in fresh do
+			chains[k] = chain
+		end
+		runs_rev:set(runs_rev:peek() + 1)
+	end
+end
+
+local function cards_sig(ctx: Ctx, cards: { FileCard.Item }): string
+	local targets: { string } = {}
+	for _, it in cards do
+		table.insert(targets, it.target)
+	end
+	return `{ctx.group or ""}\0{table.concat(targets, "\0")}`
+end
+
+local function cards_alone(cards: { FileCard.Item }, ctx: Ctx): boolean
+	if FileCard.shown[cards_sig(ctx, cards)] then
+		return true
+	elseif ctx.live ~= nil and ctx.live() then
+		return false
+	end
+	local files = ctx.file_cards :: FileCard.Files
+	local all = true
+	for _, it in cards do
+		if not files.find(it.target) then
+			all = false
+		end
+	end
+	return all
+end
+
+local function cards_state(n: number?, cards: { FileCard.Item }, ctx: Ctx): (string, { FileCard.Item })
+	runs_rev:get()
+	if not cards_alone(cards, ctx) then
+		return "words", cards
+	end
+	local chain = if n and ctx.chains then ctx.chains[n] else nil
+	if not (chain and n) then
+		return "cards", cards
+	end
+	local at = n - chain.first + 1
+	local from = at
+	while from > 1 and cards_alone(chain.cards[from - 1], ctx) do
+		from -= 1
+	end
+	local head, count, k = from, 0, from
+	while k <= #chain.cards do
+		if k > at and not cards_alone(chain.cards[k], ctx) then
+			break
+		end
+		local more = #chain.cards[k]
+		if k > head and count + more > CARDS_MOST then
+			if k > at then
+				break
+			end
+			head, count = k, 0
+		end
+		count += more
+		k += 1
+	end
+	local last = k - 1
+	if head == last then
+		return "cards", cards
+	elseif head ~= at then
+		return "in_run", cards
+	end
+	local all: { FileCard.Item } = {}
+	local seen: { [string]: boolean } = {}
+	for at_k = head, last do
+		for _, it in chain.cards[at_k] do
+			if not seen[it.target] then
+				seen[it.target] = true
+				table.insert(all, it)
+			end
+		end
+	end
+	return `run:{last - head}`, all
+end
+
+local function in_run(b: MarkdownBlock, n: number?, ctx: Ctx?): (() -> boolean)?
+	local cards = if ctx and ctx.file_cards and n then cards_of(b) else nil
+	if not (cards and ctx) then
+		return nil
+	end
+	return function(): boolean
+		return (cards_state(n, cards, ctx)) == "in_run"
+	end
 end
 
 local function no_cards(ctx: Ctx?): Ctx?
@@ -1667,33 +1815,18 @@ end
 
 -- One block, by its kind; `ink`, its text's colour where not the primary (a
 -- quote's). `veil_id`: stable path for the streaming veil.
-local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?): Node
+local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?, n: number?): Node
 	local cards = if ctx and ctx.file_cards then cards_of(b) else nil
 	if cards and ctx and ctx.file_cards then
-		local files, live, plain = ctx.file_cards, ctx.live, no_cards(ctx)
-		local targets: { string } = {}
-		for _, it in cards do
-			table.insert(targets, it.target)
-		end
-		local sig = `{ctx.group or ""}\0{table.concat(targets, "\0")}`
+		local files, plain = ctx.file_cards, no_cards(ctx)
 		return ui.presence(function(): string
-			if FileCard.shown[sig] then
-				return "cards"
-			elseif live and live() then
-				return "words"
-			end
-			local all = true
-			for _, target in targets do
-				if not files.find(target) then
-					all = false
-				end
-			end
-			return if all then "cards" else "words"
+			return (cards_state(n, cards, ctx))
 		end, function(k: string): Node
 			if k == "words" then
 				return block(b, ink, plain, veil_id)
 			end
-			FileCard.remember(sig)
+			local _, items = cards_state(n, cards, ctx)
+			FileCard.remember(cards_sig(ctx, cards))
 			local f = ctx.find
 			if f then
 				local paragraphs = if b.t == "p" then { b.s } else {}
@@ -1706,8 +1839,11 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?
 					f.n += #MarkdownFind.occurrences(MarkdownFind.words(s), f.q)
 				end
 			end
-			return FileCard.Row { files = files, items = cards, open = ctx.open, pictures = ctx.pictures, group = ctx.group }
-		end, { w_full = true, min_w = 0 })
+			if k == "in_run" then
+				return ui.div {}
+			end
+			return FileCard.Row { files = files, items = items, open = ctx.open, pictures = ctx.pictures, menu = ctx.link_menu, group = ctx.group }
+		end, { w_full = true, min_w = 0, hidden = in_run(b, n, ctx) })
 	end
 	if (b :: any).t == "pending" then
 		-- (Its place, held until it's parsed: a frame or two.)
@@ -2033,12 +2169,12 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?, veil_id: string?
 	return ui.div {}
 end
 
-function blocks(list: { MarkdownBlock }, ink: string?, ctx: Ctx?, prefix: string?): { Node }
+function blocks(list: { MarkdownBlock }, ink: string?, ctx: Ctx?, prefix: string?, top: boolean?): { Node }
 	local out: { Node } = {}
 	local has_veil = ctx ~= nil and ctx.veil ~= nil
 	for i, b in list do
 		local id = if has_veil then (if prefix then `{prefix}.{i}` else tostring(i)) else nil
-		table.insert(out, block(b, ink, ctx, id))
+		table.insert(out, block(b, ink, ctx, id, if top then i else nil))
 	end
 	return out
 end
@@ -2183,6 +2319,7 @@ return function(props: Props): Node
 		else nil
 	if ctx and props.file_cards then
 		ctx.file_cards = props.file_cards
+		ctx.chains = {}
 		-- (A reply being written: its files stay words until it ends, so a paragraph turns to cards once.)
 		local always = props.veil == true
 		ctx.live = if props.window and props.window.live then props.window.live
@@ -2213,13 +2350,13 @@ return function(props: Props): Node
 	local column: { [any]: any } = { w_full = true, min_w = 0, gap = if props.small then "$space.3" else "$space.4" }
 	-- A block, in a box its tracker is told of (when there is one).
 	local track = props.track
-	local function boxed(node: Node): Node
+	local function boxed(node: Node, hide: (() -> boolean)?): Node
 		if not track then
 			return node
 		end
 		local r = ui.ref()
 		ui.on_cleanup(track(r))
-		return ui.div { ref = r, w_full = true, min_w = 0, node }
+		return ui.div { ref = r, w_full = true, min_w = 0, hidden = hide, node }
 	end
 	-- A top-level block, the `n`th: with a find, made again as its matches
 	-- change (the query, or the current match coming or going), its marks
@@ -2257,16 +2394,17 @@ return function(props: Props): Node
 			seeded.veil_seed = true
 			use_ctx = seeded
 		end
+		local hide = in_run(b, n, use_ctx)
 		if (not find or not q or q == "") and not w then
-			return boxed(block(b, ink, use_ctx, id))
+			return boxed(block(b, ink, use_ctx, id, n), hide)
 		end
 		local mine: Ctx = if use_ctx then table.clone(use_ctx) else { tasks = {} }
 		mine.wash = w
 		mine.find = if find and q and q ~= "" then { q = string.lower(q), cur = k, n = 0 } else nil
-		local node = block(b, ink, mine, id)
+		local node = block(b, ink, mine, id, n)
 		local reveal = if find then find.reveal else nil
 		if k == 0 or not reveal then
-			return boxed(node)
+			return boxed(node, hide)
 		end
 		local r = ui.ref()
 		ui.after(0, function()
@@ -2276,9 +2414,10 @@ return function(props: Props): Node
 			ref = r,
 			w_full = true,
 			min_w = 0,
+			hidden = hide,
 			mb = if b.t == "h" then ui.raw(-6, "a heading sits closer to what it heads") else nil,
 			node,
-		})
+		}, hide)
 	end
 	-- A windowed run's find, as its key: "" without one, else
 	-- `|<block>:<k>|<query>` (the current match's block and place, if it's in
@@ -2300,8 +2439,9 @@ return function(props: Props): Node
 	end
 	local function top(b: MarkdownBlock, n: number): Node
 		local id = if ctx and ctx.veil then tostring(n) else nil
+		local hide = in_run(b, n, ctx)
 		if not find and not wash then
-			return boxed(block(b, ink, ctx, id))
+			return boxed(block(b, ink, ctx, id, n), hide)
 		end
 		local f = find
 		local r = ui.ref()
@@ -2309,6 +2449,7 @@ return function(props: Props): Node
 			ref = r,
 			w_full = true,
 			min_w = 0,
+			hidden = hide,
 			-- (A heading's pull toward what it heads, which its own margin
 			-- gives it only as the column's child.)
 			mb = if b.t == "h" then ui.raw(-6, "a heading sits closer to what it heads") else nil,
@@ -2332,9 +2473,9 @@ return function(props: Props): Node
 						reveal(r)
 					end)
 				end
-				return block(b, ink, mine, id)
+				return block(b, ink, mine, id, n)
 			end, { w_full = true, min_w = 0 }),
-		})
+		}, hide)
 	end
 	-- Windowed (`window`): the blocks in runs of CHUNK, each run built while
 	-- its reach (the run and OVERSCAN either side) touches the view; away, a
@@ -2515,6 +2656,9 @@ return function(props: Props): Node
 				ctx.tasks = {}
 				number_tasks(list, ctx.tasks)
 			end
+			if ctx and ctx.file_cards and not (ctx.live ~= nil and ctx.live()) then
+				link_runs(list, ctx)
+			end
 			-- The first block that may differ from those shown: past those
 			-- the parse kept from the last (its very tables), the rest looked at.
 			local from = math.min(MarkdownFind.settled(list), #shown_blocks) + 1
@@ -2608,6 +2752,9 @@ return function(props: Props): Node
 		if ctx and ctx.task then
 			number_tasks(list, ctx.tasks)
 		end
+		if ctx and ctx.file_cards then
+			link_runs(list, ctx)
+		end
 		for i, b in list do
 			table.insert(out, top(b, i))
 		end
@@ -2617,6 +2764,9 @@ return function(props: Props): Node
 		if ctx and ctx.task then
 			number_tasks(list, ctx.tasks)
 		end
+		if ctx and ctx.file_cards then
+			link_runs(list, ctx)
+		end
 		if find or wash then
 			local out: { Node } = {}
 			for i, b in list do
@@ -2624,7 +2774,7 @@ return function(props: Props): Node
 			end
 			column[1] = out
 		else
-			column[1] = blocks(list, ink, ctx)
+			column[1] = blocks(list, ink, ctx, nil, true)
 		end
 	end
 	return ui.column(column)

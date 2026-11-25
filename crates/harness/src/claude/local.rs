@@ -6,7 +6,10 @@ use zeron_proto::claude_config::{
     ClaudeConfigSnapshot, LocalCommandOutput, Sources, keep_known_keys,
 };
 
-use super::{ClaudeHarness, PROBE_TIMEOUT, config_root, launch_env, managed_mcp_config, model_arg};
+use super::{
+    ClaudeHarness, PROBE_TIMEOUT, code_mode_env, config_root, launch_env, managed_mcp_config,
+    model_arg, normalize,
+};
 use crate::HarnessError;
 use crate::process::{Command, Stdio};
 
@@ -103,6 +106,15 @@ pub(super) async fn run(
     crate::compose_child_path(&mut cmd, &exe);
     harness.launch.apply(&mut cmd, Some("CLAUDE_CONFIG_DIR"));
     crate::apply_run_env(&mut cmd, &request.env);
+    let mut settings = serde_json::json!({ "disableAllHooks": true });
+    // The CLI refuses to resume a session begun in Code Mode unless launched in it.
+    if request.resume.as_deref().is_some_and(|session| {
+        let root = config_root(&launch_env(&harness.launch, &request.env));
+        normalize::started_in_code_mode(&root, session)
+    }) {
+        settings["env"] = code_mode_env();
+        cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    }
     cmd.args([
         "--print",
         "--output-format",
@@ -110,7 +122,7 @@ pub(super) async fn run(
         "--verbose",
         "--no-session-persistence",
         "--settings",
-        r#"{"disableAllHooks":true}"#,
+        &settings.to_string(),
     ]);
     if !connect_mcp && !managed_mcp_config() {
         cmd.arg("--strict-mcp-config");
