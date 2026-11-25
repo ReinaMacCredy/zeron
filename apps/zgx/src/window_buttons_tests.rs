@@ -86,8 +86,8 @@ const TAB: &str = "#session-tabs >> role:tab";
 const TAB_TITLE: &str = "#session-tabs >> role:tab >> \"Fix the build\"";
 const NEW_TAB: &str = "#titlebar-new-tab";
 const LIVE: &str = "#live-pill";
-// (The bar's 20 past what stands last, room for the notch's flare, the strip's 8 before its first tab.)
-const PAST_NEW_TAB: f32 = 28.;
+// (The bar's 12 past what stands last, the strip's 10 before its first tab.)
+const PAST_NEW_TAB: f32 = 22.;
 
 /// What a press (and release) at `(x, y)` asks of the window.
 fn press(app: &mut TestApp, x: f32, y: f32) -> Option<WindowGesture> {
