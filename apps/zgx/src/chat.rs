@@ -11715,7 +11715,10 @@ mod tests {
         let (next, marks) = compaction_readout(&chats, &open, &config);
         assert_eq!((field(&next, "icon").as_str(), field(&next, "title").as_str()), ("off", "Not scheduled"));
         assert_eq!(field(&next, "detail"), "Already compacted since your last message");
-        assert_eq!((num(&marks, "auto"), num(&marks, "warn"), num(&marks, "floor")), (Some(967_000.), Some(821_950.), None), "no floor until the settings are read");
+        assert_eq!((num(&marks, "auto"), num(&marks, "warn"), num(&marks, "floor")), (Some(967_000.), None, None), "no floor until the settings are read");
+        let asks = json!({ "harness": "claude-code", "model": null, "reasoning": null, "sandbox": "workspace-write", "modelOptions": { "askAt": "600k" } });
+        let (_, marks) = compaction_readout(&chats, &open, &asks);
+        assert_eq!((num(&marks, "auto"), num(&marks, "warn")), (Some(967_000.), Some(567_000.)), "the agent is asked at its ask point");
         chats.reminder.set(Some(150_000));
         let (_, marks) = compaction_readout(&chats, &open, &config);
         assert_eq!(num(&marks, "floor"), Some(170_000.));
