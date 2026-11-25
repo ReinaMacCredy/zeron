@@ -946,7 +946,7 @@ async fn cloud_agent_settings_are_the_accounts_and_answered_here() {
     let refused = client
         .call_as::<serde_json::Value>(
             methods::SET_CODE_MODE,
-            serde_json::json!({ "targetDeviceId": "cloud", "harness": "claude-code", "enabled": true }),
+            serde_json::json!({ "targetDeviceId": "cloud", "harness": "cursor", "enabled": true }),
         )
         .await
         .unwrap_err();

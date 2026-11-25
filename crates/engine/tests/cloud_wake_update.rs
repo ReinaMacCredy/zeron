@@ -142,6 +142,62 @@ impl Rig {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runs_remote_mcp_server_goes_through_the_gateway_with_its_chats_token() {
+    let _serial = SERIAL.lock().await;
+    let rig = Rig::new();
+    let core = rig.boot();
+    core.mcp_servers
+        .upsert_server(zeron_proto::UpsertMcpServerRequest {
+            id: Some("docs".into()),
+            name: "Docs".into(),
+            transport: zeron_proto::McpTransport::Http,
+            url: Some("https://docs.invalid/mcp".into()),
+            auth_kind: zeron_proto::McpAuthKind::None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    create_chat(&core).await;
+    send(&core, "m1", "first");
+    wait_for(|| answered(&core, "first"), "the first answer").await;
+    send(&core, "m2", "second");
+    wait_for(|| answered(&core, "second"), "the second answer").await;
+
+    let runs = rig.runs.lock().unwrap().clone();
+    let gateway: Vec<(String, String)> = runs
+        .iter()
+        .map(|run| {
+            let http = run
+                .extra_mcp
+                .iter()
+                .find_map(|server| server.http.clone())
+                .expect("the run carries the remote server");
+            (http.url, http.headers["Authorization"].clone())
+        })
+        .collect();
+    assert_eq!(gateway.len(), 2);
+    let (url, bearer) = gateway[0].clone();
+    assert!(url.starts_with("http://127.0.0.1:") && url.ends_with("/mcp/server/docs"), "{url}");
+    assert!(bearer.starts_with("Bearer "), "{bearer}");
+    assert_eq!(gateway[1], gateway[0], "one token for the chat's turns");
+
+    let client = reqwest::Client::new();
+    let post = |auth: Option<&str>| {
+        let mut request = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        if let Some(auth) = auth {
+            request = request.header("authorization", auth);
+        }
+        request.send()
+    };
+    assert_eq!(post(None).await.unwrap().status(), 401);
+    assert_ne!(post(Some(&bearer)).await.unwrap().status(), 401, "the run's token opens the gateway");
+    core.shutdown().await;
+}
+
 async fn create_chat(core: &EngineCore) {
     let client = zeron_rpc::memory_client(core.rpc_service());
     let _ = client

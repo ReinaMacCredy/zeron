@@ -1566,6 +1566,9 @@ impl SessionsEngine {
     pub fn clear_doc_host(&self) {
         lock(&self.inner.doc_host).take();
         lock(&self.inner.computer).take();
+        if let Ok(mut gateway) = self.inner.mcp_gateway.try_lock() {
+            gateway.take();
+        }
     }
 
     pub fn set_computer(&self, computer: Arc<ComputerRuntime>) {
