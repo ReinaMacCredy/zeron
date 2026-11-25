@@ -113,7 +113,7 @@ test("I with no text field holding the keyboard goes into the composer; Escape t
 	app:frames(5)
 	expect(focused(app)).to_contain("textbox")
 end)
-test("a letter with a control of the page focused stays with that control", function()
+test("a letter with a control of the page focused goes to the composer", function()
 	local app = open()
 	app:click('#shell-sidebar >> role:button "Fix the build"')
 	app:frames(30)
@@ -132,7 +132,7 @@ test("a letter with a control of the page focused stays with that control", func
 	expect(focused(app)).to_contain('button "Access"')
 	app:key("x")
 	app:frames(5)
-	expect(focused(app)).to_contain('button "Access"')
+	expect(focused(app)).to_contain("textbox")
 end)
 
 test("with nothing holding the keys a letter or Cmd+V goes to the composer; an arrow or another chord doesn't", function()

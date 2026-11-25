@@ -215,7 +215,7 @@ return function(props: Props): Node
 	pane.on_key = function(): boolean
 		local typing: any = boundary.load("@app/screens/chat/typing")
 		if typing then
-			typing.through_control()
+			typing.through_control(true)
 		end
 		return false
 	end

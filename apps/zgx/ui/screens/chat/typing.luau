@@ -32,14 +32,18 @@ end
 M.take = take
 
 -- A key came up through a control of the page or the panel (focus on one, not
--- parked): gpui's `typing_target` leaves those alone. Nothing focused, a key
--- reaches the window's root only.
+-- parked): gpui's `typing_target` leaves those alone, but for a letter or a
+-- paste through the page's (a chip or a button pressed), which none of them
+-- types with. Nothing focused, a key reaches the window's root only.
 local through_control = false
-function M.through_control()
+local through_page = false
+function M.through_control(page: boolean?)
 	through_control = true
+	through_page = page == true
 	-- (Something on the way up may take the key, and the root never hears it.)
 	ui.after(0, function()
 		through_control = false
+		through_page = false
 	end)
 end
 
@@ -87,9 +91,9 @@ end
 -- The window's on_key, a key no one took. Never takes the key itself: the
 -- window's text and paste follow it to the field just focused.
 function M.key(e: any)
-	local held = through_control
-	through_control = false
-	if held or e.editing or e["repeat"] then
+	local held, page = through_control, through_page
+	through_control, through_page = false, false
+	if (held and not page) or e.editing or e["repeat"] then
 		return
 	end
 	-- (`e.cmd` is Ctrl itself off macOS, so the paste chord is read from the keys held.)
@@ -100,7 +104,11 @@ function M.key(e: any)
 	if e.cmd or e.ctrl or e.meta then
 		return
 	end
-	if utf8.len(e.key) == 1 or e.key == "Space" then
+	if e.key == " " or e.key == "Space" then
+		if not held then
+			take()
+		end
+	elseif utf8.len(e.key) == 1 then
 		take()
 	end
 end
