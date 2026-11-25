@@ -1076,8 +1076,7 @@ impl HarnessRegistry {
         !(zeron_harness::switches_native_subagents(id) && self.native_subagents_off(id))
     }
 
-    /// Off under the routing native policy Off, or, on Cloud, as the person
-    /// chose for Cloud.
+    /// The person turned `id`'s native subagents off (on Cloud, for Cloud).
     fn native_subagents_off(&self, id: HarnessId) -> bool {
         match self.cloud_choice(id, zeron_doc::CloudAgentChoice::NativeSubagents) {
             Some(on) => on == Some(false),

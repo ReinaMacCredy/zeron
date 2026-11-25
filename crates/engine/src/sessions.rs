@@ -930,8 +930,6 @@ struct Inner {
     /// while no run was live (between the failed run and its retry) found
     /// nothing to stop, and still ends the turn.
     user_stops: Mutex<HashMap<String, u64>>,
-    /// The loopback gateway to managed external MCP servers, bound at the
-    /// first run that needs it, with each chat's token for it.
     mcp_gateway: tokio::sync::Mutex<Option<McpGateway>>,
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
@@ -1158,7 +1156,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The loopback MCP gateway and each chat's token for it.
 struct McpGateway {
     server: Arc<zeron_mcp::http::McpHttpServer>,
     grants: HashMap<String, zeron_mcp::http::Grant>,
@@ -6762,7 +6759,6 @@ impl Inner {
         out
     }
 
-    /// The gateway, bound now if it isn't yet, and `chat_id`'s token for it.
     // One token per chat, not per run: an agent process outlives a run
     // (parked, warm, reconfigured in place) and keeps the config it launched with.
     async fn mcp_gateway_grant(

@@ -1283,8 +1283,6 @@ impl Launcher {
         self.command_with_config(request).0
     }
 
-    /// [`Self::command`], and the private file its extra servers' config went
-    /// to when it carries a credential (kept until the run ends).
     fn command_with_config(
         &self,
         request: &RunRequest,
@@ -1515,7 +1513,6 @@ struct Runtime {
     stdout_lines: crate::lossy_lines::LossyLines<crate::process::ChildStdout>,
     stdin: Stdin,
     stderr_tail: crate::StderrTail,
-    /// The private MCP config file the CLI was launched with, kept while it runs.
     mcp_config: Option<crate::scratch::ScratchDir>,
 }
 
