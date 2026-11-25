@@ -122,6 +122,11 @@ fn middle(r: Rect) -> (f32, f32) {
     (r.x + r.width / 2., r.y + r.height / 2.)
 }
 
+/// Where a tab is grabbed: its title, clear of the buttons a hovered tab shows.
+fn by_title(r: Rect) -> (f32, f32) {
+    (r.x + 40., r.y + r.height / 2.)
+}
+
 /// Chat `title` dropped on the right of the chat showing, its whole page
 /// being that chat's.
 fn split_right(app: &mut TestApp, title: &str) {
@@ -344,7 +349,7 @@ fn a_tab_flicked_out_of_the_strip_lights_its_card_and_splits() {
     open(&mut app, "Tidy the tests");
     open(&mut app, "Fix the build");
     let page = app.bounds("shell-page");
-    let from = middle(app.bounds("#session-tab-a3"));
+    let from = by_title(app.bounds("#session-tab-a3"));
     carry(&mut app, from, (page.x + 20., page.y + page.height / 2.), |app| {
         app.frames(20);
         assert!(app.find("#session-tab-rider").is_none(), "out of the strip");
@@ -362,7 +367,7 @@ fn a_tab_held_over_the_composer_rings_it_and_is_mentioned() {
     open(&mut app, "Tidy the tests");
     open(&mut app, "Fix the build");
     let composer = middle(app.bounds("#chat-composer"));
-    let from = middle(app.bounds("#session-tab-a3"));
+    let from = by_title(app.bounds("#session-tab-a3"));
     carry(&mut app, from, composer, |app| {
         assert!(app.find("#composer-drop-ring").is_some(), "the pill's ring");
         assert_eq!(showing(app), (false, false), "a tab shows no Drop to mention");
