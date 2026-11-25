@@ -138,6 +138,7 @@ fn make_request(
         access: AccessMode::FullAccess,
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,

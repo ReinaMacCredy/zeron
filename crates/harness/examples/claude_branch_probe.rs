@@ -92,6 +92,7 @@ fn request(prompt: &str, cwd: &str) -> RunRequest {
         plan: false,
         auto_approve: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         resume: None,
         worktree: None,

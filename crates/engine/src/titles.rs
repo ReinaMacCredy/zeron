@@ -301,6 +301,7 @@ pub(crate) async fn run_one_shot(
     for attempt in 0..=run.retry_delays_ms.len() {
         let mut request = RunRequest {
             code_mode: false,
+            zeron_mcp_only: false,
             mcp: None,
             prompt: run.prompt.clone(),
             harness: Some(run.harness),
@@ -595,6 +596,7 @@ mod tests {
             access: zeron_proto::AccessMode::Supervised,
             plan: false,
             code_mode: false,
+            zeron_mcp_only: false,
             resume: None,
             attachments: vec![],
             worktree: None,

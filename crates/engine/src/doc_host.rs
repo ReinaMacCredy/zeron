@@ -8484,6 +8484,7 @@ impl DocHost {
             access: permission_mode,
             plan: config.as_ref().is_some_and(|c| c.plan),
             code_mode: false,
+            zeron_mcp_only: false,
             attachments: Vec::new(),
             resume: None,
             worktree: None,

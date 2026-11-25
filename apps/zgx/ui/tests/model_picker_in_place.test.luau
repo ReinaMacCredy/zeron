@@ -137,6 +137,44 @@ test("an option's choices open on hover, and a press keeps them", function()
 	expect(app:error()).to_be(nil)
 end)
 
+-- A model's options are rows of the menu: as wide as the panel inside its
+-- inset (from where its title starts), so a press anywhere along one opens
+-- it, and its choices open beside the menu. (Each was as wide as its own
+-- words, its choices over the menu.)
+test("a model's options are as wide as the menu's rows", function()
+	local app = mount("picker_fixture.luau")
+	app:resize(700, 700)
+	app:set_state("test_picker_model", "fusion")
+	settle(app)
+	app:click('role:button "Model"')
+	settle(app)
+	-- Where a row is: its left edge and its width.
+	local function across(row: string): string
+		for line in app:tree():gmatch("[^\n]+") do
+			if line:find(row, 1, true) and not line:find(" hidden", 1, true) then
+				local x, w = line:match(" (%d+),%d+ (%d+)x%d+")
+				return `{x} {w}`
+			end
+		end
+		return "none"
+	end
+	local panel_x, panel_w = across(" dialog "):match("(%d+) (%d+)")
+	local title_x = across("#model-picker-title"):match("^%d+")
+	expect(panel_x).never.to_be_nil()
+	expect(title_x).never.to_be_nil()
+	local left, right = tonumber(panel_x) :: number, (tonumber(panel_x) :: number) + (tonumber(panel_w) :: number)
+	local inset = (tonumber(title_x) :: number) - left
+	local row = `{left + inset} {right - left - 2 * inset}`
+	expect(across('button "Lead"')).to_be(row)
+	expect(across('button "Sidekick"')).to_be(row)
+	-- Its choices open past the menu's edge, not over it.
+	app:click('role:button "Lead"')
+	settle(app)
+	local choices = tonumber(across('listbox "Lead"'):match("^%d+")) or 0
+	expect(choices > right).to_be(true)
+	expect(app:error()).to_be(nil)
+end)
+
 -- Devin Fusion has no card beside its row: picked, its options are rows on
 -- the panel, as any model's are.
 test("Fusion is picked like any model, its options then under it", function()

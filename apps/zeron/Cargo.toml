@@ -33,6 +33,8 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+# `zeron mcp sign-in` opens the sign-in page (as the zgx app does).
+open = "5"
 tracing.workspace = true
 
 # The custom allocator is macOS-only (see main.rs): glibc measured flat on the

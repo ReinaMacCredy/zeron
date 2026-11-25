@@ -36,7 +36,10 @@ use zeron_rpc::{RpcClient, methods};
 
 mod bots;
 mod docs;
+pub mod http;
+mod mcp_servers;
 mod plugins;
+pub mod proxy;
 mod themes;
 pub mod ui_driver;
 mod visual;
@@ -106,6 +109,7 @@ pub fn tool_list() -> Value {
         list.extend(plugins::tools());
         list.extend(themes::tools());
         list.extend(bots::tools());
+        list.extend(mcp_servers::tools());
     }
     tools
 }
@@ -982,6 +986,9 @@ impl ThreadTools {
             themes::DELETE_THEME => self.theme(methods::DELETE_THEME, args).await,
             themes::USE_THEME => self.theme(methods::USE_THEME, args).await,
             bots::BOT_MEMORY | bots::BOT_INBOX | bots::BOT_BOARD | bots::BOT_SCHEDULE => self.bot_files(name, args).await,
+            mcp_servers::LIST_MCP_SERVERS | mcp_servers::REQUEST_MCP_CHANGE => {
+                self.mcp_servers(name, args.clone()).await
+            }
             plugin if plugins::is_plugin_tool_name(plugin) => {
                 self.call_plugin_tool(plugin, args).await
             }
@@ -4122,7 +4129,7 @@ mod tests {
 
     use super::*;
 
-    const THREAD_TOOLS: [&str; 57] = [
+    const THREAD_TOOLS: [&str; 59] = [
         "list_threads",
         "read_thread",
         "create_thread",
@@ -4180,6 +4187,8 @@ mod tests {
         "bot_inbox",
         "bot_board",
         "bot_schedule",
+        "list_mcp_servers",
+        "request_mcp_change",
     ];
 
     fn chat(id: &str, space: Option<&str>, archived: bool, created_by: Option<&str>) -> Value {

@@ -288,6 +288,7 @@ where
 fn request(prompt: &str, mode: AccessMode) -> RunRequest {
     RunRequest {
         code_mode: false,
+        zeron_mcp_only: false,
         prompt: prompt.into(),
         harness: None,
         model: None,

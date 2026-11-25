@@ -51,6 +51,8 @@ pub const KIND_BOTS: &str = "bots";
 pub const KIND_BOT_AVATARS: &str = "botAvatars";
 mod bots;
 mod plans;
+mod cloud_agents;
+pub use cloud_agents::{CloudAgentChoice, CloudAgentChoices, KIND_CLOUD_AGENTS};
 mod repository_looks;
 mod row_cache;
 mod sidebar_pins;

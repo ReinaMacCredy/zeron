@@ -51,6 +51,7 @@ async fn managed_install_reaches_session_started() {
         access: zeron_proto::AccessMode::FullAccess,
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         branch: None,

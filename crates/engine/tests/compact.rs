@@ -298,6 +298,7 @@ fn run_payload(message_id: &str, cwd: &str) -> SessionCommandPayload {
     SessionCommandPayload::Run {
         request: RunRequest {
             code_mode: false,
+            zeron_mcp_only: false,
             prompt: "hello".into(),
             harness: None,
             model: None,

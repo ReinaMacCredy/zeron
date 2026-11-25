@@ -107,6 +107,8 @@ export type Session = {
 	-- the top). The Inbox's: "inbox", "working" or "settled".
 	shelf: string?,
 	rank: number?,
+	-- An archived one's project, by its id (the rest are under theirs).
+	project: string?,
 }
 export type PullRequest = { number: number, state: ("open" | "merged" | "closed" | "draft")?, title: string? }
 -- (`src`: its own artwork, a picture chosen for it or its favicon, in place
@@ -288,6 +290,9 @@ export type Props = {
 	-- Archived sessions (the most recently moved first), for the Archived
 	-- shelf when `details.archived` is on; a row's Unarchive.
 	archived: Live<{ Session }>?,
+	-- Every project a session may be of, listed now or not: an archived
+	-- one's, for its row to show (its `project`).
+	known: Live<{ Project }>?,
 	on_unarchive: ((id: string) -> ())?,
 	-- A session renamed in its row (Zeron's inline rename): which one is
 	-- being renamed (a double click on its row starts it; the caller may
@@ -309,6 +314,15 @@ export type Props = {
 	-- A session's context menu (a secondary click on its row): its entries
 	-- (ds/context_menu's), nil for none.
 	menu: ((id: string) -> { ContextMenu.Entry }?)?,
+	-- Sessions picked out together, by id: a ⇧-click picks every one the list
+	-- shows from the session open (or where the picking began) through the
+	-- one clicked, and opens nothing. A plain click opens its session and
+	-- lets them all go. Only sessions the list shows are ever in it (one
+	-- folded away, filtered out or archived leaves it).
+	marked: State<{ [string]: boolean }>?,
+	-- The context menu of several of them, opened on any one: by their ids,
+	-- in the list's order.
+	menu_many: ((ids: { string }) -> { ContextMenu.Entry }?)?,
 	-- A project group's menu, on its header (Rename…, Remove…), by its id.
 	project_menu: ((id: string) -> { ContextMenu.Entry }?)?,
 }
@@ -531,6 +545,44 @@ return ui.component(function(props: Props): Node
 		end)
 	end
 	local selected = props.selected
+	-- The sessions picked out together (⇧-clicked), where the caller keeps
+	-- them; what can be picked, in the order the list shows it; and where the
+	-- picking began, the end every ⇧-click keeps.
+	local pick = {
+		marked = props.marked,
+		list = {} :: { string },
+		anchor = nil :: string?,
+	}
+	function pick.is(id: string): boolean
+		local marked = pick.marked
+		return marked ~= nil and marked:get()[id] == true
+	end
+	function pick.any(): boolean
+		local marked = pick.marked
+		return marked ~= nil and next(marked:get()) ~= nil
+	end
+	function pick.none()
+		local marked = pick.marked
+		if marked and next(marked:peek()) ~= nil then
+			marked:set({})
+		end
+	end
+	function pick.through(id: string)
+		local marked, list = pick.marked, pick.list
+		local to = table.find(list, id)
+		if not marked or not to then
+			return
+		end
+		local from = if next(marked:peek()) ~= nil then pick.anchor else selected:peek()
+		-- (Not in the list, a new chat's or one folded away: from here.)
+		local at = (if from then table.find(list, from) else nil) or to
+		pick.anchor = list[at]
+		local through: { [string]: boolean } = {}
+		for i = math.min(at, to), math.max(at, to) do
+			through[list[i]] = true
+		end
+		marked:set(through)
+	end
 	-- (Reduce motion: there at once; ds/motion.)
 	local function eased(f: () -> number, how: any): any
 		return motion.tween(ui.computed(f), how)
@@ -612,6 +664,8 @@ return ui.component(function(props: Props): Node
 		-- (Each project by its id, sessions or not: its tile as it is now.)
 		by_project: { [string]: Project },
 		by_id: { [string]: Session },
+		-- (The archived ones, apart: no place lists them but their shelf.)
+		archived: { [string]: Session },
 		pinned_ids: { string },
 		everything: { Session },
 		devices: { string },
@@ -620,7 +674,13 @@ return ui.component(function(props: Props): Node
 	local index = ui.computed(function(): Index
 		local projects = follow(props.projects, {} :: { Project })
 		local here: string? = follow(props.here, nil :: string?)
-		local out: Index = { projects = projects, project_of = {}, by_project = {}, by_id = {}, pinned_ids = {}, everything = {}, devices = {}, here = here }
+		local out: Index = { projects = projects, project_of = {}, by_project = {}, by_id = {}, archived = {}, pinned_ids = {}, everything = {}, devices = {}, here = here }
+		for _, p in follow(props.known, {} :: { Project }) do
+			out.by_project[p.id] = p
+		end
+		for _, s in follow(props.archived, {} :: { Session }) do
+			out.archived[s.id] = s
+		end
 		for _, p in projects do
 			out.by_project[p.id] = p
 			for _, s in p.sessions do
@@ -653,7 +713,9 @@ return ui.component(function(props: Props): Node
 		return out
 	end)
 	local function project_of(id: string): Project?
-		return index:get().project_of[id]
+		local all = index:get()
+		local stored = all.archived[id]
+		return all.project_of[id] or (if stored and stored.project then all.by_project[stored.project] else nil)
 	end
 	-- A project's tile as it is now (its picture chosen again): its hue,
 	-- artwork and emoji, each followed in place by the tile that shows it.
@@ -945,8 +1007,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- button): its wash stops short of it.
 		less: (number | () -> number)?,
 		selected: (() -> boolean)?,
+		-- Open, but not what's selected (others are picked out): the quiet wash.
+		current: (() -> boolean)?,
 		hovered: State<boolean>?,
-		on_click: (() -> ())?,
+		on_click: ((e: ClickEvent) -> ())?,
 		-- (What plugins place by, and what's under them: ids, never records.)
 		class: string?,
 		provide: { [string]: any }?,
@@ -1080,6 +1144,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				selected = function(): boolean
 					return is_selected ~= nil and is_selected()
 				end,
+				current = r.current,
 
 				on_click = r.on_click,
 				on_hover = function(inside: boolean)
@@ -1146,10 +1211,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local function now_of(s: Session): () -> Session
 		local last = s
 		local row = ui.computed(function(): Session
-			local cur = index:get().by_id[s.id]
-			if cur then
-				last = cur
-			end
+			local all = index:get()
+			last = all.by_id[s.id] or all.archived[s.id] or last
 			return last
 		end)
 		return function(): Session
@@ -1291,15 +1354,19 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 
 	local function session_row(s: Session, by: Organize, place: Place?): Node
 		local in_flyout = place ~= nil and place.wide == true
-		-- (On the Archived shelf: Unarchive under the pointer, no drag.)
-		local shelved = place ~= nil and place.list == "archived"
+		-- Where it stands now: whether on the Archived shelf (Unarchive under
+		-- the pointer, no drag). A row moved to another list (archived,
+		-- brought back, dragged) keeps its node.
+		local list_now = if place then place.list_now else nil
+		local on_shelf = ui.computed(function(): boolean
+			return (if list_now then list_now() elseif place then place.list else nil) == "archived"
+		end)
 		local on_pick = if place then place.on_pick else nil
 		local hovered = ui.use_state(false)
 		-- Its jump (1–9) while ⌘ is held alone and it's among the first nine
 		-- shown; nil otherwise (a flyout's and the shelf's rows have none).
-		local jumpable = not in_flyout and not shelved
 		local function jump(): number?
-			if not jumpable or not hinting() then
+			if in_flyout or not hinting() or on_shelf:get() then
 				return nil
 			end
 			return slots:get()[s.id]
@@ -1336,8 +1403,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local function in_split_now(): boolean
 			return in_split(s.id)
 		end
+		local function markable(): boolean
+			return pick.marked ~= nil and not in_flyout and not on_shelf:get()
+		end
+		local function picked(): boolean
+			return markable() and pick.is(s.id)
+		end
 		local function strong(): boolean
-			return active(s) or is_selected() or in_split(s.id)
+			return active(s) or is_selected() or in_split(s.id) or picked()
 		end
 		local function unsent(): boolean
 			return cur().unsent == true and not is_selected()
@@ -1481,7 +1554,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end),
 			}
 		end
-		local function archive_button(): Node
+		local function archive_button(shelved: boolean): Node
 			return if shelved
 				then corner("ds.sidebar.unarchive", "inbox", function()
 					if props.on_unarchive then
@@ -1494,7 +1567,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					end
 				end)
 		end
-		local function pin_button(): Node?
+		local function pin_button(shelved: boolean): Node?
 			if shelved or not props.on_pin then
 				return nil
 			end
@@ -1515,7 +1588,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end,
 			}
 		end
-		local function settle_button(settled: boolean): Node?
+		local function settle_button(shelved: boolean, settled: boolean): Node?
 			if shelved or not props.on_settle then
 				return nil
 			end
@@ -1528,21 +1601,26 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local function inboxed(): boolean
 			return props.inbox ~= nil and props.inbox:get() and not in_flyout
 		end
+		local function shelf_now(): boolean
+			return on_shelf:get()
+		end
 		local function actions(): Node
-			local slim = slim_now()
-			local parts: { any } = { shrink = 0, h = 20, items = "center", gap = "$zeron.space.hair" }
-			local pin = pin_button()
-			if pin then
-				table.insert(parts, pin)
-			end
-			local settle = if slim or inboxed() then settle_button(slim or cur().shelf == "settled") else nil
-			if not slim or not settle then
-				table.insert(parts, archive_button())
-			end
-			if settle then
-				table.insert(parts, settle)
-			end
-			return ui.row(parts)
+			return ui.presence(shelf_now, function(shelved: boolean): Node
+				local slim = slim_now()
+				local parts: { any } = { shrink = 0, h = 20, items = "center", gap = "$zeron.space.hair" }
+				local pin = pin_button(shelved)
+				if pin then
+					table.insert(parts, pin)
+				end
+				local settle = if slim or inboxed() then settle_button(shelved, slim or cur().shelf == "settled") else nil
+				if not slim or not settle then
+					table.insert(parts, archive_button(shelved))
+				end
+				if settle then
+					table.insert(parts, settle)
+				end
+				return ui.row(parts)
+			end, { shrink = 0 })
 		end
 		local STATE_ICON: { [string]: string } = {
 			working = "lucide-circle-dashed",
@@ -1944,7 +2022,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 							return ui.div {
 								x = ui.raw(4, "overhangs the corner, as the row's inset"),
 								my = ui.raw(-4, "taller than the line it stands on"),
-								archive_button(),
+								ui.presence(shelf_now, archive_button),
 							}
 						elseif kind == "none" then
 							return ui.div {}
@@ -1982,7 +2060,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					card_hide(true)
 					-- (Once the click is over, as Zeron's starts on the second
 					-- click: nothing of the press left to take focus back.)
-					if e.clicks == 2 and props.on_rename then
+					-- (⇧ held, it's picked out, however many clicks.)
+					if e.clicks == 2 and not e.shift and props.on_rename then
 						ui.after(0, function()
 							session_renaming:set(s.id)
 						end)
@@ -2017,8 +2096,20 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end
 				return compact_words()
 			end, { w_full = true, h_full = true }),
-			selected = is_selected,
-			on_click = function()
+			-- (Some picked out: they're what's selected, the one open quieter.)
+			selected = function(): boolean
+				if markable() and pick.any() then
+					return picked()
+				end
+				return is_selected()
+			end,
+			current = if pick.marked and not in_flyout then is_selected else nil,
+			on_click = function(e: ClickEvent)
+				if markable() and e.shift then
+					pick.through(s.id)
+					return
+				end
+				pick.none()
 				selected:set(s.id)
 				if on_pick then
 					on_pick()
@@ -2040,13 +2131,32 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end
 		-- Its menu, on a secondary click (the app's entries).
 		if props.menu then
-			local menu = props.menu
+			local menu, menu_many = props.menu, props.menu_many
 			body = ContextMenu {
 				label = locale.t("ds.sidebar.session_actions"),
 				ring = "$radius.md",
 				w_full = true,
 				shrink = 0,
 				items = function()
+					-- (On one of several picked out, theirs. On any other, its
+					-- own, and they're let go: what it acts on is what's lit.)
+					local marked = pick.marked
+					if markable() and marked and menu_many then
+						local all = marked:peek()
+						if all[s.id] then
+							local ids: { string } = {}
+							for _, id in pick.list do
+								if all[id] then
+									table.insert(ids, id)
+								end
+							end
+							if #ids > 1 then
+								return menu_many(ids)
+							end
+						else
+							pick.none()
+						end
+					end
 					return menu(s.id)
 				end,
 				body,
@@ -2075,7 +2185,6 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			local d = drag:get()
 			return d ~= nil and d.id == s.id
 		end
-		local list_now = (place :: Place).list_now
 		local row_ref = ui.ref()
 		return ui.div {
 			ref = row_ref,
@@ -2090,7 +2199,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end,
 			on_drag = function(): any
 				-- (Archived: it stays on its shelf.)
-				if shelved then
+				if on_shelf:peek() then
 					return nil
 				end
 				local el = row_ref:peek()
@@ -4556,6 +4665,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 			local ids: { string } = {}
 			local shown: { string } = {}
+			local picks: { string } = {}
 			for _, it in s.items do
 				-- (One leaving is gone already, for the keys.)
 				if it.kind == "session" and not it.leaving and it.place ~= "archived" then
@@ -4567,6 +4677,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					end
 					if open then
 						table.insert(shown, id)
+						-- (The Archived shelf's aren't picked.)
+						if it.list ~= "archived" then
+							table.insert(picks, id)
+						end
 					end
 				end
 			end
@@ -4584,8 +4698,24 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end
 			end
 			put(order, ids)
+			pick.list = picks
 			if props.order then
 				put(props.order, shown)
+			end
+			-- (Those picked out and no longer shown are let go.)
+			local marked = pick.marked
+			local picked = if marked then marked:peek() else {}
+			if marked and next(picked) ~= nil then
+				local kept: { [string]: boolean } = {}
+				for _, id in picks do
+					kept[id] = picked[id]
+				end
+				for id in picked do
+					if not kept[id] then
+						marked:set(kept)
+						break
+					end
+				end
 			end
 			-- (Their jumps: the first nine shown, as ⌘1–9 go.)
 			local jumps: { [string]: number } = {}

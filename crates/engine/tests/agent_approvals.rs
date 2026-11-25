@@ -246,6 +246,7 @@ fn start_child_with(core: &EngineCore, prompt: &str, access: AccessMode) {
                     env: Default::default(),
                     extra_mcp: Vec::new(),
                     code_mode: false,
+                    zeron_mcp_only: false,
                 },
                 message_id: format!("msg-{prompt}"),
             },

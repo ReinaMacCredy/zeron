@@ -298,6 +298,7 @@ fn queue_run(core: &EngineCore, chat_id: &str, command_id: &str, message_id: &st
             payload: SessionCommandPayload::Run {
                 request: RunRequest {
                     code_mode: false,
+                    zeron_mcp_only: false,
                     prompt: prompt.into(),
                     harness: None,
                     model: None,

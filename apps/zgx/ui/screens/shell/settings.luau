@@ -279,6 +279,7 @@ local TITLE_KEYS: { [string]: { string } } = {
 	providers = { "Providers", "settings.providers.title" },
 	["agent-profiles"] = { "Agent profiles", "settings.agent_profiles.title" },
 	routing = { "Routing", "settings.routing.title" },
+	mcp = { "MCP", "settings.mcp.title" },
 	devices = { "Devices", "settings.devices.title" },
 	device_hub = { "Device hub", "settings.device_hub.title" },
 	projects = { "Projects", "settings.projects.title" },
