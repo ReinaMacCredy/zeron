@@ -68,6 +68,19 @@ The menu for a file link has **Open in Zeron**, **Open with default app**, **Sho
 
 When an agent names a file in inline code, such as `SOURCES.md`, and that file exists, the name becomes a link to it.
 
+## Files in a reply
+
+When a paragraph or list in a reply only names files, those files show as one list: the folder, the number of files and **Reveal in Finder** at its head, then a line per file with its kind and size.
+
+| You do | What happens |
+| --- | --- |
+| Click a file's line | The file opens in the right pane. The line of the file the pane shows is filled. |
+| Hover a line and click the eye (**Quick look**) | The start of the file opens under the list: an HTML file as its page, a Markdown file as it reads, a CSV file as a table, a picture as itself. Its top has **Open in right pane** and a close button. |
+| Hover an HTML file's line and click the globe (**Open in browser**) | The page opens in your default app for web pages. |
+| Right-click a line | The file link menu. |
+
+A file named before it was written joins the list once it exists, and one that has gone says **No longer on this machine**. An HTML file linked in the reply's words has **Open in browser** in its link menu.
+
 ## Code and diagrams
 
 Code blocks show their language in the header and have two buttons:
