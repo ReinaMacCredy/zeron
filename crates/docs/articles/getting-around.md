@@ -14,6 +14,8 @@ The narrow strip on the left switches between Zeron's pages. Hover a button to s
 | **Skills** | The [Skills](zeron://docs/skills) page: every skill your agents find. |
 | **Pull requests** | The [Pull requests](zeron://pull-requests) board. |
 
+Between those buttons and the ones at the foot, the rail shows a mark for each chat you have open as a tab: the agent's mark, with a dot while the chat works, asks or has failed, or a short running track while it waits on background work. Hover a mark for the chat's title, click it to go there, and right-click it for the tab's menu. The marks of pinned tabs stand first, above a short rule; a split shows its chats' marks joined in one cell. New chat tabs have no mark. The arrow above the marks hides them: hidden, it shows how many there are and a dot for the most urgent one (asking, then failed, then working). Zeron remembers whether they are hidden.
+
 What needs you right now is not on the rail: questions, plans and decisions wait in the **Waiting** pill above the composer, and the pill on the right of the titlebar counts the rest, with Cmd+I for its tray. See **Needs you and running** below.
 
 Further down the rail:
@@ -65,9 +67,11 @@ On a trackpad that supports it, you feel a light tick when the swipe is far enou
 
 ## Session tabs
 
-The titlebar shows a tab for each session open on this device. A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it.
+The top of the chat card has a notch, as a browser has: the card rises to the window's top at both corners, and between them the window dips in and holds a tab for each session open on this device. **Back**, **Forward** and **New tab** sit in the left corner, and the chat's controls in the right one. With the sidebar hidden the tabs start beside the window's buttons, and with the right pane open they run to the card's edge.
 
-![Session tabs in the titlebar, with a Task's tab group and the tab menu open](getting-around-tabs.jpg)
+A tab shows the agent's mark (which changes while the agent works), the title, and a status dot that turns into a close button when you hover the tab or select it. While a chat waits on work its agent left running in the background, the dot is a prompt arrow and a short track with a pill running along it. The tab you are on has a soft fill.
+
+![Session tabs in the notch at the top of the chat card, two of them pinned, and their marks on the rail](getting-around-tabs.jpg)
 
 Selecting a session anywhere (the sidebar, the command palette, a notification) opens its tab. A chat you started opens its tab again by itself when it begins a new run, and any chat that starts waiting for your input opens its tab too.
 
@@ -76,7 +80,15 @@ Closing a tab only hides it here. The session keeps running and stays in the sid
 - Click a tab to switch to it.
 - Middle-click a tab, or click its close button, to close it.
 - Drag a tab to reorder it, or drag it onto the chat to open a split. See [Split view](zeron://docs/split-view).
-- Right-click a tab for **Close tab**, **Close others**, **Close to the right**, **Close to the left**, and **Close idle tabs**. **Close idle tabs** closes idle sessions except the one you are viewing, the sessions in a split, and drafts.
+- Right-click a tab for **Pin tab**, **Close tab**, **Close others**, **Close to the right**, **Close to the left**, and **Close idle tabs**. **Close idle tabs** closes idle sessions except the one you are viewing, the sessions in a split, and drafts.
+
+### Pinned tabs
+
+**Pin tab**, in a tab's menu or as the pin button that shows between the tick and the close button when you hover a tab, turns it into a small tile with only the agent's mark and its status dot, at the head of the tabs before a short rule. Hover the tile for the chat's title. Pinned tabs stand in the order you pinned them, and dragging reorders them among themselves.
+
+A pinned tab stays until you unpin it: it has no close button, Cmd+W and a middle-click leave it, and **Close others**, **Close to the right**, **Close to the left** and **Close idle tabs** skip it. Hover the tile and click the unpin button at its corner, or right-click it and choose **Unpin tab**, to make it a normal tab again, first among the unpinned ones.
+
+Only a tab of one chat can be pinned, and a chat dropped on a pinned tab does not join it. A pinned tab that becomes a split is unpinned. Pinning a tab is separate from **Pin chat** in the sidebar.
 
 Cmd+W closes the active tab in the right pane first, then the session tab you are on. With neither left, it closes the window. Click Zeron's Dock icon to open the window again.
 

@@ -19,6 +19,8 @@ return {
 	expanded = ui.state("shell_art_expanded", false),
 	strip = ui.ref(),
 	tab = ui.ref(),
+	edge = ui.ref(),
+	notch = ui.state("shell_art_notch", { x0 = 0, x1 = 0, left = false, right = false }),
 	px = ui.state("shell_wallpaper_px", 0.5),
 	py = ui.state("shell_wallpaper_py", 0.5),
 }
