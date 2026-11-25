@@ -1133,10 +1133,6 @@ local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion
 			return title(id)
 		end,
 		selected = active,
-		tooltip = ui.show(pinned, Tooltip { function(): string
-			return title(id)
-		end }),
-		tooltip_placement = { side = "bottom", align = "center", offset = 6 },
 		w = function(): number
 			return if riding() then slot_w:get() else fold(tab_w:get(), PIN_W)
 		end,
@@ -1264,6 +1260,10 @@ local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion
 		return pin_t:get() > 0
 	end, ui.div {
 		absolute = true,
+		tooltip = Tooltip { function(): string
+			return title(id)
+		end },
+		tooltip_placement = { side = "bottom", align = "center", offset = 6 },
 		left = 0,
 		right = 0,
 		top = 0,
