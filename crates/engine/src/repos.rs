@@ -1526,30 +1526,31 @@ impl Repos {
             .ok_or_else(|| {
                 EngineError::Other(format!("{} is not a Zeron worktree", path.display()))
             })?;
-        let fresh = format!("zeron/{}", name.to_string_lossy());
+        let branch = branch
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("zeron/{}", name.to_string_lossy()));
         let target = path.to_string_lossy();
         self.git(&["worktree", "prune"], Some(repo_path)).await?;
-        for candidate in branch.into_iter().chain([fresh.as_str()]) {
-            let local = format!("refs/heads/{candidate}");
-            if self
-                .git(
-                    &["rev-parse", "--verify", "--quiet", &local],
-                    Some(repo_path),
-                )
-                .await
-                .is_ok()
-            {
-                self.git(&["worktree", "add", &target, candidate], Some(repo_path))
-                    .await?;
-                return Ok(candidate.to_owned());
-            }
+        let local = format!("refs/heads/{branch}");
+        if self
+            .git(
+                &["rev-parse", "--verify", "--quiet", &local],
+                Some(repo_path),
+            )
+            .await
+            .is_ok()
+        {
+            self.git(&["worktree", "add", &target, &branch], Some(repo_path))
+                .await?;
+            return Ok(branch);
         }
+        // Not from a remote-tracking copy, unlike t3code: upstream's own zeron/* branches share these names.
         self.git(
-            &["worktree", "add", "-b", &fresh, &target, "HEAD"],
+            &["worktree", "add", "-b", &branch, &target, "HEAD"],
             Some(repo_path),
         )
         .await?;
-        Ok(fresh)
+        Ok(branch)
     }
 
     /// Git's built-in checkout passes `<destination>/.git` in GIT_DIR, whose
@@ -2968,8 +2969,64 @@ mod tests {
             .restore_worktree(&repo, &path, Some("zeron/renamed"))
             .await
             .unwrap();
-        assert_eq!(restored, worktree.branch);
-        assert_eq!(current(path.clone()).await, worktree.branch);
+        assert_eq!(restored, "zeron/renamed");
+        assert_eq!(current(path.clone()).await, "zeron/renamed");
+
+        let pushed = repos
+            .git(
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit-tree",
+                    "HEAD^{tree}",
+                    "-p",
+                    "HEAD",
+                    "-m",
+                    "pushed",
+                ],
+                Some(&repo),
+            )
+            .await
+            .unwrap();
+        let pushed = pushed.trim();
+        repos
+            .git(
+                &["update-ref", "refs/remotes/origin/zeron/renamed", pushed],
+                Some(&repo),
+            )
+            .await
+            .unwrap();
+        repos
+            .git(
+                &["worktree", "remove", "--force", &worktree.path],
+                Some(&repo),
+            )
+            .await
+            .unwrap();
+        repos
+            .git(&["branch", "-D", "zeron/renamed"], Some(&repo))
+            .await
+            .unwrap();
+        repos
+            .restore_worktree(&repo, &path, Some("zeron/renamed"))
+            .await
+            .unwrap();
+        let head = repos
+            .git(&["rev-parse", "HEAD"], Some(&path))
+            .await
+            .unwrap();
+        let main = repos
+            .git(&["rev-parse", "HEAD"], Some(&repo))
+            .await
+            .unwrap();
+        assert_ne!(
+            head.trim(),
+            pushed,
+            "a same-named remote branch is not reused"
+        );
+        assert_eq!(head, main);
 
         let outside = tmp.path().join("elsewhere");
         assert!(repos.restore_worktree(&repo, &outside, None).await.is_err());

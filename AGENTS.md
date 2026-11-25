@@ -80,7 +80,10 @@ in the same hand-off, without waiting to be asked:
 4. Green: `git worktree remove --force .maestro/worktree/<slug>` and
    `git branch -d <branch>`. Quit your Dev app and move its
    `ZERON_DEV_ROOT` folder to `~/.Trash` (the dcg guard blocks recursive
-   deletes; `mv` is the sanctioned path).
+   deletes; `mv` is the sanctioned path). A worktree Zeron made for your
+   chat (under `~/.zeron/worktrees/`) stays, with its branch: Zeron
+   recreates it at the chat's next turn if it is gone, and its cleanup is
+   Reina's call.
 5. Report the merge commit, the check you ran, and that the running app still
    carries the old code until Reina rebuilds.
 

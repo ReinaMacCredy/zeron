@@ -4,7 +4,7 @@
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | 日本語 | [Español](README.es.md)*
 
-![Zeron デスクトップアプリ](docs/media/readme/app-screenshot.jpg)
+![Zeron デスクトップアプリ](docs/media/readme/app-screenshot.png)
 
 ## デスクトップアプリ
 
