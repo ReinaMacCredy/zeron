@@ -613,11 +613,6 @@ local function settings_entry(): Node
 	}
 end
 
-local function tab_marks(): Node
-	local marks: any = boundary.load("@app/screens/shell/rail_tabs")
-	return if marks then marks.Zone() else ui.div { grow = 1 }
-end
-
 M.Rail = ui.component(function(): Node
 	-- Voice joins above Help.
 	local entries: { any } = {
@@ -625,7 +620,7 @@ M.Rail = ui.component(function(): Node
 		bots(),
 		search(),
 		more(),
-		tab_marks(),
+		ui.div { grow = 1 },
 		help(),
 		settings_entry(),
 		update_entry(),

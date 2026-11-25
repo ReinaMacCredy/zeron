@@ -615,92 +615,8 @@ function M.set_order(keys: { string })
 	trees:set(out)
 end
 
-local pinned = ui.persist("shell_session_tabs_pinned", {} :: { string })
-M.pinned = pinned
-
-function M.is_pinned(key: string): boolean
-	return table.find(pinned:get(), key) ~= nil
-end
-
-function M.can_pin(key: string): boolean
-	local t = tab_with_key(trees:peek(), key)
-	return t ~= nil and #leaves(t) == 1
-end
-
-function M.pin(key: string, on: boolean)
-	local was = table.find(pinned:peek(), key) ~= nil
-	if was == on or (on and not M.can_pin(key)) then
-		return
-	end
-	local marks: { string } = {}
-	for _, k in pinned:peek() do
-		if k ~= key then
-			table.insert(marks, k)
-		end
-	end
-	local head: { Node }, tail: { Node } = {}, {}
-	local moved: Node? = nil
-	for _, t in trees:peek() do
-		local k = key_of(t)
-		if k == key then
-			moved = t
-		elseif table.find(marks, k) then
-			table.insert(head, t)
-		else
-			table.insert(tail, t)
-		end
-	end
-	if not moved then
-		return
-	end
-	if on then
-		table.insert(marks, key)
-	end
-	table.insert(head, moved)
-	table.move(tail, 1, #tail, #head + 1, head)
-	ui.batch(function()
-		pinned:set(marks)
-		trees:set(head)
-	end)
-end
-
-ui.effect(function()
-	local list = trees:get()
-	local marks = pinned:get()
-	if #marks == 0 then
-		return
-	end
-	local kept: { string } = {}
-	local head: { Node }, tail: { Node } = {}, {}
-	for _, t in list do
-		local key = key_of(t)
-		if table.find(marks, key) and #leaves(t) == 1 then
-			table.insert(kept, key)
-			table.insert(head, t)
-		else
-			table.insert(tail, t)
-		end
-	end
-	local ordered = true
-	for i, t in head do
-		ordered = ordered and list[i] == t
-	end
-	ui.batch(function()
-		if #kept ~= #marks then
-			pinned:set(kept)
-		end
-		if not ordered then
-			table.move(tail, 1, #tail, #head + 1, head)
-			trees:set(head)
-		end
-	end)
-end)
-
--- A tab moved to where another stands: among the pinned, or among the rest.
+-- A tab moved to where another stands.
 function M.move_tab(key: string, onto: string)
-	if M.is_pinned(key) ~= M.is_pinned(onto) then
-		return
-	end
 	local list = table.clone(trees:peek())
 	local from, to
 	for i, t in list do
@@ -1068,7 +984,7 @@ end
 -- room there.
 function M.can_join(id: string, key: string): boolean
 	local t = tab_with_key(trees:peek(), key)
-	return t ~= nil and not holds(t, id) and #leaves(t) < M.MAX and table.find(pinned:peek(), key) == nil
+	return t ~= nil and not holds(t, id) and #leaves(t) < M.MAX
 end
 
 -- A chat dragged onto a tab: at the end of it, and out of the tab it was in, which

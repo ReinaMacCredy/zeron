@@ -4390,9 +4390,6 @@
     },
     "rail": {
       "label": "App rail",
-      "tabs": "Open chats",
-      "hide_tabs": "Hide open chats",
-      "show_tabs": "{n, plural, one {Show # open chat} other {Show # open chats}}",
       "with_key": "{label} · {key}",
       "close_settings": "Close settings",
       "help": "Help",
@@ -4423,8 +4420,6 @@
       "close_right": "Close to the right",
       "close_left": "Close to the left",
       "close_idle": "Close idle tabs",
-      "pin": "Pin tab",
-      "unpin": "Unpin tab",
       "new_session": "New session",
       "tree": {
         "ahead": "{n, plural, one {# commit not in {base}} other {# commits not in {base}}}",
