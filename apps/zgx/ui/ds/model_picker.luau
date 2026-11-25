@@ -1519,8 +1519,10 @@ return ui.component(function(props: Props): Node
 			change()
 			local after = if props.options then props.options:peek() else {}
 			local w, a = pair()
+			-- A chat that never ran has nothing to restart.
+			local ran = props.context_tokens ~= nil and props.context_tokens() ~= nil
 			if before[w.id] ~= after[w.id] or before[a.id] ~= after[a.id] then
-				notice:set("restart")
+				notice:set(if ran then "restart" else nil)
 			elseif before[ASK_AT] ~= after[ASK_AT] then
 				notice:set("live")
 				ui.after(2200, function()
@@ -1767,20 +1769,16 @@ return ui.component(function(props: Props): Node
 				}),
 			},
 			-- How far the agent may carry the chat past the track: Off keeps today's one number.
-			ui.show(long_on, ui.row {
+			ui.show(long_on, ui.column {
 				id = "model-picker-extend",
 				w_full = true,
-				h = 20,
 				mt = "$space.1",
-				pl = "$zeron.space.hair",
-				items = "center",
-				justify = "between",
-				gap = "$space.1",
+				px = "$zeron.space.hair",
+				gap = "$zeron.space.tight",
 				text_size = "$font.size.xs",
 				color = "$text.tertiary",
-				ui.text { locale.t("ds.model_picker.extend_to"), min_w = 0, truncate = true },
+				ui.text { locale.t("ds.model_picker.extend_to"), truncate = true },
 				ui.row {
-					shrink = 0,
 					gap = "$zeron.space.tight",
 					ui.each(ui.computed(limit_chips), function(c: { key: string, id: string?, label: string }): Node
 						local function on(): boolean
