@@ -544,6 +544,7 @@ test("a plan waiting on the chat shown is in its own Waiting pill, and Approve a
 	pop(app)
 	expect(app:text("#pills-waiting-count")).to_be("1")
 	expect(app:text("#pills-waiting-plan-here")).to_be("Approve the plan")
+	expect(app:has("#pills-waiting-fresh")).to_be(false)
 	app:click("#pills-waiting")
 	pop(app)
 	app:click("#pills-waiting-approve")
