@@ -1544,22 +1544,9 @@ impl Repos {
                 .await?;
             return Ok(branch);
         }
-        let pushed = self
-            .git(
-                &[
-                    "for-each-ref",
-                    "--count=1",
-                    "--format=%(refname)",
-                    &format!("refs/remotes/*/{branch}"),
-                ],
-                Some(repo_path),
-            )
-            .await
-            .map(|out| out.trim().to_owned())
-            .unwrap_or_default();
-        let base = if pushed.is_empty() { "HEAD" } else { &pushed };
+        // Not from a remote-tracking copy, unlike t3code: upstream's own zeron/* branches share these names.
         self.git(
-            &["worktree", "add", "-b", &branch, &target, base],
+            &["worktree", "add", "-b", &branch, &target, "HEAD"],
             Some(repo_path),
         )
         .await?;
@@ -3030,11 +3017,16 @@ mod tests {
             .git(&["rev-parse", "HEAD"], Some(&path))
             .await
             .unwrap();
-        assert_eq!(
+        let main = repos
+            .git(&["rev-parse", "HEAD"], Some(&repo))
+            .await
+            .unwrap();
+        assert_ne!(
             head.trim(),
             pushed,
-            "a pushed branch comes back from its remote"
+            "a same-named remote branch is not reused"
         );
+        assert_eq!(head, main);
 
         let outside = tmp.path().join("elsewhere");
         assert!(repos.restore_worktree(&repo, &outside, None).await.is_err());
