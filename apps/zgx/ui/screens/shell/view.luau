@@ -30,7 +30,6 @@ local M = {}
 M.rail = false
 
 M.collapsed = ui.persist("shell_collapsed", false)
-M.sidebar_hover = ui.persist("shell_sidebar_hover", true)
 -- Each session's panel, open (by session id; absent, closed).
 M.panels = ui.state("shell_panel_open", {} :: { [string]: boolean })
 -- Each session's panel, expanded over its chat (by session id).

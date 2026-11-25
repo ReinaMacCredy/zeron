@@ -2255,10 +2255,6 @@
           "description": "Adds a pronounced horizontal display-line texture."
         }
       },
-      "sidebar_hover": {
-        "label": "Reveal sidebar on hover",
-        "description": "Show the hidden sidebar when the pointer rests at the window's left edge."
-      },
       "pause_motion": {
         "label": "Pause animations in background",
         "description": "Hold animations still while Zeron isn't the focused window.",

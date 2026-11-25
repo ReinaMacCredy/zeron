@@ -2255,10 +2255,6 @@
           "description": "添加明显的水平显示扫描线纹理。"
         }
       },
-      "sidebar_hover": {
-        "label": "悬停显示侧边栏",
-        "description": "指针停在窗口左边缘时显示隐藏的侧边栏。"
-      },
       "pause_motion": {
         "label": "后台时暂停动画",
         "description": "当 Zeron 不是焦点窗口时，让动画保持静止。",

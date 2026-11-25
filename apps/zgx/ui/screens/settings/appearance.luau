@@ -243,14 +243,6 @@ local function material_group(): Node
 			return frosted_dark() and material.frost_dim:get()
 		end, slider_row("frost_brightness", "settings.appearance.frost.brightness.label", material.frost_brightness, { min = material.FROST_BRIGHTNESS_MIN, max = 1, step = 0.01, say = percent })),
 		ds.Settings.Rule(),
-		-- (A template without the peek hasn't the setting.)
-		if require("@app/screens/shell/view").sidebar_hover
-			then row("sidebar_hover", {
-				label = ui.t("settings.appearance.sidebar_hover.label"),
-				description = ui.t("settings.appearance.sidebar_hover.description"),
-				control = ds.Switch { value = require("@app/screens/shell/view").sidebar_hover :: any, label = ui.t("settings.appearance.sidebar_hover.label") },
-			})
-			else nil,
 		row("inset", {
 			label = ui.t("settings.appearance.inset.label"),
 			description = ui.t("settings.appearance.inset.description"),

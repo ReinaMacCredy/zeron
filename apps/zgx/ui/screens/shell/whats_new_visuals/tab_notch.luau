@@ -27,18 +27,22 @@ local function build(clock: K.Clock): Node
 	local function none(): number
 		return 0
 	end
-	local function tab(title: string, ink: string, x: () -> number, w: () -> number, fill: () -> number, named: () -> number): Node
+	local function tab(title: string, ink: string, x: () -> number, w: () -> number, fill: () -> number, named: () -> number, rises: boolean?): Node
 		return ui.row {
 			absolute = true,
 			top = (BAR - TAB_H) / 2,
 			left = 0,
 			x = x,
 			w = w,
-			h = TAB_H,
+			h = if rises then BAR - (BAR - TAB_H) / 2 else TAB_H,
+			pb = if rises then K.raw((BAR - TAB_H) / 2) else nil,
+			bg = if rises then PAGE else nil,
 			px = K.raw(5.5),
 			items = "center",
 			overflow = "hidden",
-			rounded = K.raw(5),
+			rounded = if rises then nil else K.raw(5),
+			rounded_tl = if rises then K.raw(5) else nil,
+			rounded_tr = if rises then K.raw(5) else nil,
 			wash(fill, K.raw(5)),
 			dot(ink),
 			ui.row { absolute = true, left = 17, top = 0, bottom = 0, items = "center", opacity = named, K.text(9.5, "$text.primary", title) },
@@ -92,7 +96,7 @@ local function build(clock: K.Clock): Node
 					return lerp(0, rest_x, pin())
 				end, function(): number
 					return TAB_W
-				end, one, one),
+				end, none, one, true),
 				tab("Login", "$warning", function(): number
 					return lerp(TAB_W + GAP, 0, pin())
 				end, function(): number

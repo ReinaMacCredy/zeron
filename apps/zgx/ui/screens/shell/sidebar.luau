@@ -30,12 +30,10 @@ local route = require("@app/screens/shell/route")
 local rail = require("@app/screens/shell/rail")
 local view = require("@app/screens/shell/view")
 local fit = require("@app/screens/shell/fit")
-local motion = require("@ds/motion")
 local boundary = require("@app/screens/shell/boundary")
 local top_bar = require("@app/screens/shell/top_bar")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
-local Glass = require("@ds/glass")
 local activity = require("@app/screens/shell/activity")
 
 export type Props = {
@@ -1764,9 +1762,6 @@ M.Sidebar = ui.component(function(props: Props): Node
 			return locale.s("ds.sidebar.search")
 		end,
 		head = head,
-		peek = if props.island then nil else function(): boolean
-			return M.peek_mounted:get()
-		end,
 		can_place = can_place,
 		dim = if props.island then nil else function(): string?
 			local c = route.chat:get()
@@ -1877,56 +1872,16 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if props.island then
 		return bar
 	end
-	local function gap_now(): number
-		return if fit.current:get().sidebar then 5 else 0
-	end
 	return ui.div {
 		id = "shell-sidebar",
 		hook = "shell.sidebar",
 		h_full = true,
 		shrink = 0,
 		relative = true,
-		x = function(): number
-			return M.peek_x(gap_now())
-		end,
-		on_hover = function(inside: boolean)
-			M.peek_over(inside)
-		end,
-		on_press = function()
-			M.peek_press(true)
-		end,
-		on_release = function()
-			M.peek_press(false)
-		end,
-		on_key = function(): boolean?
-			M.peek_key()
-			return nil
-		end,
 		-- (Gone only with the column's last 5 points, so the card's left edge stands still as it folds.)
 		pl = function(): number
 			return ui.raw(math.min(5, view.sidebar_shown:get()), "the window's gap before its card")
 		end,
-		ui.show(function(): boolean
-			return M.peek_mounted:get()
-		end, ui.div {
-			absolute = true,
-			left = 0,
-			top = 0,
-			bottom = 0,
-			w = function(): number
-				return M.peek_w() + gap_now() + 12
-			end,
-			ui.div {
-				absolute = true,
-				left = function(): number
-					return gap_now() - 1
-				end,
-				top = 42,
-				bottom = 8,
-				w = M.peek_w,
-				Glass.Panel { kind = "menu", id = "sidebar-peek-panel", w_full = true, h_full = true, pointer_events = "none" },
-			},
-		}),
 		-- (That gap's top moves the window, as the bar beside it does.)
 		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		-- (Kept under the Bots panel, unseen: the column's width and its fold are the list's.)
@@ -1941,7 +1896,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 			bar,
 		},
 		ui.show(function(): boolean
-			return bots.mode:get() and not M.peek_mounted:get()
+			return bots.mode:get()
 		end, ui.div {
 			id = "shell-bots-panel",
 			absolute = true,
@@ -1985,7 +1940,7 @@ function M.rename(id: string)
 		end
 	end
 	if listed then
-		if view.collapsed:peek() and not M.peek_mounted:peek() then
+		if view.collapsed:peek() then
 			fit.toggle_sidebar()
 		end
 		renaming_row:set(id)
@@ -2128,225 +2083,6 @@ if not shelves_folded:peek() then
 	local f = table.clone(shared.folded:peek())
 	f["group:inbox:working"], f["group:inbox:settled"] = true, true
 	shared.folded:set(f)
-end
-
-local OPEN_MS, CLOSE_MS = 50, 80
-local SLIDE_IN = { duration = 130, ease = "outExpo" }
-local SLIDE_OUT = { duration = 90, ease = motion.settling(78, 90) }
-local peek_open = ui.state("shell_sidebar_peek", false)
-local peek_t = ui.state("shell_sidebar_peek_t", 0)
-local peek_edge = ui.state("shell_sidebar_peek_edge", false)
-local peek_rim = ui.state("shell_sidebar_peek_rim", false)
-local peek_inside = ui.state("shell_sidebar_peek_inside", false)
-local peek_handoff = ui.state("shell_sidebar_peek_handoff", false)
-local peek_pressed = ui.state("shell_sidebar_peek_pressed", false)
-local edge_held = ui.shared("sidebar.edge_held", false)
-local peek_keys = ui.state("shell_sidebar_peek_keys", false)
-local peek_touched = false
-local peek_left = ui.state("shell_sidebar_peek_left", 0)
-local menu_held = require("@app/ds/menu").held
-local split_dragging = ui.shared("split.dragging", false)
-local peek_suppressed = ui.state("shell_sidebar_peek_suppressed", false)
-local peek_pending: boolean? = nil
-local peek_cancel: (() -> ())? = nil
-local peek_going: any = nil
-M.peek_mounted = ui.computed(function(): boolean
-	return peek_open:get() or peek_t:get() > 0 or peek_handoff:get()
-end)
-function M.peek_w(): number
-	local limit = fit.sidebar_room:get()
-	return math.min(shared.width:get(), limit) + 2
-end
-function M.peek_x(gap: number): number
-	if not M.peek_mounted:get() then
-		return 0
-	end
-	if peek_handoff:get() then
-		return peek_left:get()
-	end
-	local w = M.peek_w()
-	return (8 + w) * peek_t:get() - w - gap + 1
-end
-function M.peek_press(down: boolean)
-	if peek_open:peek() and down then
-		peek_touched = true
-		peek_keys:set(false)
-	end
-	if peek_pressed:peek() ~= (down and peek_open:peek()) then
-		peek_pressed:set(down and peek_open:peek())
-	end
-end
-function M.peek_key()
-	if peek_open:peek() then
-		peek_touched = true
-		if not peek_keys:peek() then
-			peek_keys:set(true)
-		end
-	end
-end
--- (A press anywhere: zgx tells a script of no focus leaving a subtree, so the keys' hold ends here.)
-function M.peek_press_outside()
-	if peek_keys:peek() then
-		peek_keys:set(false)
-	end
-end
-function M.peek_over(inside: boolean)
-	if peek_inside:peek() ~= inside then
-		peek_inside:set(inside)
-	end
-end
-local function peek_set(on: boolean)
-	if peek_open:peek() == on then
-		return
-	end
-	peek_open:set(on)
-	if peek_going then
-		peek_going:cancel()
-	end
-	local slide = if on then SLIDE_IN else SLIDE_OUT
-	peek_going = anime.animate(peek_t, motion.params({ value = if on then 1 else 0, duration = slide.duration, ease = slide.ease }))
-end
--- (Nil on v2, whose view has no peek.)
-local hover_setting = (view :: any).sidebar_hover
-local function peek_enabled(): boolean
-	local c = route.current:get()
-	return hover_setting ~= nil
-		and hover_setting:get()
-		and view.collapsed:get()
-		and c.name ~= "settings"
-		and ui.window.active:get() ~= false
-		and not view.palette:get()
-		and not delete_open:get()
-		and not rename_open:get()
-		and not project_remove_open:get()
-end
-local function peek_held(): boolean
-	return menu_held:get() > 0 or renaming_row:get() ~= nil or peek_keys:get() or peek_pressed:get()
-end
-local function peek_wanted(): boolean
-	if not peek_enabled() or peek_suppressed:get() then
-		return false
-	end
-	local inside, edge = peek_inside:get(), peek_edge:get() or peek_rim:get()
-	if peek_open:get() then
-		return inside or edge or rail.over:get() or peek_held() or split_dragging:get()
-	end
-	return not split_dragging:get() and (edge or (peek_t:get() > 0 and inside))
-end
-ui.effect(function()
-	if not peek_edge:get() and not peek_rim:get() and not peek_inside:get() and not edge_held:get() and peek_suppressed:peek() then
-		peek_suppressed:set(false)
-	end
-	if peek_handoff:get() then
-		return
-	end
-	local wanted = peek_wanted()
-	local open = peek_open:peek()
-	if not peek_enabled() then
-		if peek_cancel then
-			peek_cancel()
-			peek_cancel, peek_pending = nil, nil
-		end
-		peek_set(false)
-		return
-	end
-	if wanted == open then
-		if peek_cancel then
-			peek_cancel()
-			peek_cancel, peek_pending = nil, nil
-		end
-		return
-	end
-	if wanted and peek_t:peek() > 0 then
-		if peek_cancel then
-			peek_cancel()
-			peek_cancel, peek_pending = nil, nil
-		end
-		peek_set(true)
-		return
-	end
-	if peek_pending == wanted then
-		return
-	end
-	if peek_cancel then
-		peek_cancel()
-	end
-	peek_pending = wanted
-	peek_cancel = ui.after(if wanted then OPEN_MS else CLOSE_MS, function()
-		peek_cancel, peek_pending = nil, nil
-		if peek_wanted() == wanted then
-			peek_set(wanted)
-		end
-	end)
-end)
-local peek_was = view.collapsed:peek()
-ui.effect(function()
-	local shut = view.collapsed:get()
-	if shut == peek_was then
-		return
-	end
-	peek_was = shut
-	peek_suppressed:set(peek_edge:peek() or peek_rim:peek() or peek_inside:peek() or edge_held:peek())
-	if not shut and peek_t:peek() > 0 then
-		local gap = if fit.current:peek().sidebar then 5 else 0
-		local w = M.peek_w()
-		peek_left:set((8 + w) * peek_t:peek() - w - gap + 1)
-		peek_handoff:set(true)
-		anime.animate(peek_left, motion.params({
-			value = 0,
-			duration = motion.sidebar.duration,
-			onComplete = function()
-				peek_open:set(false)
-				peek_t:set(0)
-				peek_handoff:set(false)
-			end,
-		}))
-	end
-end)
-function M.peek_dismiss(): boolean
-	if not peek_open:peek() or menu_held:peek() > 0 or peek_handoff:peek() then
-		return false
-	end
-	peek_suppressed:set(true)
-	peek_keys:set(false)
-	peek_set(false)
-	if peek_touched then
-		peek_touched = false
-		draft_key().focus:add(1)
-	end
-	return true
-end
-local function peek_strip(id: string, left: number, shut_w: number, open_w: number, over: State<boolean>): Node
-	return ui.div {
-		id = id,
-		absolute = true,
-		left = left,
-		top = 0,
-		bottom = 0,
-		w = function(): number
-			return if peek_open:get() then open_w else shut_w
-		end,
-		hidden = function(): boolean
-			return not hover_setting or not hover_setting:get() or not view.collapsed:get() or route.current:get().name == "settings"
-		end,
-		on_hover = function(inside: boolean)
-			if over:peek() ~= inside then
-				over:set(inside)
-			end
-		end,
-	}
-end
-function M.PeekEdge(): Node
-	return ui.div {
-		absolute = true,
-		left = 0,
-		top = 42,
-		bottom = 0,
-		w = rail.W + 18,
-		pointer_events = "none",
-		peek_strip("sidebar-peek-rim", 0, 5, 0, peek_rim),
-		peek_strip("sidebar-peek-edge", rail.W, 18, 9, peek_edge),
-	}
 end
 
 -- Its width, kept: the settings window's list shares it (screens/shell/
