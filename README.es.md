@@ -4,7 +4,7 @@ Controla tus agentes de programación (Claude Code, Codex, Cursor, OpenCode, Dev
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | Español*
 
-![App de escritorio de Zeron](docs/media/readme/app-screenshot.jpg)
+![App de escritorio de Zeron](docs/media/readme/app-screenshot.png)
 
 ## App de escritorio
 

@@ -6,7 +6,7 @@ Control your coding agents (Claude Code, Codex, Cursor, OpenCode, Devin, Grok, H
 
 > This is ReinaMacCredy's fork of [zeronsh/zeron](https://github.com/zeronsh/zeron) (MIT), kept in sync with upstream and carrying its own features. Its builds update from this repository's releases, not from upstream.
 
-![Zeron desktop app](docs/media/readme/app-screenshot.jpg)
+![Zeron desktop app](docs/media/readme/app-screenshot.png)
 
 ## Desktop app
 
