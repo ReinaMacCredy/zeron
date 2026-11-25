@@ -402,7 +402,7 @@ M.Row = ui.component(function(props: RowProps): Node
 		end
 		local function page(): boolean
 			local f = file_of(target)
-			return files.browse ~= nil and f ~= nil and not f.outside and not gone(target) and PAGE[ext_of(f.name)] == true and files.here()
+			return files.browse ~= nil and f ~= nil and not gone(target) and PAGE[ext_of(f.name)] == true and files.here()
 		end
 		local function acting(): boolean
 			return not gone(target) and (over:get() or focused:get() or peeked() or showing())

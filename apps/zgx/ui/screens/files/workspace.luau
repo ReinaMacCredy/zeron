@@ -579,7 +579,7 @@ function M.picture(w: Workspace, document: string, src: string): string?
 	w.revision:get()
 	local id = w.model.by_path[path]
 	if w.here:get() and w.target.root and id and not w.model.nodes[id].dir then
-		return `{w.target.root}/{path}`
+		return absolute(w, path)
 	end
 	local key = `{w.key}\0{path}`
 	local have = pictures:get()[key]
@@ -637,11 +637,17 @@ local function bump(w: Workspace)
 	w.revision:set(w.revision:peek() + 1)
 end
 
+local function on_disk(w: Workspace): string?
+	local root = w.target.root
+	return if root and w.here:peek() and string.sub(root, 1, 1) == "~" then api.on_disk(root) else root
+end
+
 local function absolute(w: Workspace, path: string): string?
 	if string.sub(path, 1, 1) == "/" then
 		return path
 	end
-	return if w.target.root then `{w.target.root}/{path}` else nil
+	local root = on_disk(w)
+	return if root then `{root}/{path}` else nil
 end
 
 -- A folder's entries, read again ("" the top). Readings of one folder never
@@ -1212,22 +1218,23 @@ end
 
 -- A path the viewer or tree gives (absolute under the root, or relative),
 -- relative to the root.
-local function relative(w: Workspace, path: string): string
-	local root = w.target.root
-	if root and string.sub(path, 1, #root + 1) == root .. "/" then
-		return string.sub(path, #root + 2)
+function M.in_root(w: Workspace, path: string): string
+	for _, root in { on_disk(w) or "", w.target.root or "" } do
+		if root ~= "" and string.sub(path, 1, #root + 1) == root .. "/" then
+			return string.sub(path, #root + 2)
+		end
 	end
 	return path
 end
 
 function M.reveal(w: Workspace, path: string)
-	api.reveal(w.target, relative(w, path)):after(function() end, function(err: any)
+	api.reveal(w.target, M.in_root(w, path)):after(function() end, function(err: any)
 		w.problem:set(trouble("files.workspace.not_revealed", path, err))
 	end)
 end
 
 function M.open_external(w: Workspace, path: string)
-	api.open_external(w.target, relative(w, path)):after(function() end, function(err: any)
+	api.open_external(w.target, M.in_root(w, path)):after(function() end, function(err: any)
 		w.problem:set(trouble("files.workspace.not_opened", path, err))
 	end)
 end
