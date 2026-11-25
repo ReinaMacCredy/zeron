@@ -5,6 +5,7 @@ local ContextMenu = require("@ds/context_menu")
 local SessionRow = require("@ds/session_row")
 local motion = require("@ds/motion")
 local TabStrip = require("@ds/tab_strip")
+local Tooltip = require("@ds/tooltip")
 local status = require("@ds/status")
 local look = require("@app/screens/shell/project_look")
 local route = require("@app/screens/shell/route")
@@ -12,6 +13,7 @@ local sessions = require("@account/sessions")
 local splits = require("@app/screens/shell/split")
 local frame = require("@app/screens/shell/frame")
 local art = require("@app/screens/shell/art")
+local top_bar = require("@app/screens/shell/top_bar")
 local chat_shared = require("@app/screens/chat/shared")
 local AgentFan = require("@ds/agent_fan")
 local bots = require("@app/screens/bots/store")
@@ -20,13 +22,17 @@ require("@app/screens/shell/tab_rules")
 
 local M = {}
 
-local TAB_H, SLOT, TILE = 36, 24, 20
+local TAB_H, SLOT, TILE = 30, 24, 20
 local MARK = 14
-local TAB_MAX, TAB_MIN, TAB_GAP = 216, 144, 4
+local TAB_MAX, TAB_MIN, TAB_GAP = 176, 128, 4
+local PIN_W, PIN_RULE, PIN_MARK = 36, 9, 15
+local TAB_RADIUS = ui.raw(10, "a tab's corner in the notch")
 local TITLE_SIZE = ui.raw(12, "Zeron's tab title, at any text size")
 local BAR, LIFT = 42, 30
-local DROP = BAR - TAB_H
-local LINE = BAR / 2
+local DROP = (BAR - TAB_H) / 2
+local PIN_MS = 240
+local WALL_SWEEP = 280
+local NO_WALL = 100000
 local THUMB_W, THUMB_H = 150, 92
 local LIFT_MORPH_MS = 160
 local SLIDE = { duration = 150, ease = "out(3)" }
@@ -162,9 +168,23 @@ local rider_hover = ui.state("shell_session_tab_rider_hover", false)
 local landed = false
 -- (Frozen for a drag, or the strip would shrink as the slot closes.)
 local tab_w = ui.state("shell_session_tab_w", TAB_MAX)
-local SHADE_PARAMS = { "layerParam0", "layerParam1", "layerParam2", "layerParam3", "layerParam4", "layerParam5", "layerParam6", "layerParam8", "layerParam9" }
-local FOOT = frame.TAB_FOOT
-local PAD = FOOT
+local SHADE_PARAMS = { "layerParam0", "layerParam1", "layerParam2", "layerParam3" }
+local PAD = 8
+
+local pins = ui.computed(function(): number
+	local n = 0
+	for _, key in shown:get() do
+		if splits.is_pinned(key) then
+			n += 1
+		end
+	end
+	return n
+end)
+M.pins = pins
+
+local function width_of(key: string): number
+	return if splits.is_pinned(key) then PIN_W else tab_w:get()
+end
 
 -- A tab's panes, as many as show (`STACK`), the one focused last first: the ones
 -- focused in that order, then the rest as they stand in the split.
@@ -249,6 +269,9 @@ local function go_to(key: string?)
 end
 
 local function close(key: string)
+	if splits.is_pinned(key) then
+		return
+	end
 	local was_showing = route.current:peek().name == "session" and splits.current_key() == key
 	local next_key = if was_showing then neighbour(key) else nil
 	splits.close_tabs({ key })
@@ -321,7 +344,7 @@ local function others(id: string, side: string?): { string }
 	local me = table.find(list, id) or 0
 	local out: { string } = {}
 	for i, other in list do
-		if other ~= id and (side == nil or (side == "left" and i < me) or (side == "right" and i > me)) then
+		if other ~= id and not splits.is_pinned(other) and (side == nil or (side == "left" and i < me) or (side == "right" and i > me)) then
 			table.insert(out, other)
 		end
 	end
@@ -334,7 +357,7 @@ local function idle_tabs(): { string }
 	for _, key in shown:peek() do
 		local panes = splits.panes(key)
 		local c = rows:peek()[panes[1] or ""]
-		if key ~= showing and #panes == 1 and c and not c.status then
+		if key ~= showing and #panes == 1 and c and not c.status and not splits.is_pinned(key) then
 			table.insert(out, key)
 		end
 	end
@@ -609,6 +632,46 @@ local function lead(id: string, hovered: any): Node
 	})
 end
 
+local function state_mark(kind: string, size: number, compact: boolean?): Node
+	if kind ~= "waiting" then
+		return status.StatusDot { kind = kind :: any, size = size }
+	end
+	local track = if compact then size + 2 else 9
+	local run = ui.div {
+		relative = true,
+		w = ui.raw(track, "a run's track"),
+		h = ui.raw(2, "a run's track"),
+		shrink = 0,
+		rounded = "$radius.full",
+		overflow = "hidden",
+		ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0, bg = "$zeron.status.working", opacity = 0.28 },
+		status.looping({
+			absolute = true,
+			left = 0,
+			top = 0,
+			bottom = 0,
+			w = ui.raw(4, "what runs along the track"),
+			rounded = "$radius.full",
+			bg = "$zeron.status.working",
+		}, function(el: any): any
+			return anime.animate(el, { x = { -4, track }, duration = 1100, ease = "inOut(2)", loop = true })
+		end, 1100),
+	}
+	if compact then
+		return run
+	end
+	return ui.row {
+		shrink = 0,
+		items = "end",
+		gap = ui.raw(1, "the prompt and its run"),
+		pb = ui.raw(1, "the run on the prompt's line"),
+		color = "$zeron.status.working",
+		ds.Icon { name = "chevron-right", size = 10 },
+		run,
+	}
+end
+M.state_mark = state_mark
+
 local function pen(shows: () -> boolean): Node
 	return ui.show(shows, ui.div { shrink = 0, color = "$warning", ds.Icon { name = "pen", size = 13 } })
 end
@@ -659,6 +722,25 @@ local function settle_button(id: string, hovered: any): Node
 	end, { shrink = 0 }))
 end
 
+local function pin_button(id: string, hovered: any): Node
+	return ui.show(function(): boolean
+		return hovered:get() and #splits.panes(id) == 1
+	end, ds.IconButton {
+		id = `session-tab-{id}-pin`,
+		label = ui.t("shell.tabs.pin"),
+		tooltip = false,
+		size = "sm",
+		tone = "quiet",
+		w = SLOT,
+		h = SLOT,
+		rounded = "$radius.sm",
+		on_click = function()
+			splits.pin(id, true)
+		end,
+		ds.Icon { name = "pin", size = 14 },
+	})
+end
+
 local function corner(id: string, hovered: any, active: () -> boolean): Node
 	return ui.row {
 		w = SLOT,
@@ -688,7 +770,7 @@ local function corner(id: string, hovered: any, active: () -> boolean): Node
 			end
 			local dot = string.match(which, "^dot:(.+)$")
 			if dot then
-				return ui.div { id = `session-tab-{id}-state`, status.StatusDot { kind = dot :: any, size = 6 } }
+				return ui.div { id = `session-tab-{id}-state`, state_mark(dot, 6) }
 			end
 			return ui.div { id = `session-tab-{id}-state`, SessionRow.state(which :: any) }
 		end, { shrink = 0 }),
@@ -759,6 +841,7 @@ local function face_row(id: string, hovered: any, active: () -> boolean): { any 
 			tree_badge(id),
 		},
 		settle_button(id, hovered),
+		pin_button(id, hovered),
 		corner(id, hovered, active),
 	}
 end
@@ -772,43 +855,16 @@ local function hover(key: string, inside: boolean)
 	end
 end
 
-local function before(key: string): string?
-	local list = strip:get()
-	local at = table.find(list, key)
-	return if at and at > 1 then list[at - 1] else nil
-end
-
-local function rule(key: string): Node
-	return ui.div {
-		absolute = true,
-		left = ui.raw(-TAB_GAP / 2 - 0.5, "in the gap before the tab"),
-		w = 1,
-		top = ui.raw(LINE - 8 - DROP, "option A's 16-point rule, on the lights' line"),
-		bottom = ui.raw(TAB_H + DROP - LINE - 8, "option A's 16-point rule, on the lights' line"),
-		bg = function(): string
-			return frame.strip_token("rule")
-		end,
-		opacity = function(): number
-			local prev = before(key)
-			local sel, over, d = selected_key(), hover_key:get(), drag:get()
-			if not prev or sel == key or sel == prev or over == key or over == prev or d ~= nil then
-				return 0
-			end
-			return 1
-		end,
-	}
-end
-
-local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () -> boolean): { [any]: any }
+local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () -> boolean, tile: (() -> number)?): { [any]: any }
 	props.h = TAB_H
 	props.shrink = 0
 	props.relative = true
-	props.pl = ui.raw(10, "Zeron's tab's start")
-	props.pr = ui.raw(4, "Zeron's tab's end")
-	props.pb = ui.raw(TAB_H - 2 * (LINE - DROP), "on the lights' line")
+	props.pl = props.pl or ui.raw(8, "a tab's start")
+	props.pr = props.pr or ui.raw(4, "a tab's end")
 	props.gap = ui.raw(8, "Zeron's tab's gaps")
 	props.items = "center"
 	props.cursor = "pointer"
+	props.rounded = TAB_RADIUS
 	props.color = function(): string
 		return if active() then "$text.primary" else frame.strip_token("ink")
 	end
@@ -816,38 +872,119 @@ local function tab_box(props: { [any]: any }, active: () -> boolean, washed: () 
 		absolute = true,
 		left = 0,
 		right = 0,
-		top = ui.raw(LINE - 15 - DROP, "option A's 30-point hover pill, on the lights' line"),
-		bottom = ui.raw(TAB_H + DROP - LINE - 15, "option A's 30-point hover pill, on the lights' line"),
-		rounded = "$radius.md",
+		top = 0,
+		bottom = 0,
+		rounded = TAB_RADIUS,
+		border = 1,
 		bg = function(): string
-			return frame.strip_token("hover")
+			return frame.row_token(if active() then "selected" else "hover")
+		end,
+		border_color = function(): string
+			return if active() then frame.row_token("rim") else "#00000000"
 		end,
 		opacity = ui.tween(ui.computed(function(): number
-			return if washed() and not active() then 1 else 0
+			return if washed() or active() then 1 else 0
 		end), { duration = math.max(motion.ms(120), 1), ease = "out(3)" }),
 	})
+	if tile then
+		table.insert(props, 1, ui.div {
+			absolute = true,
+			left = 0,
+			right = 0,
+			top = 0,
+			bottom = 0,
+			rounded = TAB_RADIUS,
+			bg = function(): string
+				return frame.row_token("tile")
+			end,
+			opacity = tile,
+		})
+	end
 	return props
 end
 
-local function menu_items(id: string): { any }
-	local list = shown:peek()
-	local at = table.find(list, id) or 0
-	local items: { any } = {
-		{ label = ui.t("shell.tabs.close"):get(), icon = "close-thin", on_select = function()
-			close(id)
-		end },
+local function unpin_button(id: string): Node
+	return ds.IconButton {
+		id = `session-tab-{id}-unpin`,
+		label = ui.t("shell.tabs.unpin"),
+		tooltip = false,
+		size = "sm",
+		tone = "quiet",
+		w = 16,
+		h = 16,
+		rounded = "$radius.full",
+		bg = "$zeron.menu.solid",
+		on_click = function()
+			splits.pin(id, false)
+		end,
+		ui.div {
+			relative = true,
+			w = 10,
+			h = 10,
+			ds.Icon { name = "pin", size = 10 },
+			ui.div {
+				absolute = true,
+				left = -1,
+				right = -1,
+				top = ui.raw(4.25, "across the pin"),
+				h = ui.raw(1.5, "the strike's stroke"),
+				rounded = "$radius.full",
+				bg = "$text.primary",
+				rotate = 45,
+			},
+		},
 	}
-	if #list > 1 then
+end
+
+local function tile_face(id: string, hovered: any): Node
+	return ui.row {
+		id = `session-tab-{id}-tile`,
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = 0,
+		bottom = 0,
+		items = "center",
+		justify = "center",
+		own_mark(id, PIN_MARK),
+		ui.presence(function(): string
+			return if hovered:get() then "unpin" else tab_state(id) or ""
+		end, function(which: string): Node
+			if which == "" then
+				return ui.div {}
+			elseif which == "unpin" then
+				return ui.div { absolute = true, right = 0, top = 0, unpin_button(id) }
+			end
+			return ui.div { id = `session-tab-{id}-state`, absolute = true, right = 3, top = 3, state_mark(which, 7, true) }
+		end, { absolute = true, left = 0, right = 0, top = 0, bottom = 0 }),
+	}
+end
+
+local function menu_items(id: string): { any }
+	local pinned = splits.is_pinned(id)
+	local items: { any } = {}
+	if pinned or splits.can_pin(id) then
+		table.insert(items, { label = ui.t(if pinned then "shell.tabs.unpin" else "shell.tabs.pin"):get(), icon = "pin", on_select = function()
+			splits.pin(id, not pinned)
+		end })
+		table.insert(items, { separator = true })
+	end
+	if not pinned then
+		table.insert(items, { label = ui.t("shell.tabs.close"):get(), icon = "close-thin", on_select = function()
+			close(id)
+		end })
+	end
+	if #others(id) > 0 then
 		table.insert(items, { label = ui.t("shell.tabs.close_others"):get(), on_select = function()
 			close_many(others(id), id)
 		end })
 	end
-	if at < #list then
+	if #others(id, "right") > 0 then
 		table.insert(items, { label = ui.t("shell.tabs.close_right"):get(), on_select = function()
 			close_many(others(id, "right"), id)
 		end })
 	end
-	if at > 1 then
+	if #others(id, "left") > 0 then
 		table.insert(items, { label = ui.t("shell.tabs.close_left"):get(), on_select = function()
 			close_many(others(id, "left"), id)
 		end })
@@ -860,6 +997,7 @@ local function menu_items(id: string): { any }
 	end
 	return items
 end
+M.menu_items = menu_items
 
 type Lift = { x: number, y: number, gx: number, gy: number, top: number, w: number }
 local function lifted_card(id: string, at: State<Lift?>, t: State<number>): Node
@@ -929,8 +1067,15 @@ local function leave_strip()
 	anime.animate(slot_w, { value = 0, duration = motion.DRAG_SLIDE.duration, ease = motion.DRAG_SLIDE.ease })
 end
 
+local function zone_start(pinned: number): number
+	return pinned * (PIN_W + TAB_GAP) + (if pinned > 0 then PIN_RULE else 0)
+end
 local function slot_left(at: number): number
-	return PAD + (at - 1) * (tab_w:get() + TAB_GAP)
+	local k = pins:get()
+	if at <= k then
+		return PAD + (at - 1) * (PIN_W + TAB_GAP)
+	end
+	return PAD + zone_start(k) + (at - 1 - k) * (tab_w:get() + TAB_GAP)
 end
 
 local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion }): Node
@@ -961,6 +1106,25 @@ local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion
 		end
 		lifting = anime.animate(lift_t, motion.params({ value = if out then 1 else 0, duration = LIFT_MORPH_MS, ease = motion.EASE_OUT }))
 	end)
+	local function pinned(): boolean
+		return splits.is_pinned(id)
+	end
+	local pin_t = ui.use_state(if table.find(splits.pinned:peek(), id) then 1 else 0)
+	local folding: any, folded = nil, pin_t:peek() == 1
+	ui.effect(function()
+		local on = pinned()
+		if on == folded then
+			return
+		end
+		folded = on
+		if folding then
+			folding:cancel()
+		end
+		folding = anime.animate(pin_t, motion.params({ value = if on then 1 else 0, duration = PIN_MS, ease = motion.EASE_OUT }))
+	end)
+	local function fold(from: number, to: number): number
+		return from + (to - from) * pin_t:get()
+	end
 	local row: { [any]: any } = tab_box({
 		id = `session-tab-{id}`,
 		ref = own,
@@ -969,14 +1133,19 @@ local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion
 			return title(id)
 		end,
 		selected = active,
+		tooltip = ui.show(pinned, Tooltip { function(): string
+			return title(id)
+		end }),
+		tooltip_placement = { side = "bottom", align = "center", offset = 6 },
 		w = function(): number
-			return if riding() then slot_w:get() else tab_w:get()
+			return if riding() then slot_w:get() else fold(tab_w:get(), PIN_W)
 		end,
 		opacity = function(): number
 			return if riding() then 0 else 1
 		end,
 		overflow = function(): string
-			return if riding() then "hidden" else "visible"
+			local t = pin_t:get()
+			return if riding() or (t > 0 and t < 1) then "hidden" else "visible"
 		end,
 		on_hover = function(inside: boolean)
 			hovered:set(inside)
@@ -991,7 +1160,7 @@ local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion
 			end
 		end,
 		on_drag = function(): any
-			local w = tab_w:peek()
+			local w = if table.find(splits.pinned:peek(), id) then PIN_W else tab_w:peek()
 			local list = shown:peek()
 			local el = own:peek()
 			local r = if el then ui.window_rect(el) else nil
@@ -1065,27 +1234,58 @@ local Tab = ui.component(function(props: { chat: string, motion: TabStrip.Motion
 		end,
 	}, active, function(): boolean
 		return hovered:get() or held:get()
+	end, function(): number
+		return pin_t:get()
 	end)
 	-- (Its slot closes to nothing: no padding left holding it open.)
 	row.pl = function(): any
-		return ui.raw(if riding() then 0 else 10, "Zeron's tab's start")
+		return ui.raw(if riding() then 0 else fold(8, 0), "a tab's start")
 	end
 	row.pr = function(): any
-		return ui.raw(if riding() then 0 else 4, "Zeron's tab's end")
+		return ui.raw(if riding() then 0 else fold(4, 0), "a tab's end")
 	end
-	table.insert(row, rule(id))
+	local parts: { [any]: any } = {
+		grow = 1,
+		min_w = 0,
+		h_full = true,
+		gap = ui.raw(8, "Zeron's tab's gaps"),
+		items = "center",
+		opacity = function(): number
+			return 1 - math.min(pin_t:get() * 2, 1)
+		end,
+	}
 	for _, part in face_row(id, hovered, active) do
-		table.insert(row, part)
+		table.insert(parts, part)
 	end
+	table.insert(row, ui.show(function(): boolean
+		return pin_t:get() < 1
+	end, ui.row(parts)))
+	table.insert(row, ui.show(function(): boolean
+		return pin_t:get() > 0
+	end, ui.div {
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = 0,
+		bottom = 0,
+		opacity = function(): number
+			return math.clamp(pin_t:get() * 2 - 1, 0, 1)
+		end,
+		tile_face(id, hovered),
+	}))
 	return ContextMenu {
 		label = ui.t("panel.tab.actions"),
 		ring = "$radius.lg",
 		shrink = 0,
+		ml = function(): any
+			local k = pins:get()
+			return ui.raw(if k > 0 and shown:get()[k + 1] == id then PIN_RULE else 0, "the rule's room after the pinned")
+		end,
 		items = function(): { any }
 			return menu_items(id)
 		end,
 		ui.row(props.motion.apply(row, id, function(): number
-			return tab_w:get()
+			return width_of(id)
 		end)),
 	}
 end)
@@ -1119,7 +1319,7 @@ local function draft_menu(key: string): { any }
 	local function others_of(side: string?): { string }
 		local out: { string } = {}
 		for i, other in list do
-			if other ~= tab and (side == nil or (side == "left" and i < at) or (side == "right" and i > at)) then
+			if other ~= tab and not splits.is_pinned(other) and (side == nil or (side == "left" and i < at) or (side == "right" and i > at)) then
 				table.insert(out, other)
 			end
 		end
@@ -1130,17 +1330,17 @@ local function draft_menu(key: string): { any }
 			close_draft(key)
 		end },
 	}
-	if #list > 1 then
+	if #others_of(nil) > 0 then
 		table.insert(items, { label = ui.t("shell.tabs.close_others"):get(), on_select = function()
 			close_tabs(others_of(nil), tab)
 		end })
 	end
-	if at < #list then
+	if #others_of("right") > 0 then
 		table.insert(items, { label = ui.t("shell.tabs.close_right"):get(), on_select = function()
 			close_tabs(others_of("right"), tab)
 		end })
 	end
-	if at > 1 then
+	if #others_of("left") > 0 then
 		table.insert(items, { label = ui.t("shell.tabs.close_left"):get(), on_select = function()
 			close_tabs(others_of("left"), tab)
 		end })
@@ -1190,7 +1390,6 @@ local DraftTab = ui.component(function(props: { key: string }): Node
 					close()
 				end
 			end,
-			rule(tab),
 			ui.div { shrink = 0, color = "$warning", ds.Icon { name = "pen", size = 13 } },
 			ds.FadeText { ui.t("shell.tabs.new_session"), grow = 1, min_w = 0, text_size = TITLE_SIZE },
 			ui.row {
@@ -1209,7 +1408,7 @@ local DraftTab = ui.component(function(props: { key: string }): Node
 	}
 end)
 
-function M.Strip(props: { window_x: () -> number, start: () -> number, right: () -> number, hidden: (() -> boolean)? }): Node
+function M.Strip(props: { window_x: () -> number, start: () -> number, right: () -> number, card_right: () -> number, hidden: (() -> boolean)? }): Node
 	-- Each edge fades in full as soon as tabs run a little past it: a band only
 	-- as wide as the overflow (`fade_overflow`) is a hard edge while that's a
 	-- few points. Over the last few, as the end comes to rest, it goes.
@@ -1223,13 +1422,17 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 	local function slots(): number
 		return #strip:get()
 	end
+	local function slot_w_at(at: number): number
+		return if at <= pins:get() then PIN_W else tab_w:get()
+	end
 	ui.effect(function()
 		local room = view.width or 0
-		local count = math.max(slots(), 1)
+		local k = pins:get()
+		local count = math.max(slots() - k, 1)
 		if drag:get() or room <= 0 then
 			return
 		end
-		local w = math.clamp((room - PAD * 2 - TAB_GAP * (count - 1)) / count, TAB_MIN, TAB_MAX)
+		local w = math.clamp((room - PAD * 2 - zone_start(k) - TAB_GAP * (count - 1)) / count, TAB_MIN, TAB_MAX)
 		if tab_w:peek() ~= w then
 			tab_w:set(w)
 		end
@@ -1244,11 +1447,12 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 	ui.effect(function()
 		local at_slot = showing_at()
 		local room = view.width or 0
-		local w = tab_w:get()
+		local n = slots()
 		if not at_slot or room <= 0 or drag:peek() then
 			return
 		end
-		local total = PAD * 2 + slots() * w + (slots() - 1) * TAB_GAP
+		local w = slot_w_at(at_slot)
+		local total = slot_left(n) + slot_w_at(n) + PAD
 		local left = slot_left(at_slot)
 		local right = left + w
 		local at = offset:peek()
@@ -1267,49 +1471,37 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		end
 	end)
 	local start = props.start
-	local function dragging_selected(): boolean
-		local d = drag:get()
-		return d ~= nil and d.key == selected_key()
-	end
 	local cut_params: { [any]: { [string]: number } } = {}
 	ui.effect(function()
-		local els = { art.strip:get(), art.tab:get() }
-		if next(els) == nil then
-			return
+		local room = view.width or 0
+		local hidden = props.hidden ~= nil and props.hidden()
+		local a = start() - (1 - top_bar.reveal()) * WALL_SWEEP
+		local b = start() + room
+		local left = not hidden and room > 0 and a - frame.NOTCH_FLARE > art.card_left:get()
+		local right = not hidden and room > 0 and b + frame.NOTCH_FLARE < props.card_right()
+		local x0, x1 = if left then a else -NO_WALL, if right then b else NO_WALL
+		local was = art.notch:peek()
+		if was.x0 ~= x0 or was.x1 ~= x1 or was.left ~= left or was.right ~= right then
+			art.notch:set({ x0 = x0, x1 = x1, left = left, right = right })
 		end
-		local want: { [string]: number } = {}
-		local at = start()
-		local from = at - offset:get()
-		local here = if props.hidden and props.hidden() then nil else showing_at()
-		local d = drag:get()
-		local fades = bands()
-		if here ~= nil and not dragging_selected() then
-			want.layerParam0 = from + slot_left(here :: number) - FOOT
-			want.layerParam1 = tab_w:get() + FOOT * 2
-		end
-		if d ~= nil and not d.out then
-			want.layerParam2 = from + rider_x:get() - FOOT
-			want.layerParam3 = (d :: Drag).w + FOOT * 2
-		end
-		want.layerParam4 = at
-		want.layerParam5 = at + (view.width or 0)
-		want.layerParam6 = ds.TitleBar.middle() - BAR / 2 + DROP
-		want.layerParam8 = fades[1]
-		want.layerParam9 = fades[2]
+		local want: { [string]: number } = { layerParam0 = x0, layerParam1 = x1, layerParam2 = frame.band_top(), layerParam3 = BAR }
 		local seen: { [any]: { [string]: number } } = {}
-		for _, el in els do
-			local had = cut_params[el] or {}
-			seen[el] = had
-			local changed: { [string]: number } = {}
-			for _, key in SHADE_PARAMS do
-				local v = want[key] or 0
-				if had[key] ~= v then
-					had[key] = v
-					changed[key] = v
+		for _, ref in { art.strip, art.tab, art.edge } do
+			local el = ref:get()
+			if el then
+				local had = cut_params[el] or {}
+				seen[el] = had
+				local changed: { [string]: number } = {}
+				for _, key in SHADE_PARAMS do
+					local v = want[key]
+					if had[key] ~= v then
+						had[key] = v
+						changed[key] = v
+					end
 				end
-			end
-			if next(changed) then
-				anime.utils.set(el, changed)
+				if next(changed) then
+					anime.utils.set(el, changed)
+				end
 			end
 		end
 		cut_params = seen
@@ -1326,11 +1518,16 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		if not d then
 			return
 		end
-		local x = e.x - start() + offset:peek() - PAD
 		local list = shown:peek()
+		local k = pins:peek()
+		local pinned = table.find(splits.pinned:peek(), d.key) ~= nil
+		local first = if pinned then 1 else k + 1
+		local count = if pinned then k else #list - k
+		local origin = if pinned then 0 else zone_start(k)
+		local x = e.x - start() + offset:peek() - PAD - origin
 		local slot = d.w + TAB_GAP
 		if d.grab == nil or d.out then
-			local at = table.find(list, d.key) or 1
+			local at = (table.find(list, d.key) or first) - first + 1
 			local again = table.clone(d)
 			again.grab = if d.grab == nil then x - (at - 1) * slot else d.grab
 			again.out = false
@@ -1338,11 +1535,15 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 			d = again
 			anime.animate(slot_w, { value = d.w, duration = motion.DRAG_SLIDE.duration, ease = motion.DRAG_SLIDE.ease })
 		end
-		rider_x:set(PAD + math.clamp(x - (d.grab :: number), -6, (#list - 1) * slot + 6))
-		local to = math.clamp(math.floor(x / slot) + 1, 1, #list)
+		rider_x:set(PAD + origin + math.clamp(x - (d.grab :: number), -6, (count - 1) * slot + 6))
+		local to = first + math.clamp(math.floor(x / slot) + 1, 1, count) - 1
 		if list[to] ~= d.key then
 			splits.move_tab(d.key, list[to])
 		end
+	end
+	local function ruled(): boolean
+		local k = pins:get()
+		return k > 0 and slots() > k
 	end
 	-- From the window's left whatever the sidebar is doing, so they stay put as
 	-- it moves. (Only the tabs' own part takes the pointer.)
@@ -1389,8 +1590,24 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 					ref = content,
 					relative = true,
 					h_full = true,
-					px = ui.raw(PAD, "room for a selected tab's feet"),
+					px = ui.raw(PAD, "the notch's room round its tabs"),
 					pt = ui.raw(DROP, "a tab stands on the bar's line"),
+					ui.div {
+						id = "session-tabs-rule",
+						absolute = true,
+						left = function(): number
+							return ui.raw(PAD + pins:get() * (PIN_W + TAB_GAP) + (PIN_RULE - TAB_GAP) / 2 - 0.5, "between the pinned and the rest")
+						end,
+						top = ui.raw(DROP + (TAB_H - 18) / 2, "the rule after the pinned"),
+						w = 1,
+						h = 18,
+						bg = function(): string
+							return frame.row_token("rule")
+						end,
+						opacity = ui.tween(ui.computed(function(): number
+							return if ruled() and drag:get() == nil then 1 else 0
+						end), { duration = math.max(motion.ms(120), 1), ease = "out(3)" }),
+					},
 					ui.row {
 						-- (An empty `ui.each` still takes 16 points.)
 						w = function(): any
@@ -1413,7 +1630,9 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 							return if #drafts:get() == 0 then 0 else nil
 						end,
 						ml = function(): any
-							return ui.raw(if #shown:get() > 0 and #drafts:get() > 0 then TAB_GAP else 0, "Zeron's gap between tabs")
+							local both = #shown:get() > 0 and #drafts:get() > 0
+							local after_pins = both and pins:get() == #shown:get()
+							return ui.raw((if both then TAB_GAP else 0) + (if after_pins then PIN_RULE else 0), "Zeron's gap between tabs")
 						end,
 						shrink = 0,
 						ui.each(drafts, function(key: string): Node
@@ -1439,17 +1658,28 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 						local function always(): boolean
 							return true
 						end
+						local pinned = table.find(splits.pinned:peek(), id) ~= nil
 						local rider: { [any]: any } = tab_box({
 							w = function(): number
 								local d = drag:get()
-								return if d then d.w else tab_w:peek()
+								return if d then d.w else width_of(id)
 							end,
+							pl = if pinned then 0 else nil,
+							pr = if pinned then 0 else nil,
 							overflow = "visible",
 						}, always, function(): boolean
 							return false
-						end)
-						for _, part in face_row(id, rider_hover, always) do
-							table.insert(rider, part)
+						end, if pinned
+							then function(): number
+								return 1
+							end
+							else nil)
+						if pinned then
+							table.insert(rider, tile_face(id, rider_hover))
+						else
+							for _, part in face_row(id, rider_hover, always) do
+								table.insert(rider, part)
+							end
 						end
 						return ui.div {
 							id = "session-tab-rider",
@@ -1486,5 +1716,8 @@ function M.Strip(props: { window_x: () -> number, start: () -> number, right: ()
 		}),
 	}
 end
+
+M.chat_of = chat_of
+M.close = close
 
 return M
